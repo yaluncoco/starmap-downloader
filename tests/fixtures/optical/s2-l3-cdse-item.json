@@ -1,0 +1,143 @@
+{
+  "type": "Feature",
+  "id": "Sentinel-2_mosaic_2024_Q2_50TMK_0_0",
+  "collection": "sentinel-2-global-mosaics",
+  "bbox": [
+    115.8168273934113,
+    39.743314201300024,
+    117.00047312778298,
+    40.650856513723205
+  ],
+  "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+      [
+        [
+          115.83239351998944,
+          39.743314201300024
+        ],
+        [
+          117.00046690145567,
+          39.749186701850704
+        ],
+        [
+          117.00047312778298,
+          40.650856513723205
+        ],
+        [
+          115.8168273934113,
+          40.64479480290046
+        ],
+        [
+          115.83239351998944,
+          39.743314201300024
+        ]
+      ]
+    ]
+  },
+  "properties": {
+    "gsd": 10,
+    "datetime": "2024-04-01T00:00:00Z",
+    "grid:code": "MGRS-50TMK",
+    "proj:code": "EPSG:32650",
+    "end_datetime": "2024-06-30T23:59:59Z",
+    "product:type": "S2MSI_L3__MCQ",
+    "constellation": "sentinel-2",
+    "start_datetime": "2024-04-01T00:00:00Z",
+    "processing:level": "L3"
+  },
+  "assets": {
+    "B02": {
+      "href": "s3://eodata/Global-Mosaics/Sentinel-2/S2MSI_L3__MCQ/2024/04/01/Sentinel-2_mosaic_2024_Q2_50TMK_0_0/B02.tif",
+      "roles": [
+        "data"
+      ],
+      "type": "image/tiff; application=geotiff; profile=cloud-optimized",
+      "file:size": 183576560,
+      "proj:shape": [
+        10008,
+        10008
+      ],
+      "proj:transform": [
+        10.0,
+        0.0,
+        399960.0,
+        0.0,
+        -10.0,
+        4500000.0
+      ],
+      "gsd": 10,
+      "data_type": "int16",
+      "nodata": -32768
+    },
+    "B03": {
+      "href": "s3://eodata/Global-Mosaics/Sentinel-2/S2MSI_L3__MCQ/2024/04/01/Sentinel-2_mosaic_2024_Q2_50TMK_0_0/B03.tif",
+      "roles": [
+        "data"
+      ],
+      "type": "image/tiff; application=geotiff; profile=cloud-optimized",
+      "file:size": 186730953,
+      "proj:shape": [
+        10008,
+        10008
+      ],
+      "proj:transform": [
+        10.0,
+        0.0,
+        399960.0,
+        0.0,
+        -10.0,
+        4500000.0
+      ],
+      "gsd": 10,
+      "data_type": "int16",
+      "nodata": -32768
+    },
+    "B04": {
+      "href": "s3://eodata/Global-Mosaics/Sentinel-2/S2MSI_L3__MCQ/2024/04/01/Sentinel-2_mosaic_2024_Q2_50TMK_0_0/B04.tif",
+      "roles": [
+        "data"
+      ],
+      "type": "image/tiff; application=geotiff; profile=cloud-optimized",
+      "file:size": 190363446,
+      "proj:shape": [
+        10008,
+        10008
+      ],
+      "proj:transform": [
+        10.0,
+        0.0,
+        399960.0,
+        0.0,
+        -10.0,
+        4500000.0
+      ],
+      "gsd": 10,
+      "data_type": "int16",
+      "nodata": -32768
+    },
+    "B08": {
+      "href": "s3://eodata/Global-Mosaics/Sentinel-2/S2MSI_L3__MCQ/2024/04/01/Sentinel-2_mosaic_2024_Q2_50TMK_0_0/B08.tif",
+      "roles": [
+        "data"
+      ],
+      "type": "image/tiff; application=geotiff; profile=cloud-optimized",
+      "file:size": 201591938,
+      "proj:shape": [
+        10008,
+        10008
+      ],
+      "proj:transform": [
+        10.0,
+        0.0,
+        399960.0,
+        0.0,
+        -10.0,
+        4500000.0
+      ],
+      "gsd": 10,
+      "data_type": "int16",
+      "nodata": -32768
+    }
+  }
+}

@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+.pytest_cache/
+/build/
+/dist/
+/verification/
+*.log
+*.partial.tif
+*.part
+*.local.json
+preferences.json
+update-channel.json
+.env
+.env.*
+*.key
+*.pem
+*.pfx

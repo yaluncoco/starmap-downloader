@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="app-token" content="__SESSION_TOKEN__">
+  <title>星图影像下载器</title>
+  <link rel="stylesheet" href="vendor/leaflet/leaflet.css">
+  <link rel="stylesheet" href="vendor/leaflet-draw/leaflet.draw.css">
+  <link rel="stylesheet" href="styles.css">
+  <script src="vendor/leaflet/leaflet.js" defer></script>
+  <script src="vendor/leaflet-draw/leaflet.draw.js" defer></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <svg class="svg-library" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+    <symbol id="i-satellite" viewBox="0 0 24 24"><path d="m15 3 6 6-3 3-6-6zM3 15l6 6 3-3-6-6zM8 8l8 8M5 5l3 3m8 8 3 3M9 7l8 8-4 4-8-8z"/><path d="M17 2a5 5 0 0 1 5 5M14 3a7 7 0 0 1 7 7"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M7 17 17 7M7 7h10v10"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 6a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+    <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 16V3m-5 5 5-5 5 5M4 16v4h16v-4"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v13m-5-5 5 5 5-5M4 17v4h16v-4"/></symbol>
+    <symbol id="i-rect" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="1"/><path d="M4 3v4m-2-2h4m14-2v4m-2-2h4M4 17v4m-2-2h4m14-2v4m-2-2h4"/></symbol>
+    <symbol id="i-poly" viewBox="0 0 24 24"><path d="m5 4 14 3 1 11-12 3-5-9z"/><circle cx="5" cy="4" r="1.5"/><circle cx="19" cy="7" r="1.5"/><circle cx="20" cy="18" r="1.5"/><circle cx="8" cy="21" r="1.5"/><circle cx="3" cy="12" r="1.5"/></symbol>
+    <symbol id="i-edit" viewBox="0 0 24 24"><path d="m4 16 12-12 4 4L8 20H4zM14 6l4 4"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7"/></symbol>
+    <symbol id="i-target" viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+    <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+    <symbol id="i-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 0 1 5 0c0 2-2.5 2-2.5 4m0 3h.01"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 10v7m0-10h.01"/></symbol>
+    <symbol id="i-cloud" viewBox="0 0 24 24"><path d="M7 18a5 5 0 1 1 1-10 6 6 0 0 1 11 3 3.5 3.5 0 0 1 0 7z"/></symbol>
+    <symbol id="i-layers" viewBox="0 0 24 24"><path d="m3 8 9-5 9 5-9 5zM3 12l9 5 9-5M3 16l9 5 9-5"/></symbol>
+    <symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="8" r="5"/><path d="m12 12 9 9m-3-3 3-3m-6 0 3-3"/></symbol>
+  </svg>
+
+  <header class="app-header">
+    <div class="brand"><span class="brand-mark"><svg class="icon"><use href="#i-satellite"/></svg></span><div><h1>星图影像下载器</h1><span class="brand-sub">COPERNICUS DATA SPACE</span></div></div>
+    <div class="header-middle"><span class="dataset-dot"></span><span id="headerDataset">Sentinel-2 L2A</span><span class="header-divider"></span><span id="headerSource" class="subtle">Sentinel Hub · 区域下载</span></div>
+    <div class="header-actions"><span id="connectionStatus" class="connection-state"><i></i><span>尚未连接 API</span></span><button class="button button-outline" id="updateButton" type="button" disabled>检查更新</button><button class="icon-button" id="helpButton" title="使用帮助" aria-label="使用帮助"><svg class="icon"><use href="#i-help"/></svg></button></div>
+  </header>
+
+  <main class="app-layout">
+    <aside class="sidebar">
+      <div class="sidebar-scroll">
+        <section class="step-section">
+          <div class="section-heading"><span class="step-number">01</span><h2>影像与时间</h2></div>
+          <label for="sourceProfile">数据来源与下载方式</label>
+          <select id="sourceProfile" data-lock>
+            <option value="s2-process">Sentinel-2 L2A · Sentinel Hub 区域裁剪</option>
+            <option value="s2-earth-search">Sentinel-2 L2A · 公开区域裁剪（免密钥）</option>
+            <option value="s2-l2a-cog">Sentinel-2 L2A · 整瓦片 COG（免密钥）</option>
+            <option value="s2-l3-quarterly">Sentinel-2 L3 · 季度镶嵌 COG（公开镜像）</option>
+            <option value="s2-l1c-aws">Sentinel-2 L1C · 原始 JP2（免密钥）</option>
+            <option value="landsat-pc-l2">Landsat Collection 2 L2 · 原始文件（免密钥）</option>
+            <option value="s1-aws-original">Sentinel-1 GRD · 公开雷达文件（免密钥）</option>
+            <option value="s1-slc-seasia">Sentinel-1 IW SLC · 东南亚历史 SAFE ZIP（免密钥）</option>
+            <option value="s1-rtc-pc">Sentinel-1 RTC · 雷达区域 GeoTIFF</option>
+            <option value="sen3-aws-original">Sentinel-3 · 原始 SEN3 和 NetCDF（免密钥）</option>
+            <option value="s5p-aws-l2">Sentinel-5P L2 · 大气观测 NetCDF（免密钥）</option>
+            <optgroup label="ESA WorldCover · 2020 / 2021 · 免密钥">
+              <option value="worldcover-s2">Sentinel-2 年度合成 · RGBNIR / NDVI / SWIR</option>
+              <option value="worldcover-s1">Sentinel-1 年度合成 · Gamma0</option>
+              <option value="worldcover-map">土地覆盖分类 · 10 米</option>
+            </optgroup>
+            <optgroup label="NASA MODIS · Collection 6.1 · 免个人密钥">
+              <option value="modis-13Q1-061">植被指数 · NDVI/EVI · 13Q1</option>
+              <option value="modis-09Q1-061">地表反射率 · 红光/近红外 · 09Q1</option>
+              <option value="modis-11A2-061">地表温度 · 昼/夜 · 11A2</option>
+              <option value="modis-15A2H-061">叶面积指数 / FPAR · 15A2H</option>
+              <option value="modis-43A4-061">天底归一化反射率 · NBAR · 43A4</option>
+            </optgroup>
+            <option value="dem-30">Copernicus DEM 30 米 · 裁剪或整瓦片</option>
+            <option value="dem-90">Copernicus DEM 90 米 · 裁剪或整瓦片</option>
+            <option value="cdse-original">Copernicus 官方目录 · 下载原始产品</option>
+          </select>
+          <p id="sourceDescription" class="field-note"></p>
+          <p id="worldcoverInfo" class="field-note" hidden>日期与 2020/2021 年度区间有重叠即匹配，不代表该天过境。<button id="worldcoverDocs" class="inline-link" type="button">查看 ESA 数据说明与许可</button></p>
+          <p id="modisInfo" class="field-note" hidden><span id="modisDateNote"></span> <button id="modisDocs" class="inline-link" type="button">查看所选 MODIS 类别说明</button></p>
+          <p id="slcInfo" class="field-note" hidden>按采集起始的 UTC 日筛选。存档日期 2014-10-06 至 2024-04-04（并非连续或全球覆盖）。每次最多检索 62 个存档日。只下载完整 SAFE ZIP，每景可能有数 GB。</p>
+          <div id="rawCollectionFields" hidden>
+            <div class="label-row"><label for="collectionFilter">影像类别</label><button id="refreshCollections" class="inline-link" type="button" data-lock>刷新目录</button></div>
+            <input id="collectionFilter" type="search" placeholder="筛选类别，如 Sentinel-1、OLCI、NO2" autocomplete="off" data-lock>
+            <label class="sr-only" for="rawCollection">选择官方影像类别</label><select id="rawCollection" data-lock><option value="">正在加载官方目录…</option></select>
+            <p id="collectionsStatus" class="field-note" aria-live="polite"></p>
+            <label class="checkbox-label"><input type="checkbox" id="allDates" data-lock>不按采集日期筛选（适用于静态数据）</label>
+          </div>
+          <div id="sen3CollectionFields" hidden>
+            <label for="sen3Collection">传感器、产品与处理流</label>
+            <select id="sen3Collection" data-lock><option value="">正在载入…</option></select>
+            <p class="field-note">NTC：非实时；NRT：近实时。研究区和 UTC 日期只筛选产品，不裁剪。完整 SEN3 保留清单及全部原始成员，不包含预览图。</p>
+          </div>
+          <div id="s5pCollectionFields" hidden>
+            <label for="s5pCollection">大气变量与处理流</label>
+            <select id="s5pCollection" data-lock><option value="">正在载入…</option></select>
+            <p class="field-note">OFFL：离线；NRTI：近实时；RPRO：历史再处理。日期按 UTC。研究区只筛选条带，不裁剪；相交不代表有通过质量筛选的观测。</p>
+          </div>
+          <div id="radarModeField" hidden><label for="radarMode">雷达成像模式</label><select id="radarMode" data-lock><option value="">全部模式</option><option value="IW">IW · 干涉宽幅</option><option value="EW">EW · 超宽幅</option><option value="SM">SM · 条带</option><option value="WV">WV · 波模式</option></select></div>
+          <div id="dateFields" class="two-columns date-fields"><div><label for="startDate">开始日期</label><input id="startDate" type="date" data-lock></div><div><label for="endDate">结束日期</label><input id="endDate" type="date" data-lock></div></div>
+          <div id="cloudOptions">
+          <div class="label-row"><label for="maxCloud">整景云量上限</label><span id="cloudValue" class="value-pill">20%</span></div>
+          <input id="maxCloud" type="range" min="0" max="100" value="20" step="1" data-lock>
+          <div class="range-labels"><span>晴空优先</span><span>包含多云影像</span></div>
+          </div>
+          <div id="opticalOptions">
+          <label for="imageMode">导出内容</label>
+          <select id="imageMode" data-lock><option value="rgbnir">RGB + 近红外 · 4 波段反射率</option><option value="rgb">自然色 · 8 位浏览图</option><option value="all">全部 12 波段 · 反射率</option><option value="ndvi">NDVI · 植被指数</option><option value="custom">自选波段 · 反射率</option></select>
+          <div id="customBands" class="band-grid" hidden></div>
+          <p id="modeDescription" class="field-note">B04 / B03 / B02 / B08，Float32，适合定量分析。</p>
+          <div class="two-columns output-options"><div><label for="resolution">输出像元大小</label><select id="resolution" data-lock><option value="10">10 米</option><option value="20">20 米</option><option value="60">60 米</option></select></div><div class="format-field"><label>文件格式</label><div class="format-value"><svg class="icon"><use href="#i-layers"/></svg>GeoTIFF <span>.tif</span></div></div></div>
+          <label class="checkbox-label"><input type="checkbox" id="maskClouds" checked data-lock><span>去除云、薄云和云阴影像元</span></label>
+          <p class="field-note compact">日期边界和采集时间均按 UTC；云量为原始瓦片估计。</p>
+          </div>
+          <div id="rtcOptions" hidden>
+            <label>导出的雷达极化</label>
+            <div id="rtcBands" class="band-grid" role="group" aria-label="雷达极化">
+              <label class="band-choice"><input type="checkbox" value="VV" checked data-lock>VV</label>
+              <label class="band-choice"><input type="checkbox" value="VH" data-lock>VH</label>
+              <label class="band-choice"><input type="checkbox" value="HH" data-lock>HH</label>
+              <label class="band-choice"><input type="checkbox" value="HV" data-lock>HV</label>
+            </div>
+            <p class="field-note compact" id="rtcBandAvailability" aria-live="polite">选中影像后会显示各景共有的极化。</p>
+            <label for="rtcResolution">输出像元大小</label>
+            <select id="rtcResolution" data-lock><option value="10">10 米</option><option value="20">20 米</option><option value="40">40 米</option><option value="60">60 米</option></select>
+            <p class="field-note">查看结果中的实际极化。输出为线性 γ⁰、Float32 GeoTIFF；不用光学云掩膜。所选像元大小不改变源影像的实际分辨能力。</p>
+          </div>
+          <div id="demOptions" hidden>
+            <label for="demMode">下载内容</label>
+            <select id="demMode" data-lock><option value="dem">按研究区裁剪 GeoTIFF</option><option value="original">完整原始瓦片（不重采样）</option></select>
+            <p class="field-note" id="demModeNote">每个所选瓦片独立裁剪。</p>
+          </div>
+          <div id="rawOptions" hidden>
+            <div id="rawTransportField" hidden>
+              <label for="rawTransport">原始产品下载通道</label>
+              <select id="rawTransport" data-lock><option value="auto">按目录自动选择（优先 OData）</option><option value="odata">仅 CDSE OData</option><option value="cdse-s3">仅 CDSE S3</option></select>
+              <p class="field-note">计划会列出所需凭据。不跨产品替换，也不在下载失败时切换通道。</p>
+            </div>
+            <label for="rawMode">下载内容</label>
+            <select id="rawMode" data-lock><option id="rawWholeProduct" value="original">整包或官方单主文件（不裁剪）</option><option id="rawMetadataOnly" value="metadata">每个产品的一份元数据</option><option value="asset">指定一个文件</option><option value="assets">勾选多个文件（同一产品）</option></select>
+            <div id="rawAssetField" hidden><label for="rawAsset">指定文件（仅选一个产品）</label><select id="rawAsset" data-lock><option value="">先在结果中单选产品</option></select></div>
+            <div id="rawMultiField" hidden>
+              <label for="rawFileFilter">从所选产品中筛选文件</label><input id="rawFileFilter" type="search" placeholder="如 B04、qa_pixel、元数据文件名" autocomplete="off" data-lock>
+              <p id="rawMultiCount" class="field-note" aria-live="polite">先在结果中单选产品。</p>
+              <div id="rawMultiAssets" class="asset-checklist" role="group" aria-label="原始文件列表"></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="step-section credentials-section">
+          <div class="section-heading"><span class="step-number">02</span><h2>访问权限</h2><span id="authTag" class="section-tag">OAuth</span></div>
+          <div id="processAuth">
+          <div id="authFields">
+          <p class="section-description">使用你的 Copernicus 客户端凭据。</p>
+          <button id="getKeyButton" class="button credential-link"><svg class="icon"><use href="#i-key"/></svg>获取 API 凭据<svg class="icon icon-small"><use href="#i-arrow"/></svg></button>
+          <p class="credential-instruction">官方页面 → User Settings → OAuth clients → Create <button class="inline-link" id="registerButton">注册账号 ↗</button></p>
+          <label for="clientId">Client ID</label>
+          <input id="clientId" type="text" placeholder="sh-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" autocomplete="off" spellcheck="false" data-lock>
+          <label for="clientSecret">Client Secret</label>
+          <div class="input-with-action"><input id="clientSecret" type="password" placeholder="粘贴创建客户端时显示的 Secret" autocomplete="off" spellcheck="false" data-lock><button id="toggleSecret" class="icon-button" title="显示或隐藏 Secret" aria-label="显示或隐藏 Secret"><svg class="icon"><use href="#i-eye"/></svg></button></div>
+          <div id="authError" class="inline-error" role="alert" hidden></div>
+          <button id="connectButton" class="button button-dark full-width" data-lock><svg class="icon"><use href="#i-check"/></svg><span>验证并连接</span></button>
+          </div>
+          <div id="connectedPanel" class="connected-panel" hidden><span><svg class="icon"><use href="#i-check"/></svg>已连接 · 凭据仅本次运行有效</span><button id="disconnectButton" class="inline-link" data-lock>更换</button></div>
+          </div>
+          <p id="publicAuth" class="section-description" hidden>无需登录。下载选定的开放数据，不消耗 Sentinel Hub 处理额度。</p>
+          <div id="rawAuth" hidden>
+            <p class="section-description">检索无需登录。OData 与 S3 使用各自的凭据，不使用 Sentinel Hub Client Secret。</p>
+            <details id="rawODataAccess" class="access-details" open>
+              <summary>OData · 账号或访问令牌</summary>
+            <div id="rawAuthFields">
+              <label for="rawLoginMode">连接方式</label><select id="rawLoginMode" data-lock><option value="account">CDSE 登录邮箱和密码</option><option value="token">临时访问令牌</option></select>
+              <div id="rawAccountFields">
+                <label for="rawUsername">登录邮箱</label><input id="rawUsername" type="email" autocomplete="off" data-lock>
+                <label for="rawPassword">密码</label><input id="rawPassword" type="password" autocomplete="off" data-lock>
+                <label for="rawTotp">两步验证码（仅启用时填写）</label><input id="rawTotp" type="password" maxlength="6" inputmode="numeric" autocomplete="off" data-lock>
+              </div>
+              <div id="rawTokenField" hidden><label for="rawToken">临时访问令牌</label><input id="rawToken" type="password" autocomplete="off" spellcheck="false" data-lock></div>
+              <button id="rawConnect" class="button button-dark full-width" type="button" data-lock>连接原始产品下载</button>
+            </div>
+            <div id="rawConnectedPanel" class="connected-panel" hidden><span id="rawAuthState">本次运行已连接</span><button id="rawDisconnect" class="inline-link" data-lock>更换</button></div>
+            <p class="field-note"><button id="rawAuthDocs" class="inline-link" type="button">官方认证说明 ↗</button> · 密码和令牌不落盘。</p>
+            </details>
+            <details id="s3Access" class="access-details">
+              <summary>S3 · Access Key 和 Secret Key</summary>
+              <div id="s3AuthFields">
+                <button id="getS3KeyButton" class="button credential-link" type="button" data-lock><svg class="icon"><use href="#i-key"/></svg>打开 CDSE S3 Keys Manager ↗</button>
+                <label for="s3AccessKey">Access Key</label><input id="s3AccessKey" type="text" autocomplete="off" spellcheck="false" maxlength="128" data-lock>
+                <label for="s3SecretKey">Secret Key</label><input id="s3SecretKey" type="password" autocomplete="off" spellcheck="false" maxlength="256" data-lock>
+                <button id="s3Connect" class="button button-dark full-width" type="button" data-lock>载入 S3 密钥</button>
+              </div>
+              <div id="s3ConnectedPanel" class="connected-panel" hidden><span>密钥已载入 · 下载时验证</span><button id="s3Disconnect" class="inline-link" type="button" data-lock>移除</button></div>
+              <p class="field-note"><button id="s3AuthDocs" class="inline-link" type="button">官方 S3 说明 ↗</button> · 两个密钥都仅保存在内存中。</p>
+            </details>
+          </div>
+        </section>
+
+        <section class="step-section aoi-section">
+          <div class="section-heading"><span class="step-number">03</span><h2>研究区域</h2><button id="fitAoi" class="inline-link" disabled>定位边界</button></div>
+          <div class="segmented" id="aoiTabs"><button class="active" data-tab="map" data-lock>地图绘制</button><button data-tab="import" data-lock>导入边界</button><button data-tab="coordinates" data-lock>输入坐标</button></div>
+          <div id="tab-map" class="aoi-tab"><p class="field-note">搜索地点后，在地图上画矩形或多边形。</p><div class="drawing-actions"><button id="drawRectangle" class="button button-outline" data-lock><svg class="icon"><use href="#i-rect"/></svg>画矩形</button><button id="drawPolygon" class="button button-outline" data-lock><svg class="icon"><use href="#i-poly"/></svg>画多边形</button></div></div>
+          <div id="tab-import" class="aoi-tab" hidden><button id="importBoundary" class="upload-area" data-lock><svg class="icon"><use href="#i-upload"/></svg><strong>选择 SHP / GeoJSON</strong><span>SHP 的 .shp、.shx、.dbf、.prj 放在同一目录</span></button><label for="sourceCrs">源坐标系 <span class="optional">可手动覆盖 .prj</span></label><input id="sourceCrs" placeholder="自动读取 .prj；也可填 EPSG:4326" data-lock><p id="importFileName" class="field-note"></p></div>
+          <div id="tab-coordinates" class="aoi-tab" hidden><label for="coordinates">经度在前、纬度在后 · WGS84</label><textarea id="coordinates" rows="4" placeholder="116.20,39.80&#10;116.30,39.80&#10;116.30,39.90&#10;116.20,39.90" spellcheck="false" data-lock></textarea><p class="field-note">每行一个点，自动闭合。也支持单行：西、南、东、北。</p><button id="applyCoordinates" class="button button-outline full-width" data-lock><svg class="icon"><use href="#i-target"/></svg>应用坐标并定位</button></div>
+          <div id="aoiSummary" class="aoi-summary empty"><span class="aoi-status-dot"></span><div><strong id="aoiName">尚未设置研究区</strong><span id="aoiStats">地图绘制、导入边界或填写坐标</span></div><button id="clearAoi" class="icon-button" title="清除研究区" aria-label="清除研究区" disabled data-lock><svg class="icon"><use href="#i-trash"/></svg></button></div>
+        </section>
+
+        <section class="step-section destination-section">
+          <div class="section-heading"><span class="step-number">04</span><h2>保存位置</h2></div>
+          <label for="outputDirectory">输出文件夹</label><div class="folder-input"><input id="outputDirectory" placeholder="选择本地文件夹" spellcheck="false" data-lock><button id="chooseFolder" class="icon-button" title="选择保存文件夹" aria-label="选择保存文件夹" data-lock><svg class="icon"><use href="#i-folder"/></svg></button></div>
+          <p class="field-note">可在确认下载时更改。原始文件保留源数据范围。</p>
+        </section>
+      </div>
+      <div class="sidebar-footer"><button id="searchScenes" class="button button-primary full-width" disabled data-lock><svg class="icon"><use href="#i-search"/></svg><span>查找可下载影像</span></button><p>先选研究区，再选择实际过境影像。</p></div>
+    </aside>
+
+    <section class="workspace">
+      <div class="map-panel">
+        <div id="map" aria-label="研究区域地图"></div>
+        <div id="mapOffline" class="map-offline" hidden><svg class="icon"><use href="#i-info"/></svg><span>底图暂时无法加载，坐标和边界下载功能仍可使用。</span></div>
+        <form id="placeSearchForm" class="place-search"><svg class="icon"><use href="#i-search"/></svg><input id="placeQuery" placeholder="搜索城市、县区或地点，例如：平原县" autocomplete="off" aria-label="搜索地点"><button type="submit" id="placeSearchButton">搜索</button><div id="placeResults" class="place-results" hidden></div></form>
+        <div class="map-tools"><button id="mapDrawRectangle" class="icon-button" title="画矩形" aria-label="在地图上画矩形"><svg class="icon"><use href="#i-rect"/></svg></button><button id="mapDrawPolygon" class="icon-button" title="画多边形" aria-label="在地图上画多边形"><svg class="icon"><use href="#i-poly"/></svg></button><span class="tool-divider"></span><button id="editBoundary" class="icon-button" title="编辑边界，完成后再点击一次" aria-label="编辑边界"><svg class="icon"><use href="#i-edit"/></svg></button><button id="mapFitAoi" class="icon-button" title="定位研究区" aria-label="定位研究区"><svg class="icon"><use href="#i-target"/></svg></button></div>
+        <div class="map-top-right"><button id="exportBoundary" class="button map-white-button" disabled data-lock><svg class="icon"><use href="#i-download"/></svg>导出边界</button></div>
+        <div class="map-bottom-left"><span id="mapAoiBadge" class="map-badge"><i></i><span>绘制你的研究区</span></span><span class="map-badge muted-badge">底图用于定位 · 导出 Sentinel-2 影像</span></div>
+        <div class="basemap-switch" id="basemapSwitch"><button class="active" data-basemap="standard">标准地图</button><button data-basemap="satellite">卫星底图</button></div>
+        <div id="drawHint" class="draw-hint" hidden>按顺序点击地图放置顶点，点击第一个点完成。Esc 取消。</div>
+        <section id="jobPanel" class="job-panel" hidden aria-live="polite"><div class="job-heading"><div><span id="jobStatus" class="job-status">正在下载</span><strong id="jobTitle">下载队列</strong></div><button id="closeJobPanel" class="icon-button" title="收起下载记录" aria-label="收起下载记录" hidden><svg class="icon"><use href="#i-close"/></svg></button></div><p id="jobMessage">准备中…</p><div class="progress-track"><div id="jobProgress"></div></div><div class="job-meta"><span id="jobFraction">0%</span><button id="toggleJobLogs" class="inline-link">查看记录</button><button id="cancelJob" class="inline-link danger">取消任务</button></div><div id="jobLogs" class="job-logs" hidden></div><div id="jobFiles" class="job-files" hidden></div><button id="openResultFolder" class="button button-outline full-width" hidden><svg class="icon"><use href="#i-folder"/></svg>打开保存文件夹</button></section>
+      </div>
+
+      <section class="scenes-panel">
+        <div class="scenes-heading"><div><h2>可下载影像 <span id="sceneCount" class="count-badge">0</span></h2><p id="scenesSubtitle">按实际过境时间整理，跨瓦片自动拼接。</p></div><div class="scene-selection-actions"><button id="selectAll" class="inline-link" disabled>全选</button><span>·</span><button id="selectNone" class="inline-link" disabled>清空选择</button></div></div>
+        <div id="scenesEmpty" class="scenes-empty"><div class="empty-illustration"><span class="empty-orbit"></span><svg class="icon"><use href="#i-satellite"/></svg><i></i><i></i></div><strong>让影像覆盖你的研究区</strong><span>设置区域和时间，点击「查找可下载影像」。</span></div>
+        <div id="scenesLoading" class="scenes-loading" hidden><span class="spinner"></span><strong>正在检索官方影像目录</strong><span id="searchMessage" aria-live="polite">准备检索…</span><button type="button" id="cancelSearch" class="inline-link danger" disabled>取消检索</button></div>
+        <div id="scenesTableWrap" class="scenes-table-wrap" hidden><table class="scenes-table"><thead><tr><th class="check-column"></th><th><span id="sceneDateHeading">采集时间</span> <span>UTC</span></th><th>卫星</th><th id="tileHeading">瓦片</th><th>整景云量</th><th>区域覆盖</th></tr></thead><tbody id="scenesBody"></tbody></table></div>
+        <div class="download-footer"><div id="downloadEstimate" class="download-estimate"><strong>尚未选择影像</strong><span>选择后查看分辨率、预计体积和处理量。</span></div><button id="downloadSelected" class="button button-primary" disabled><svg class="icon"><use href="#i-download"/></svg><span>下载选中影像</span><span id="selectedCount" class="button-count" hidden>0</span></button></div>
+      </section>
+    </section>
+  </main>
+
+  <div id="toastContainer" class="toast-container" aria-live="assertive"></div>
+
+  <dialog id="helpDialog" class="modal help-modal"><div class="modal-heading"><div><span class="eyebrow">QUICK START</span><h2>四步，下载你的研究区影像</h2></div><button class="icon-button" data-close="helpDialog" aria-label="关闭帮助"><svg class="icon"><use href="#i-close"/></svg></button></div><div class="help-steps"><div><span>1</span><p><strong>选择数据来源与认证方式</strong>开放数据无需登录；Sentinel Hub 使用同一客户端的 Client ID 和 Secret；官方原始产品按计划使用 OData 账号/令牌或 S3 密钥。</p></div><div><span>2</span><p><strong>选择日期与影像内容</strong>反射率和 NDVI 输出 Float32；自然色输出 8 位浏览图。L2A 没有 B10；20/60 米原生波段可重采样到所选网格。</p></div><div><span>3</span><p><strong>在地图上圈出研究区</strong>支持地点搜索、矩形、多边形、SHP 和 GeoJSON。坐标顺序为经度、纬度；无 .prj 的 SHP 需要手动指定源坐标系。</p></div><div><span>4</span><p><strong>选择过境日期和保存位置</strong>检索后勾选结果，确认下载计划。区域裁剪导出 GeoTIFF，原始产品保留原始范围和文件形式。两者都生成研究区与下载记录。</p></div></div><div class="help-note"><svg class="icon"><use href="#i-info"/></svg><p>Process API 提供按区域处理的影像。云量为原始瓦片估计，覆盖率是边界交叠，不代表无云。输出记录标明处理服务返回的匹配瓦片。客户端 Secret 仅在运行内存中使用，关闭软件后需要重新输入。</p></div><div class="modal-footer"><button class="button button-outline" id="openAuthDocs">官方认证文档 ↗</button><button class="button button-outline" id="openQuotaDocs">免费额度说明 ↗</button><button class="button button-primary" data-close="helpDialog">开始使用</button></div></dialog>
+
+  <dialog id="updateDialog" class="modal update-modal" aria-labelledby="updateTitle">
+    <div class="modal-heading"><h2 id="updateTitle">软件更新</h2><button type="button" class="icon-button" data-close="updateDialog" aria-label="关闭软件更新"><svg class="icon"><use href="#i-close"/></svg></button></div>
+    <p id="updateCurrent" class="section-description"></p>
+    <p id="updateMessage" class="update-message" role="status"></p>
+    <p id="updateNote" class="section-description" hidden>下载前请结束正在运行的影像任务。安装包不会自动运行；校验完成后，请关闭软件并手动安装。</p>
+    <div class="modal-footer"><button id="retryUpdate" type="button" class="button button-outline" hidden>重新检查</button><button id="openUpdateRelease" type="button" class="button button-outline" hidden>GitHub 发布页 ↗</button><button id="downloadUpdate" type="button" class="button button-primary" hidden><svg class="icon"><use href="#i-download"/></svg>下载并校验</button></div>
+  </dialog>
+
+  <dialog id="downloadDialog" class="modal download-modal"><div class="modal-heading"><div><span class="eyebrow">READY TO DOWNLOAD</span><h2>确认下载计划</h2></div><button class="icon-button" data-close="downloadDialog" aria-label="关闭下载计划"><svg class="icon"><use href="#i-close"/></svg></button></div><div id="planDetails" class="plan-details"></div><div class="plan-folder-actions"><button type="button" class="inline-link" id="changePlanFolder"><svg class="icon"><use href="#i-folder"/></svg>更改保存目录</button></div><p id="planNote" class="plan-note">处理量为估算；实际额度以官方服务为准。区域外及无效像元以 NoData 或透明显示。参数和目录来源一致的完整文件会自动跳过。</p><div class="modal-footer"><button class="button button-outline" data-close="downloadDialog">返回调整</button><button id="confirmDownload" class="button button-primary"><svg class="icon"><use href="#i-download"/></svg>开始下载</button></div></dialog>
+
+  <dialog id="pathDialog" class="modal path-modal"><div class="modal-heading"><h2 id="pathDialogTitle">填写本地路径</h2><button class="icon-button" data-close="pathDialog" aria-label="关闭"><svg class="icon"><use href="#i-close"/></svg></button></div><p id="pathDialogNote" class="section-description"></p><input id="pathDialogInput" spellcheck="false"><div class="modal-footer"><button class="button button-outline" data-close="pathDialog">取消</button><button id="confirmPath" class="button button-primary">确定</button></div></dialog>
+
+  <dialog id="exportDialog" class="modal export-modal"><div class="modal-heading"><h2>导出研究区边界</h2><button class="icon-button" data-close="exportDialog" aria-label="关闭"><svg class="icon"><use href="#i-close"/></svg></button></div><p class="section-description">可直接将地图上画好的边界保存为 GIS 文件。</p><label for="exportFormat">格式</label><select id="exportFormat"><option value="shp">Shapefile · 含 .shp / .shx / .dbf / .prj / .cpg</option><option value="geojson">GeoJSON · WGS84 经纬度</option></select><div class="modal-footer"><button class="button button-outline" data-close="exportDialog">取消</button><button id="saveBoundary" class="button button-primary">选择位置并保存</button></div></dialog>
+</body>
+</html>
+

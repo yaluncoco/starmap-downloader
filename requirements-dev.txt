@@ -1,0 +1,8 @@
+-r requirements.txt
+pyinstaller>=6.11,<7
+Pillow>=10,<13
+pytest>=8,<10
+playwright>=1.44,<2
+# Independent RTC pixel verification; not used by the packaged app.
+tifffile>=2025.5.10,<2027
+imagecodecs>=2025.3.30,<2027

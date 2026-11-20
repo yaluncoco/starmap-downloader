@@ -1,0 +1,21 @@
+﻿星图影像下载器 · Windows x64
+
+软件更新：右上角「检查更新」只查指定 GitHub 仓库的公开稳定版。选择「下载并校验」后，等待 SHA-256 校验通过，再关闭软件、打开保存文件夹并手动运行安装包。不会自动安装。
+
+使用「数据来源与下载方式」选择区域 GeoTIFF、整瓦片或原始数据文件。
+无需个人密钥：Sentinel-2 L1C 原始 JP2、Sentinel-2 L2A 区域裁剪或整瓦片 COG、Sentinel-2 L3 季度镶嵌、Landsat C2 L2、Sentinel-1 GRD 原始文件、Sentinel-3 SEN3、Sentinel-5P L2 大气 NetCDF、DEM 裁剪或整瓦片。
+Sentinel-2 L2A 整瓦片：单选一个瓦片，在列表中勾选源波段、分类、真彩和元数据。验证源 SHA-256；保留像元、原网格和缩放，不裁剪或构建 SAFE。
+Sentinel-2 L3 季度镶嵌：选择与日期范围重叠的季度，可选 4 个 10 米波段（B02/B03/B04/B08）。保留 Source Cooperative 镜像 DN 和整瓦片；有效值乘 0.0001 得反射率，-32768 为无数据。TIFF 本身没有缩放。镜像索引缺失或不匹配时不提供下载。
+ESA WorldCover：免密钥，日期与 2020 或 2021 年度区间重叠时匹配。选择 Sentinel-2 年度合成（RGBNIR / NDVI / SWIR）、Sentinel-1 年度 Gamma0 合成，或土地覆盖分类图。研究区仅用于查找整瓦片；无该年份或图层不替换。保留源像元、缩放、偏移、NoData 和分类调色板。
+MODIS Collection 6.1：五类免个人密钥（NDVI/EVI、红光/近红外反射率、昼夜 LST、LAI/FPAR、NBAR）。按 UTC 标称日与研究区查找 MODLAND 整瓦片。可选原始 HDF4、目录所列 XML 和分层 COG，不裁剪。校验源长度、版本、MD5；NDVI/EVI 物理值乘 0.0001，不乘源 TIFF 标签中的 10000。详细缩放及质量层注意事项见下载记录。
+Sentinel-1 IW SLC：东南亚历史公开存档（2014-10-06 至 2024-04-04，并非连续或全球覆盖）。按采集起始 UTC 日和研究区查找，保存原始 SAFE ZIP，保留复数 I/Q、子波束和极化，不裁剪。免个人密钥。逐段锁定源版本，核对 ASF 全文件 MD5、ZIP CRC 和 SAFE 清单；不换成 GRD 或 RTC。
+SLC 试用：研究区 123.70,-8.145,123.74,-8.10，起止日期都填 2014-11-01；VV 原始 ZIP 约 0.97 GB。
+Sentinel-1 RTC：按区域导出所选极化（VV/VH/HH/HV）的线性 γ⁰ Float32 GeoTIFF，不转 dB。选择所选景共有的极化。程序尝试获取临时读取授权，服务拒绝时不改用其他来源。这不是 GRD 原始测量文件。
+Sentinel-3：选择 SLSTR、OLCI、SYNERGY 或 SRAL 产品；可选原始成员，或验证清单和全部文件后保存完整 .SEN3 目录。日期和研究区仅用于筛选，不裁剪。
+Sentinel-5P：选择大气变量和 OFFL / NRTI / RPRO，目录按 UTC 与研究区筛选；下载原始条带，不裁剪。
+Sentinel Hub 裁剪：使用同一 OAuth 客户端的 Client ID 和 Client Secret。请仅在本机界面填写，已公开的 Secret 应撤销并重新创建。
+官方原始产品：检索无需凭据；按下载计划使用 CDSE OData 账号/令牌或 CDSE S3 密钥。
+
+原始文件可在同一个产品中勾选多个，保持源网格，不等同于完整产品包。目录可查不代表当前账号可下载；确认计划会显示所需凭据。
+输出不写入程序目录。卸载不会删除已经下载的影像。
+Microsoft Edge WebView2 Runtime 用来显示桌面界面。

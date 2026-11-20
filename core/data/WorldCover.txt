@@ -1,0 +1,17 @@
+ESA WorldCover compact grid — derived metadata, not imagery
+
+Credit: ESA WorldCover project / ESA WorldCover consortium, CC BY 4.0.
+Contains modified Copernicus Sentinel data (2020, 2021) processed by
+ESA WorldCover consortium. License: https://creativecommons.org/licenses/by/4.0/
+Use ESA WorldCover citation: https://esa-worldcover.org/en/data-access
+Composites: https://registry.opendata.aws/esa-worldcover-vito-composites/
+
+2026-11-20 (Asia/Shanghai): read the official tile footprints and paths,
+validate each against its WGS84 tile ID and release, and retain only the IDs
+and bits indicating the official product paths. The app checks current object
+presence, ETag and size independently against the official public AWS buckets.
+Sources (SHA-256 is recorded in worldcover-grid.json):
+https://esa-worldcover.s3.eu-central-1.amazonaws.com/esa_worldcover_grid_composites.fgb
+https://esa-worldcover.s3.eu-central-1.amazonaws.com/v100/2020/esa_worldcover_grid.geojson
+https://esa-worldcover.s3.eu-central-1.amazonaws.com/v200/2021/esa_worldcover_grid.geojson
+Regenerate with scripts/make_worldcover_grid.py and review before repinning.
