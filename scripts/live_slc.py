@@ -42,6 +42,8 @@ DUAL = Case("S1A_IW_SLC__1SDV_20230910T100156_20230910T100208_050263_060CF3_3977
             "2023-09-10", 1536693925, "a2e46d516d8803d3b1c1c0be021157c7", ("VV", "VH"), 45, 33)
 
 
+from browser_flow import open_data_page
+
 def wait_job(api, key, timeout):
     deadline, last_update, msg = time.monotonic() + timeout, 0, None
     while time.monotonic() < deadline:
@@ -92,7 +94,7 @@ def browser_download(api, out, case, timeout):
         problems = []
         page.on("pageerror", lambda err: problems.append(str(err)))
         page.route("https://**/*", lambda route: route.abort())
-        page.goto(api.origin, wait_until="domcontentloaded")
+        open_data_page(page, api.origin)
         page.locator("#sourceProfile").select_option(PROFILE)
         expect(page.locator("#slcInfo")).to_contain_text("并非连续或全球覆盖")
         for selector in ("#cloudOptions", "#radarModeField", "#processAuth", "#rawOptions"):

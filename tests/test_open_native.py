@@ -8,6 +8,8 @@ import json
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from scripts.browser_flow import open_data_page
+
 import pytest
 import requests
 from shapely.geometry import box, mapping
@@ -220,7 +222,7 @@ def test_ui_selects_multiple_landsat_files_across_filter(server, pc_provider, tm
         failures=[]
         page.on("pageerror",lambda e:failures.append(str(e)))
         page.route(re.compile(r"^https://"),lambda route:route.abort())
-        page.goto(server.origin,wait_until="domcontentloaded")
+        open_data_page(page, server.origin)
         pw.expect(page.locator("#outputDirectory")).not_to_have_value("")
         page.locator("#sourceProfile").select_option("landsat-pc-l2")
         pw.expect(page.locator("#rawMode")).to_have_value("assets")

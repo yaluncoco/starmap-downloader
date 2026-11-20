@@ -5,6 +5,8 @@ import os
 import re
 from pathlib import Path
 
+from scripts.browser_flow import open_data_page
+
 import pytest
 from shapely.geometry import box
 
@@ -23,7 +25,9 @@ def test_desktop_ui_search_download_and_reuse(server, provider, tmp_path):
         page.on("pageerror", lambda error: failures.append(str(error)))
         # Prevent the smoke test from hitting third-party map tile servers.
         page.route(re.compile(r"^https://"), lambda route: route.abort())
-        page.goto(server.origin, wait_until="domcontentloaded")
+        open_data_page(page, server.origin)
+        page.locator("#manageAccounts").click()
+        page.locator('[data-account="oauth"]').click()
         pw.expect(page.locator("#clientId")).to_be_editable()
         pw.expect(page.locator("#outputDirectory")).not_to_have_value("")
         pw.expect(page.locator("#searchScenes")).to_be_disabled()
@@ -33,6 +37,7 @@ def test_desktop_ui_search_download_and_reuse(server, provider, tmp_path):
         page.locator("#connectButton").click()
         pw.expect(page.locator("#connectedPanel")).to_be_visible()
         pw.expect(page.locator("#clientSecret")).to_have_value("")
+        page.locator("#accountComplete").click()
 
         # The browser exposes the same import UX with a manual path when native dialogs are unavailable.
         shape_path = tmp_path / "本地研究区.shp"
@@ -96,7 +101,7 @@ def test_category_switch_and_raw_asset_workflow(server, raw_provider, tmp_path):
         errors = []
         page.on("pageerror", lambda error: errors.append(str(error)))
         page.route(re.compile(r"^https://"), lambda route: route.abort())
-        page.goto(server.origin, wait_until="domcontentloaded")
+        open_data_page(page, server.origin)
         pw.expect(page.locator("#outputDirectory")).not_to_have_value("")
         page.locator("#sourceProfile").select_option("dem-90")
         pw.expect(page.locator("#dateFields")).to_be_hidden()
@@ -124,11 +129,14 @@ def test_category_switch_and_raw_asset_workflow(server, raw_provider, tmp_path):
         pw.expect(page.locator("#downloadSelected")).to_be_disabled()
         page.locator("#rawMode").select_option("asset")
         page.locator("#rawAsset").select_option("manifest")
+        page.locator("#manageAccounts").click()
+        page.locator('[data-account="cdse"]').click()
         page.locator("#rawLoginMode").select_option("token")
         page.locator("#rawToken").fill(TOKEN)
         page.locator("#rawConnect").click()
         pw.expect(page.locator("#rawConnectedPanel")).to_be_visible()
         pw.expect(page.locator("#rawToken")).to_have_value("")
+        page.locator("#accountComplete").click()
         page.locator("#outputDirectory").fill(str(tmp_path / "验证原始资产"))
         page.locator("#downloadSelected").click()
         pw.expect(page.locator("#planDetails")).to_contain_text("原产品范围")

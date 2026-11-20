@@ -26,7 +26,7 @@ class NativeDialogs:
         import webview
 
         kind = request.get("kind")
-        if kind not in ("choose_boundary", "choose_folder", "save_boundary"):
+        if kind not in ("choose_boundary", "choose_folder", "save_boundary", "choose_reference"):
             raise UserError("未知的文件选择操作。")
         if self.window is None:
             raise UserError("窗口尚未就绪，请稍后重试。")
@@ -37,6 +37,9 @@ class NativeDialogs:
             if kind == "choose_boundary":
                 result = self.window.create_file_dialog(webview.FileDialog.OPEN, allow_multiple=False,
                                                         file_types=("边界文件 (*.shp;*.geojson;*.json)", "所有文件 (*.*)"))
+            elif kind == "choose_reference":
+                result = self.window.create_file_dialog(webview.FileDialog.OPEN, allow_multiple=False,
+                                                        file_types=("GeoTIFF (*.tif;*.tiff)",))
             elif kind == "choose_folder":
                 current = str(request.get("current") or "")[:2048]
                 directory = str(Path(current).parent) if current and not Path(current).is_dir() else current
@@ -102,6 +105,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path.path == "/api/bootstrap":
                 return self._respond(200, {**self.server.service.bootstrap(), "native_dialogs": self.server.dialogs is not None})
+            if path.path == "/api/accounts":
+                return self._respond(200, self.server.service.account_status())
             if path.path == "/api/job":
                 job_id = parse_qs(path.query).get("id", [""])[0]
                 return self._respond(200, self.server.service.job(job_id))
@@ -148,10 +153,15 @@ class Handler(BaseHTTPRequestHandler):
                 "/api/raw-disconnect": lambda _: self.server.service.raw_disconnect(),
                 "/api/s3-connect": self.server.service.s3_connect,
                 "/api/s3-disconnect": lambda _: self.server.service.s3_disconnect(),
+                "/api/earthdata-connect": self.server.service.earthdata_connect,
+                "/api/earthdata-disconnect": lambda _: self.server.service.earthdata_disconnect(),
                 "/api/collections": self.server.service.collections,
                 "/api/aoi": self.server.service.aoi,
                 "/api/export-aoi": self.server.service.export_aoi,
                 "/api/search": self.server.service.search,
+                "/api/batch-search": self.server.service.batch_search,
+                "/api/batch-plan": self.server.service.batch_plan,
+                "/api/batch-download": self.server.service.batch_download,
                 "/api/plan": self.server.service.plan,
                 "/api/download": self.server.service.download,
                 "/api/cancel": lambda v: self.server.service.cancel(v.get("job_id", "")),
@@ -162,6 +172,7 @@ class Handler(BaseHTTPRequestHandler):
                 "/api/open-link": self.server.service.open_link,
                 "/api/open-folder": self.server.service.open_folder,
                 "/api/preferences": self.server.service.save_preferences,
+                "/api/accounts-clear": self.server.service.clear_accounts,
             }
             if route not in methods:
                 return self._respond(404, {"error": "未知操作。"})
@@ -199,12 +210,15 @@ def main():
             server.server_close()
         return
     import webview
+    if sys.platform == "win32":
+        from ctypes import windll
+        windll.shell32.SetCurrentProcessExplicitAppUserModelID("StarmapDownloader")
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    window = webview.create_window("星图影像下载器 · Copernicus", server.origin, width=1440, height=960, min_size=(1100, 740), background_color="#f5f7f8", text_select=True)
+    window = webview.create_window("星图影像下载器", server.origin, width=1440, height=960, min_size=(1100, 740), background_color="#f5f7f8", text_select=True)
     dialogs.window = window
     try:
-        webview.start(gui="edgechromium", debug=False, private_mode=True)
+        webview.start(gui="edgechromium", debug=False, private_mode=True, icon=str(UI_ROOT / "assets" / "globe-orbit.ico"))
     finally:
         server.service.shutdown()
         server.shutdown()

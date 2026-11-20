@@ -37,6 +37,8 @@ EXTRA_NRTI = [
 GAP = "S5P_NRTI_L2__CH4____20261119T045934_20261119T050434_47156_03_030000_20261119T054641"
 
 
+from browser_flow import open_data_page
+
 def independent_catalogue(collection, identifier):
     url = f"{STAC}/{collection}/items/{identifier}"
     for attempt in range(4):
@@ -78,7 +80,7 @@ def verify_ui(origin, output):
         errors = []
         page.on("pageerror", lambda error: errors.append(str(error)))
         page.route("https://**/*", lambda route: route.abort())
-        page.goto(origin, wait_until="domcontentloaded")
+        open_data_page(page, origin)
         expect(page.locator("#outputDirectory")).not_to_have_value("")
         page.locator("#sourceProfile").select_option(PROFILE)
         expect(page.locator("#s5pCollection option")).to_have_count(27)

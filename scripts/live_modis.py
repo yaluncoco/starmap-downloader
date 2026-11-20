@@ -29,6 +29,8 @@ EXTRA = (
 NDVI = "250m_16_days_NDVI"
 
 
+from browser_flow import open_data_page
+
 def search(api, profile, coords, start, end):
     geometry=api.post("aoi", {"coordinates":coords})["geometry"]
     criteria={"start":start,"end":end}
@@ -127,7 +129,7 @@ def validate_browser(origin, out, refs):
         errors = []
         page.on("pageerror",lambda error:errors.append(str(error)))
         page.route("https://**/*",lambda route:route.abort())
-        page.goto(origin,wait_until="domcontentloaded")
+        open_data_page(page, origin)
         expect(page.locator('#sourceProfile option[value^="modis-"]')).to_have_count(5)
         page.locator("#sourceProfile").select_option(CORE[4][0]); expect(page.locator("#modisDateNote")).to_contain_text("第 9 天")
         page.locator("#sourceProfile").select_option(CORE[0][0]); expect(page.locator("#modisDateNote")).to_contain_text("合成起始日")

@@ -69,6 +69,8 @@ EW = Case("southern-ocean-ew", "2022-03-08", "86.063,-59.508,86.073,-59.499",
           "S1A_EW_GRDM_1SDH_20220308T134445_20220308T134521_042230_050877", "6CDE", "EW", ("HH", "HV"), 32745, 10)
 
 
+from browser_flow import open_data_page
+
 def get(session, url, status=200, **kwargs):
     try:
         response = session.get(url, timeout=(12, 45), allow_redirects=False, **kwargs)
@@ -265,7 +267,7 @@ def verify_browser(origin, out, cases):
         errors = []
         page.on("pageerror", lambda err: errors.append(str(err)))
         page.route("https://**/*", lambda route: route.abort())  # No map tiles; the app server makes real imagery requests.
-        page.goto(origin, wait_until="domcontentloaded")
+        open_data_page(page, origin)
         expect(page.locator("#outputDirectory")).not_to_have_value("")
         results = []
         for case in cases:

@@ -15,3 +15,5 @@ update-channel.json
 *.key
 *.pem
 *.pfx
+accounts.v1.dpapi
+accounts.v1.dpapi.*.tmp

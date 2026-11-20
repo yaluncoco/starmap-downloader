@@ -1,3 +1,3 @@
-"""Copernicus satellite download services."""
+"""Satellite imagery and NASA GEDI download services."""
 
-VERSION = "1.1"
+VERSION = "1.4.1"

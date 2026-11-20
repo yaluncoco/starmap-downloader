@@ -1,5 +1,5 @@
 #ifndef AppVersion
-#define AppVersion "1.1"
+#define AppVersion "1.4.1"
 #endif
 #ifndef AppRoot
 #define AppRoot "..\dist\StarmapDownloader"
@@ -28,9 +28,11 @@ OutputBaseFilename=StarmapDownloader-Setup-{#AppVersion}-win-x64
 Compression=lzma2/fast
 SolidCompression=yes
 WizardStyle=modern
+SetupIconFile=..\ui\assets\globe-orbit.ico
+ChangesAssociations=yes
 DisableWelcomePage=no
 DisableProgramGroupPage=yes
-UninstallDisplayIcon={app}\StarmapDownloader.exe
+UninstallDisplayIcon={app}\_internal\ui\assets\globe-orbit.ico
 CloseApplications=yes
 RestartApplications=no
 VersionInfoVersion={#AppVersion}
@@ -50,19 +52,24 @@ chinesesimp.MissingRuntime=缺少 Microsoft Edge WebView2 Runtime。请从微软
 english.MissingRuntime=Microsoft Edge WebView2 Runtime is missing. Install the Evergreen Runtime from https://developer.microsoft.com/microsoft-edge/webview2/#download-section and retry.
 
 [Tasks]
-Name: "desktopicon"; Description: "{cm:Desktop}"; Flags: unchecked
+Name: "desktopicon"; Description: "{cm:Desktop}"
 
 [Files]
-Source: "{#AppRoot}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "*.log,*.partial.tif,*.part,*.local.json,preferences.json"
+Source: "{#AppRoot}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "*.log,*.partial.tif,*.part,*.local.json,preferences.json,accounts.v1.dpapi,accounts.v1.dpapi.*.tmp"
 
 [Icons]
-Name: "{group}\星图影像下载器"; Filename: "{app}\StarmapDownloader.exe"
-Name: "{userdesktop}\星图影像下载器"; Filename: "{app}\StarmapDownloader.exe"; Tasks: desktopicon
+Name: "{group}\星图影像下载器"; Filename: "{app}\StarmapDownloader.exe"; IconFilename: "{app}\_internal\ui\assets\globe-orbit.ico"; IconIndex: 0
+Name: "{userdesktop}\星图影像下载器"; Filename: "{app}\StarmapDownloader.exe"; IconFilename: "{app}\_internal\ui\assets\globe-orbit.ico"; IconIndex: 0; Check: ShouldUpdateDesktopIcon
 
 [Run]
 Filename: "{app}\StarmapDownloader.exe"; Description: "{cm:Launch}"; Flags: nowait postinstall skipifsilent unchecked
 
 [Code]
+function ShouldUpdateDesktopIcon(): Boolean;
+begin
+  Result := WizardIsTaskSelected('desktopicon') or FileExists(ExpandConstant('{userdesktop}\星图影像下载器.lnk'));
+end;
+
 function HasRuntimeVersion(RootKey: Integer): Boolean;
 var
   Version: string;

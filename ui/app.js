@@ -2,7 +2,7 @@
 
 const $ = (id) => document.getElementById(id);
 const appToken = document.querySelector('meta[name="app-token"]').content;
-const state = {profile:"s2-process",collection:"",collections:[],loadingCollections:false,rawConnected:false,s3Connected:false,connected:false,connecting:false,nativeDialogs:false,aoi:null,scenes:[],selected:new Set(),pickedFiles:new Set(),fileScene:"",busy:false,jobId:null,plan:null,planVersion:0,resultFolder:"",places:[],editing:false,query:null};
+const state = {profile:"s2-process",collection:"",collections:[],gediCollections:[],gediFieldCollection:"",earthdataConnected:false,loadingCollections:false,rawConnected:false,s3Connected:false,connected:false,connecting:false,nativeDialogs:false,aoi:null,scenes:[],selected:new Set(),pickedFiles:new Set(),fileScene:"",busy:false,jobId:null,plan:null,planVersion:0,resultFolder:"",places:[],editing:false,query:null};
 const updates = {configured:false, checking:false, working:false, release:null};
 let map, aoiLayer, footprintLayer, baseLayer, drawHandler, editHandler, planTimer;
 const modes = {
@@ -24,6 +24,7 @@ const profiles = {
   "s1-rtc-pc":["Sentinel-1 RTC","Planetary Computer · 雷达区域裁剪","按区域导出地形校正后的线性 γ⁰ 后向散射，可选极化。程序请求临时读取授权；若源限制访问，不会换成 GRD 原件或别的景。"],
   "sen3-aws-original":["Sentinel-3","CDSE 目录 / MEEO 公开档案","选择 SLSTR、OLCI、SYNERGY 或 SRAL 原始数据。先核对精确版本和清单；缺失时显示原因，不会换版。整轨或完整产品可能需要数 GB 空间。"],
   "s5p-aws-l2":["Sentinel-5P TROPOMI L2","CDSE 目录 / MEEO 公开档案","核对产品版本并下载原始 NetCDF。各处理流日期覆盖不同；公开档案若缺该版本，不会换成别的条带或格式。"],
+  "gedi-earthdata":["NASA GEDI","Earthdata · 激光足迹与森林参数","选择高度、覆盖度、垂直结构、生物量或栅格产品。保留精确版本的原始文件，可按研究区导出参数，并对齐之前下载的影像。"],
   "worldcover-s2":["ESA WorldCover · Sentinel-2","ESA / AWS · 年度光学合成 COG","原始 1° 瓦片，按瓦片勾选 RGBNIR、NDVI 百分位或 SWIR。保留原始 DN、NoData 与缩放；SWIR 约 20 米。"],
   "worldcover-s1":["ESA WorldCover · Sentinel-1","ESA / AWS · 年度雷达合成 COG","原始 1° Gamma0 瓦片，含 VV、VH、VH/VV。并非单次过境；缺少雷达层时不会用光学或其他年份替换。"],
   "worldcover-map":["ESA WorldCover · 土地覆盖","ESA / AWS · 年度分类图 COG","原始 3° 分类瓦片，约 10 米。保留 11 类编码、NoData 和调色板；2020 / 2021 使用不同算法版本。"],
@@ -51,16 +52,20 @@ const isModis = () => state.profile.startsWith("modis-");
 const isNbar = () => state.profile === "modis-43A4-061";
 const isS5p = () => state.profile === "s5p-aws-l2";
 const isSen3 = () => state.profile === "sen3-aws-original";
+const isGedi = () => state.profile === "gedi-earthdata";
+const gediProduct = () => state.gediCollections.find(item=>item.id===$("gediCollection").value);
+const isGediRaster = () => isGedi() && gediProduct()?.kind==="raster";
 const isRaw = () => isOfficial() || isRadar() || isSlc() || isOpenOptical() || isL3() || isS5p() || isSen3() || isWorldCover() || isModis();
 const rawRoute = () => isOfficial()?$("rawTransport").value:(isLandsat()||isModis())?"pc-public":"public";
 const isProcess = () => state.profile === "s2-process";
 const isDem = () => state.profile.startsWith("dem-");
-const dateEnabled = () => !isDem() && !(isOfficial() && $("allDates").checked);
-const canSearch = () => state.aoi && !state.busy && !state.connecting && (!isProcess() || state.connected) && (!isOfficial() || state.collection) && (!isS5p() || $("s5pCollection").value) && (!isSen3() || $("sen3Collection").value);
-const transportLabel = id => ({odata:"CDSE OData","cdse-s3":"CDSE S3",public:isL3()?"Source Cooperative":"公开 AWS","pc-public":"Microsoft Planetary Computer"}[id] || id);
-const missingAccess = () => (state.plan?.requires || []).filter(id => id === "odata" ? !state.rawConnected : id === "cdse-s3" ? !state.s3Connected : true);
-const hasDownloadAccess = () => isProcess() ? state.connected : missingAccess().length === 0;
-const selectable = (scene) => !isRaw() || scene.raw?.available === true;
+const primaryDateEnabled = () => !isDem() && !(isOfficial() && (Batch.enabled() ? Batch.isStatic(state.profile, state.collection) : $("allDates").checked));
+const dateEnabled = () => primaryDateEnabled() || Batch.enabled();
+const canSearch = () => state.aoi && !state.busy && !state.connecting && (!isProcess() || state.connected) && (!isOfficial() || state.collection) && (!isS5p() || $("s5pCollection").value) && (!isSen3() || $("sen3Collection").value) && (!isGedi() || $("gediCollection").value) && Batch.searchReady();
+const transportLabel = id => ({odata:"CDSE OData","cdse-s3":"CDSE S3",earthdata:"NASA Earthdata","sentinel-hub":"Sentinel Hub OAuth",public:isL3()?"Source Cooperative":"公开 AWS","pc-public":"Microsoft Planetary Computer"}[id] || id);
+const missingAccess = () => (state.plan?.requires || []).filter(id => id === "odata" ? !state.rawConnected : id === "cdse-s3" ? !state.s3Connected : id === "earthdata" ? !state.earthdataConnected : id === "sentinel-hub" ? !state.connected : true);
+const hasDownloadAccess = () => state.plan?.kind === "batch" ? missingAccess().length === 0 : isProcess() ? state.connected : missingAccess().length === 0;
+const selectable = (scene) => isGedi() ? scene.gedi?.available === true : !isRaw() || scene.raw?.available === true;
 const allBands = ["B01","B02","B03","B04","B05","B06","B07","B08","B8A","B09","B11","B12"];
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const icon = (name) => `<svg class="icon" aria-hidden="true"><use href="#i-${name}"/></svg>`;
@@ -137,15 +142,18 @@ async function updateAction(download) {
   }catch(error){$("updateMessage").textContent=error.message;}
   finally{updates.working=false;updateButtons();}
 }
+function displayPath(path) { return path.startsWith("\\\\?\\UNC\\") ? "\\\\" + path.slice(8) : path.startsWith("\\\\?\\") ? path.slice(4) : path; }
 function criteria() {
-  const result = {start:dateEnabled()?$("startDate").value:null,end:dateEnabled()?$("endDate").value:null};
+  const result = {start:primaryDateEnabled()?$("startDate").value:null,end:primaryDateEnabled()?$("endDate").value:null};
   if(isOfficial())return {...result,collection:state.collection,radar_mode:state.collection==="sentinel-1-grd"?$("radarMode").value:""};
   if(isS5p()||isSen3())return {...result,collection:$(isSen3()?"sen3Collection":"s5pCollection").value};
+  if(isGedi())return {...result,collection:$("gediCollection").value};
   if(isRadar()||isRtc())return {...result,radar_mode:$("radarMode").value};
   if(isDem()||isL3()||isWorldCover()||isModis()||isSlc())return result;
   return {...result,max_cloud:Number($("maxCloud").value)};
 }
 function options() {
+  if(isGedi())return {mode:$("gediMode").value,fields:[...document.querySelectorAll("#gediFields input:checked")].map(input=>input.value),beams:[...document.querySelectorAll("#gediBeams input:checked")].map(input=>input.value),quality:$("gediQuality").value,nondegraded:$("gediNondegraded").checked,min_sensitivity:Number($("gediSensitivity").value),resolution:Number($("gediResolution").value),reference_path:$("gediReference").value.trim(),sample_reference:$("gediSampleReference").checked};
   if(isS5p()||isWorldCoverSingle()||isSlc())return {mode:"original",transport:"public"};
   if(isRaw())return {mode:$("rawMode").value,asset:$("rawAsset").value,assets:[...state.pickedFiles].sort(),transport:rawRoute()};
   if(isDem())return {mode:$("demMode").value};
@@ -153,7 +161,8 @@ function options() {
   return {mode:$("imageMode").value,resolution:Number($("resolution").value),max_cloud:Number($("maxCloud").value),mask_clouds:$("maskClouds").checked,bands:[...document.querySelectorAll("#customBands input:checked")].map(input=>input.value)};
 }
 function downloadRequest() {
-  return {geometry:state.aoi.geometry,profile:state.profile,criteria:criteria(),query_id:state.query?.id,scene_keys:[...state.selected],options:options(),output_dir:$("outputDirectory").value.trim()};
+  const result={geometry:state.aoi.geometry,profile:state.profile,criteria:criteria(),query_id:state.query?.id,scene_keys:[...state.selected],options:options(),output_dir:$("outputDirectory").value.trim()};
+  return Batch.query?Batch.downloadRequest(result):result;
 }
 function renderCollectionPicker() {
   const term=$("collectionFilter").value.trim().toLocaleLowerCase().replaceAll("‑","-");
@@ -189,15 +198,19 @@ function renderOpenCollections(select, items, selected, includeStream = false) {
   $(select).value=selected;
 }
 function renderProfile() {
+  $("allDates").closest("label").hidden=Batch.enabled();
   const [dataset,source,description]=profiles[state.profile];
   $("headerDataset").textContent=dataset;$("headerSource").textContent=source;$("sourceDescription").textContent=description;
-  for(const id of ["rawCollectionFields","rawAuth","rawTransportField"])$(id).hidden=!isOfficial();
+  for(const id of ["rawCollectionFields","rawTransportField"])$(id).hidden=!isOfficial();
   $("s5pCollectionFields").hidden=!isS5p();
   $("sen3CollectionFields").hidden=!isSen3();
+  for(const id of ["gediCollectionFields","gediOptions"])$(id).hidden=!isGedi();
+  renderGediOptions();
   $("worldcoverInfo").hidden=!isWorldCover();$("modisInfo").hidden=!isModis();
   $("modisDateNote").textContent=isNbar()?"按 UTC 标称日筛选（16 天输入窗口的第 9 天）。并非当日单景；研究区只筛选整瓦片。":
     "按 UTC 标称日筛选（合成起始日），起止日期均包含。研究区只筛选整瓦片；不裁剪、不重写源数据。";
-  $("sceneDateHeading").textContent=isModis()?"标称日":"采集时间";
+  $("sceneDateHeading").textContent=isGediRaster()?"汇总期起始":isGedi()?"文件观测起始":isModis()?"标称日":"采集时间";
+  $("coverageHeading").textContent=isGedi()?"有效观测":"区域覆盖";
   $("slcInfo").hidden=!isSlc();
   $("rawOptions").hidden=!isRaw()||isS5p()||isWorldCoverSingle()||isSlc();$("demOptions").hidden=!isDem();
   $("rtcOptions").hidden=!isRtc();
@@ -209,15 +222,63 @@ function renderProfile() {
   $("rawMetadataOnly").textContent=isModis()?"每个产品的 NASA 配套 XML（如已列出）":"每个产品的一份元数据";
   if(isWorldCoverSingle()||isSlc())$("rawMode").value="original";
   else if((noMetadata&&$("rawMode").value==="metadata")||(!isOfficial()&&!isSen3()&&!isS5p()&&!isModis()&&$("rawMode").value==="original"&&isRaw()))$("rawMode").value=isRadar()?"metadata":"assets";
-  $("processAuth").hidden=!isProcess();$("publicAuth").hidden=isOfficial()||isProcess();
-  $("authTag").textContent=isOfficial()?"CDSE":isProcess()?"OAuth":(isRtc()||isModis())?"临时读取":"公开";
-  $("opticalOptions").hidden=isRaw()||isDem()||isRtc();$("cloudOptions").hidden=isOfficial()||isRadar()||isRtc()||isDem()||isS5p()||isSen3()||isL3()||isWorldCover()||isModis()||isSlc();$("dateFields").hidden=!dateEnabled();
+  Accounts.visibility();$("publicAuth").hidden=isOfficial()||isProcess()||isGedi();
+  $("opticalOptions").hidden=isRaw()||isDem()||isRtc()||isGedi();$("cloudOptions").hidden=isOfficial()||isRadar()||isRtc()||isDem()||isS5p()||isSen3()||isL3()||isWorldCover()||isModis()||isSlc()||isGedi();$("dateFields").hidden=!dateEnabled();
   $("radarModeField").hidden=!(isRadar()||isRtc()||(isOfficial()&&state.collection==="sentinel-1-grd"));
   for(const option of $("radarMode").options){option.disabled=option.hidden=isRtc()&&["SM","WV"].includes(option.value);}
-  for(const id of ["startDate","endDate"])$(id).min=isOfficial()||isWorldCover()?"1900-01-01":isModis()?"2000-01-01":isSlc()?"2014-10-06":isRadar()||isRtc()?"2014-04-03":isLandsat()?"1982-01-01":isS5p()?"2018-01-01":isSen3()?"2016-02-16":isL3()?"2017-01-01":"2015-06-23";
-  $("tileHeading").textContent=isS5p()?"原始条带 / 处理流":isSen3()?"原始产品 / 档案状态":isL3()?"镶嵌瓦片 / 镜像状态":isWorldCover()?"年度瓦片 / 档案状态":isModis()?"MODLAND 瓦片 / 合成窗口":isSlc()?"原始产品 / 极化":isRaw()?"原始产品 / 模式":isRtc()?"成像模式 / 极化":"瓦片";
-  $("searchScenes").querySelector("span").textContent=isWorldCover()?"查找年度瓦片":isModis()?"查找 MODIS 瓦片":isRaw()?"检索原始产品":isDem()?"查找 DEM 瓦片":"查找可下载影像";
+  for(const id of ["startDate","endDate"])$(id).min=isGedi()?"2019-04-04":isOfficial()||isWorldCover()?"1900-01-01":isModis()?"2000-01-01":isSlc()?"2014-10-06":isRadar()||isRtc()?"2014-04-03":isLandsat()?"1982-01-01":isS5p()?"2018-01-01":isSen3()?"2016-02-16":isL3()?"2017-01-01":"2015-06-23";
+  $("tileHeading").textContent=isGediRaster()?"栅格参数 / 版本":isGedi()?"GEDI 足迹文件 / 版本":isS5p()?"原始条带 / 处理流":isSen3()?"原始产品 / 档案状态":isL3()?"镶嵌瓦片 / 镜像状态":isWorldCover()?"年度瓦片 / 档案状态":isModis()?"MODLAND 瓦片 / 合成窗口":isSlc()?"原始产品 / 极化":isRaw()?"原始产品 / 模式":isRtc()?"成像模式 / 极化":"瓦片";
+  $("searchScenes").querySelector("span").textContent=isGedi()?"检索 GEDI 数据":isWorldCover()?"查找年度瓦片":isModis()?"查找 MODIS 瓦片":isRaw()?"检索原始产品":isDem()?"查找 DEM 瓦片":"查找可下载影像";
+  $("downloadSelected").querySelector("span").textContent=Batch.enabled()?"下载主数据及附带数据":isGedi()?"下载选中 GEDI":"下载选中影像";
+  if(Batch.enabled())$("searchScenes").querySelector("span").textContent="检索主数据及附带数据";
+  Batch.renderChoices();
   renderAuth();
+}
+
+function renderGediOptions() {
+  if(!isGedi())return;
+  const product=gediProduct();if(!product)return;
+  const raster=product.kind==="raster", mode=$("gediMode");
+  $("gediFootprintsMode").disabled=$("gediFootprintsMode").hidden=raster;
+  if(raster&&mode.value==="footprints")mode.value="aligned";
+  if(state.gediFieldCollection!==product.id){
+    state.gediFieldCollection=product.id;
+    $("gediFields").innerHTML=product.fields.map(field=>`<label class="asset-entry"><input type="checkbox" value="${escapeHtml(field.id)}" ${field.default?"checked":""} data-lock><span><strong>${escapeHtml(field.title)}</strong><small>${escapeHtml(field.id)}${field.units?" · "+escapeHtml(field.units):""}${["profile","waveform"].includes(field.kind)?" · 仅写入表格":""}</small></span></label>`).join("");
+    $("gediResolution").value=raster?"1000":"10";
+    if(product.level==="L1B")$("gediSensitivity").value="0";
+  }
+  $("gediProductNote").textContent=`${product.kind==="raster"?"全球汇总栅格；日期与汇总期重叠即匹配，不代表该日观测。":"约 25 米离散足迹；日期同时筛选文件和导出的实际足迹。"} 数据起始 ${product.first_date}${product.last_date?"，本版本截至 "+product.last_date:"；具体已发布日期以检索结果为准"}。`;
+  $("gediDerivedOptions").hidden=mode.value==="original";
+  $("gediFootprintFields").hidden=raster;
+  $("gediGridFields").hidden=mode.value!=="aligned";
+  const reference=Boolean($("gediReference").value.trim());
+  $("clearGediReference").hidden=!reference;
+  $("gediSampleField").hidden=raster||!reference;
+  if(raster||!reference)$("gediSampleReference").checked=false;
+  $("gediGridNote").textContent=raster?"原始栅格约 1 km。选择参考影像后完整沿用其坐标系、像元网格和范围，按研究区裁剪；最近邻对齐不会增加实际观测分辨率。":
+    `${reference?"完整沿用参考影像的坐标系、像元网格与范围。":"无参考影像时，沿用本软件同研究区、同像元大小的 UTM 网格。"} 同一像元的足迹取参数均值，并另存各参数与总观测数量；无足迹处保留 NoData。完整波形和剖面写入表格，可按 shot_id 关联各级 GEDI 数据。`;
+}
+
+async function connectEarthdata() {
+  if(state.busy||state.connecting||state.earthdataConnected)return;
+  const method=$("earthdataLoginMode").value;
+  const request=method==="token"?{method,token:$("earthdataToken").value.trim()}:{method,username:$("earthdataUsername").value.trim(),password:$("earthdataPassword").value};
+  request.use_saved=Accounts.saved("earthdata");
+  state.connecting=true;updateAvailability();
+  try{
+    const result=await api("earthdata-connect",request);state.earthdataConnected=result.connected;
+    await Accounts.refresh();
+    toast(result.saved?"Earthdata 登录信息已保存，下次打开自动恢复。":result.save_error,!result.saved);
+  }catch(error){Accounts.setError("earthdata",error.message);toast(error.message,true);}
+  finally{state.connecting=false;$("earthdataToken").value="";$("earthdataPassword").value="";renderAuth();renderEstimate();}
+}
+
+async function chooseGediReference() {
+  if(state.busy||state.connecting)return;
+  try{
+    const path=await nativePath("choose_reference",{},()=>choosePath("选择参考 GeoTIFF","填写之前下载的 GeoTIFF 完整路径。GEDI 会沿用其网格；可选采样影像值。"));
+    if(path){$("gediReference").value=path;renderGediOptions();schedulePlan();}
+  }catch(error){toast(error.message,true);}
 }
 function modisLayerNote(asset) {
   const r=asset.raster;
@@ -267,12 +328,13 @@ async function connectRaw() {
   if(state.busy||state.connecting||state.rawConnected)return;
   const method=$("rawLoginMode").value;
   const request=method==="token"?{method,token:$("rawToken").value.trim()}:{method,username:$("rawUsername").value.trim(),password:$("rawPassword").value,totp:$("rawTotp").value.trim()};
+  request.use_saved=Accounts.saved("odata");
   state.connecting=true;updateAvailability();
   try{
     const result=await api("raw-connect",request);state.rawConnected=result.connected;
-    $("rawAuthState").textContent=result.verified?"CDSE 已连接 · 仅本次运行":"令牌已载入 · 下载时验证";
-    toast(result.verified?"CDSE 账号已连接。":"已载入临时令牌，实际下载时验证权限。");
-  }catch(error){toast(error.message,true);}
+    await Accounts.refresh();
+    toast(result.saved?"CDSE 登录信息已保存，下次打开自动恢复。":result.save_error,!result.saved);
+  }catch(error){Accounts.setError("odata",error.message);toast(error.message,true);}
   finally{state.connecting=false;for(const id of ["rawPassword","rawTotp","rawToken"])$(id).value="";renderAuth();renderEstimate();}
 }
 
@@ -280,10 +342,11 @@ async function connectS3() {
   if(state.busy||state.connecting||state.s3Connected)return;
   state.connecting=true;updateAvailability();
   try{
-    const result=await api("s3-connect",{access_key:$("s3AccessKey").value,secret_key:$("s3SecretKey").value});
+    const result=await api("s3-connect",{access_key:$("s3AccessKey").value,secret_key:$("s3SecretKey").value,use_saved:Accounts.saved("s3")});
     state.s3Connected=result.connected;
-    toast("已载入 CDSE S3 密钥。对象访问权限将在实际下载时验证。");
-  }catch(error){toast(error.message,true);}
+    await Accounts.refresh();
+    toast(result.saved?"CDSE S3 密钥已保存，下次打开自动恢复。":result.save_error,!result.saved);
+  }catch(error){Accounts.setError("s3",error.message);toast(error.message,true);}
   finally{state.connecting=false;$("s3AccessKey").value="";$("s3SecretKey").value="";renderAuth();renderEstimate();}
 }
 
@@ -298,11 +361,13 @@ function rtcPolarizations() {
 function updateAvailability() {
   const status=$("connectionStatus"), missing=missingAccess();
   const loaded=[...(state.rawConnected?["OData"]:[]),...(state.s3Connected?["S3"]:[])];
-  status.classList.toggle("connected",isOfficial()?!!(state.plan?!missing.length:loaded.length):hasDownloadAccess());
+  status.classList.toggle("connected",isOfficial()?!!(state.plan?!missing.length:loaded.length):isGedi()?state.earthdataConnected:hasDownloadAccess());
   status.querySelector("span").textContent=isOfficial()?(missing.length?`需载入 ${missing.map(transportLabel).join(" + ")}`:
     loaded.length?`${loaded.join(" / ")} 凭据已载入`:"免登录检索 · 按通道认证"):
-    isProcess()?(state.connected?"API 已连接":"尚未连接 API"):isRtc()?"RTC · 下载时请求临时授权":isModis()?"MODIS · 无需个人密钥，自动请求临时读取":"公开数据 · 无需登录";
+    isGedi()?(state.earthdataConnected?"Earthdata 凭据已载入 · 下载时验证":"GEDI 免登录检索 · 下载需 Earthdata 认证"):isProcess()?(state.connected?"API 已连接":"尚未连接 API"):isRtc()?"RTC · 下载时请求临时授权":isModis()?"MODIS · 无需个人密钥，自动请求临时读取":"公开数据 · 无需登录";
   document.querySelectorAll("[data-lock]").forEach(element=>{element.disabled=state.busy||state.connecting;});
+  $("gediSensitivity").disabled=state.busy||state.connecting||isGedi()&&gediProduct()?.level==="L1B";
+  $("gediResolution").disabled=state.busy||state.connecting||Boolean($("gediReference").value.trim());
   if(isRtc()){
     const {inputs,common}=rtcPolarizations();
     for(const input of inputs)input.disabled=state.busy||state.connecting||(common!==null&&!common.includes(input.value)&&!input.checked);
@@ -320,15 +385,25 @@ function updateAvailability() {
   $("mapDrawPolygon").disabled=state.busy;
   $("rawCollection").disabled=state.busy||state.connecting||state.loadingCollections;
   $("refreshCollections").disabled=state.busy||state.connecting||state.loadingCollections;
+  if(Batch.enabled()) {
+    status.classList.toggle("connected",state.plan ? !missing.length : Batch.searchReady());
+    status.querySelector("span").textContent=state.plan ? (missing.length ? "联合下载需 " + missing.map(transportLabel).join(" / ") : "联合下载 · 下载权限已就绪") : "附带 " + Batch.checked.size + " 个来源 · 可提前登录";
+  }
   $("searchScenes").disabled=!canSearch();
-  $("selectAll").disabled=!state.scenes.some(selectable)||state.busy;
-  $("selectNone").disabled=!state.selected.size||state.busy;
-  $("downloadSelected").disabled=!hasDownloadAccess()||!state.aoi||!state.selected.size||state.busy||state.connecting||!state.plan;
+  const companion=Batch.results.get(Batch.active), count=Batch.query?Batch.totalSelected():state.selected.size;
+  $("selectAll").disabled=!(companion?companion.scenes.length:state.scenes.some(selectable))||state.busy;
+  $("selectNone").disabled=!(companion?companion.selected.size:state.selected.size)||state.busy;
+  $("downloadSelected").disabled=!hasDownloadAccess()||!state.aoi||!count||state.busy||state.connecting||!state.plan;
+  Batch.availability();
+  document.querySelectorAll("#companionResults input").forEach(element=>element.disabled=state.busy||element.dataset.unavailable==="1");
   document.querySelectorAll("#scenesBody input").forEach(element=>element.disabled=state.busy||element.dataset.unavailable==="1");
   updateButtons();
+  Accounts.render();
 }
 function setBusy(value) {state.busy=value;updateAvailability();}
 function renderAuth() {
+  $("earthdataConnectedPanel").hidden=!state.earthdataConnected;
+  $("earthdataAuthFields").hidden=state.earthdataConnected;
   $("rawConnectedPanel").hidden=!state.rawConnected;
   $("rawAuthFields").hidden=state.rawConnected;
   $("s3ConnectedPanel").hidden=!state.s3Connected;
@@ -336,20 +411,20 @@ function renderAuth() {
   $("connectedPanel").hidden=!state.connected;
   $("authFields").hidden=state.connected;
   $("connectButton").hidden=state.connected;
-  $("clientSecret").placeholder=state.connected?"已连接 · Secret 仅保存在运行内存":"粘贴创建客户端时显示的 Secret";
   updateAvailability();
 }
 async function connect() {
   const id=$("clientId").value.trim(), secret=$("clientSecret").value.trim();
   if(state.busy||state.connected||state.connecting)return;
-  if(!id||!secret){$("authError").textContent="请同时填写 Client ID 和 Client Secret。";$("authError").hidden=false;return;}
+  if((!id||!secret)&&!Accounts.saved("oauth")){Accounts.setError("oauth","请同时填写 Client ID 和 Client Secret。");return;}
   $("authError").hidden=true;
   state.connecting=true;updateAvailability();const button=$("connectButton");button.querySelector("span").textContent="正在验证…";
   try{
-    await api("connect",{client_id:id,client_secret:secret});
-    state.connected=true;clearScenes();$("clientSecret").value="";$("clientSecret").type="password";renderAuth();
-    toast("凭据验证成功，可以下载 Sentinel-2 L2A 影像。");
-  }catch(error){$("authError").textContent=error.message;$("authError").hidden=false;}
+    const result=await api("connect",{client_id:id,client_secret:secret,use_saved:Accounts.saved("oauth")});
+    state.connected=result.connected;if(isProcess()||Batch.checked.has("s2-process"))clearScenes();$("clientSecret").value="";$("clientSecret").type="password";
+    await Accounts.refresh();renderAuth();renderEstimate();
+    toast(result.saved?"Sentinel Hub 登录信息已保存，下次打开自动恢复。":result.save_error,!result.saved);
+  }catch(error){Accounts.setError("oauth",error.message);}
   finally{state.connecting=false;button.querySelector("span").textContent="验证并连接";updateAvailability();}
 }
 
@@ -461,7 +536,7 @@ async function exportBoundary() {
   try{
     const path=await nativePath("save_boundary",{extension},()=>choosePath("保存研究区边界","填写完整保存路径，文件名应以 ."+extension+" 结尾。"));
     if(!path)return;
-    const result=await api("export-aoi",{geometry:state.aoi.geometry,name:state.aoi.name,path});toast("研究区已保存："+result.path, false, 11000);
+    const result=await api("export-aoi",{geometry:state.aoi.geometry,name:state.aoi.name,path});toast("研究区已保存："+displayPath(result.path), false, 11000);
   }catch(error){toast(error.message,true);}
 }
 async function searchPlaces(event) {
@@ -477,11 +552,11 @@ async function searchPlaces(event) {
 }
 
 function clearScenes() {
-  state.scenes=[];state.selected.clear();state.plan=null;state.query=null;state.planVersion++;
+  state.scenes=[];state.selected.clear();state.plan=null;state.query=null;state.planVersion++;Batch.clearResults();
   $("sceneCount").textContent="0";$("scenesEmpty").hidden=false;$("scenesTableWrap").hidden=true;$("scenesLoading").hidden=true;
   $("scenesEmpty").querySelector("strong").textContent="让影像覆盖你的研究区";
   $("scenesEmpty").querySelector(":scope > span").textContent="设置影像类别、研究区和筛选条件，再点击检索。";
-  $("scenesSubtitle").textContent=isProcess()?"按实际过境时间整理，跨瓦片自动拼接。":isRaw()?"按类别检索产品。没有安全可用入口的结果会标明。":"只裁剪所选公开瓦片，不静默替换产品。";
+  $("scenesSubtitle").textContent=isGedi()?"按明确版本检索 NASA 文件。目录相交不代表研究区有通过质量筛选的足迹。":isProcess()?"按实际过境时间整理，跨瓦片自动拼接。":isRaw()?"按类别检索产品。没有安全可用入口的结果会标明。":"只裁剪所选公开瓦片，不静默替换产品。";
   $("scenesBody").innerHTML="";
   if(footprintLayer)footprintLayer.clearLayers();renderAssetPicker();renderEstimate();updateAvailability();
 }
@@ -496,25 +571,35 @@ function renderScenes() {
     const cloud=scene.cloud_max??0, coverage=scene.coverage_percent;
     const available=selectable(scene), checked=state.selected.has(scene.key);
     const title=scene.title||scene.key;
-    const description=isRaw()?`<span class="scene-product">${escapeHtml(title)}</span>${available?escapeHtml(scene.tiles.join(' / ')+(scene.raw?.source_note?" · "+scene.raw.source_note:"")):(isS5p()||isSen3()||isL3()||isWorldCover()||isModis())?escapeHtml(scene.raw?.unavailable_reason||'无可用下载入口'):'无可用下载入口'}`:
+    const description=isGedi()?`<span class="scene-product">${escapeHtml(title)}</span>${escapeHtml(available?scene.tiles.join(' / ')+(isGediRaster()?" · 汇总至 "+scene.gedi.end.slice(0,10):""):scene.gedi?.unavailable_reason||"无可用下载入口")}`:isRaw()?`<span class="scene-product">${escapeHtml(title)}</span>${available?escapeHtml(scene.tiles.join(' / ')+(scene.raw?.source_note?" · "+scene.raw.source_note:"")):(isS5p()||isSen3()||isL3()||isWorldCover()||isModis())?escapeHtml(scene.raw?.unavailable_reason||'无可用下载入口'):'无可用下载入口'}`:
       (isProcess()?`${scene.tile_count} 块`:escapeHtml(scene.tiles.join(' / ')));
-    return `<tr data-key="${escapeHtml(scene.key)}" class="${checked?"selected":""} ${available?"":"scene-unavailable"}"><td><input type="checkbox" aria-label="选择 ${escapeHtml(title)}" ${checked?"checked":""} ${available?"":'disabled data-unavailable="1"'}></td><td class="scene-datetime">${escapeHtml(scene.date)}<span>${escapeHtml(scene.time)}</span></td><td><span class="platform-tag">${escapeHtml(scene.platform)}</span></td><td title="${escapeHtml(title+(scene.tiles.length?" · "+scene.tiles.join(', '):""))}">${description}</td><td><span class="cloud-cell"><span class="cloud-bar"><i style="width:${Math.max(0,Math.min(100,cloud))}%"></i></span>${scene.cloud_max==null?"—":scene.cloud_max+"%"}</span></td><td class="${coverage<95?"coverage-low":""}">${coverage}%</td></tr>`;
+    return `<tr data-key="${escapeHtml(scene.key)}" class="${checked?"selected":""} ${available?"":"scene-unavailable"}"><td><input type="checkbox" aria-label="选择 ${escapeHtml(title)}" ${checked?"checked":""} ${available?"":'disabled data-unavailable="1"'}></td><td class="scene-datetime">${escapeHtml(scene.date)}<span>${escapeHtml(scene.time)}</span></td><td><span class="platform-tag">${escapeHtml(scene.platform)}</span></td><td title="${escapeHtml(title+(scene.tiles.length?" · "+scene.tiles.join(', '):""))}">${description}</td><td><span class="cloud-cell"><span class="cloud-bar"><i style="width:${Math.max(0,Math.min(100,cloud))}%"></i></span>${scene.cloud_max==null?"—":scene.cloud_max+"%"}</span></td><td class="${coverage!=null&&coverage<95?"coverage-low":""}">${isGedi()?"导出后统计":coverage==null?"—":coverage+"%"}</td></tr>`;
   }).join("");
   if(state.query){
     const q=state.query, dates=q.start?`${q.start} — ${q.end}`:isDem()?"静态 DSM":"不限日期";
-    $("scenesSubtitle").textContent=isRaw()?`${isOfficial()||isS5p()||isSen3()?q.collection:profiles[state.profile][0]} · ${dates}${q.radar_mode?" · "+q.radar_mode:""}${isOpenOptical()?" · 云量 ≤ "+q.max_cloud+"%":isL3()?" · 日期与季度重叠":isWorldCover()?" · 日期与年度重叠":isModis()?" · 按标称日筛选":""} · 不裁剪`:
+    $("scenesSubtitle").textContent=isGedi()?`${gediProduct()?.title||q.collection} · ${dates} · ${isGediRaster()?"按完整汇总期重叠匹配":"导出时精确筛选足迹日期与边界"}`:isRaw()?`${isOfficial()||isS5p()||isSen3()?q.collection:profiles[state.profile][0]} · ${dates}${q.radar_mode?" · "+q.radar_mode:""}${isOpenOptical()?" · 云量 ≤ "+q.max_cloud+"%":isL3()?" · 日期与季度重叠":isWorldCover()?" · 日期与年度重叠":isModis()?" · 按标称日筛选":""} · 不裁剪`:
       isDem()?`${dates} · 可裁剪或下载整瓦片`:isRtc()?`${dates}${q.radar_mode?" · "+q.radar_mode:""} · 每景单独裁剪 · 线性 γ⁰`:
       `${dates} · 云量 ≤ ${q.max_cloud}% · 每${isProcess()?"次过境":"个瓦片"}一个输出`;
   }
-  renderAssetPicker();updateAvailability();schedulePlan();
+  Batch.renderResults();renderAssetPicker();updateAvailability();schedulePlan();
 }
 function renderEstimate() {
-  $("selectedCount").hidden=!state.selected.size;$("selectedCount").textContent=String(state.selected.size);
+  const selected=Batch.query?Batch.totalSelected():state.selected.size;
+  $("selectedCount").hidden=!selected;$("selectedCount").textContent=String(selected);
   const label=$("downloadEstimate"), headline=label.querySelector("strong"), body=label.querySelector("span");
-  const p=state.plan, count=state.selected.size;
+  const p=state.plan, count=selected;
   if(!count){headline.textContent="尚未选择影像";body.textContent="选择后查看文件类型、预计体积和输出信息。";}
   else if(!p){headline.textContent=`已选择 ${count} 项`;body.textContent=(isRtc()&&rtcPolarizations().issue)||"正在检查下载计划…";}
-  else if(p.kind==="original"){
+  else if(p.kind==="batch"){
+    const missing=missingAccess();
+    headline.textContent=`联合下载 · ${p.groups.length} 个来源 · ${p.scene_count} 个结果`;
+    body.textContent=`同区域 / 同 UTC 日期 · 约 ${sizeLabel(p.estimated_bytes)}${p.unknown_size?" + 部分体积待确定":""}${missing.length?" · 先登录 "+missing.map(transportLabel).join(" / "):" · 登录已就绪"}`;
+  }
+  else if(p.kind==="gedi"){
+    const mode=p.options.mode, missing=missingAccess();
+    headline.textContent=`GEDI · ${p.scene_count} 个源文件${mode==="original"?" · 保留原始格式":p.data_kind==="raster"?" · 对齐栅格":mode==="aligned"?" + 足迹表格 / 对齐栅格":" + 足迹表格"}`;
+    body.textContent=`原始文件约 ${p.estimated_bytes?sizeLabel(p.estimated_bytes):"由服务确定"}${p.grid?` · ${p.grid.width} × ${p.grid.height} 像元`:""}${missing.length?" · 请先连接 Earthdata":" · 不消耗 Sentinel Hub 额度"}`;
+  }else if(p.kind==="original"){
     headline.textContent=p.sen3_complete?`${p.scene_count} 个完整 SEN3 · ${p.requests} 个文件`:`${p.requests} 个原始文件 · 不裁剪`;
     const missing=missingAccess();
     body.textContent=`${p.transports.map(transportLabel).join(" + ")} · ${p.estimated_bytes?sizeLabel(p.estimated_bytes):"体积由服务确定"}${missing.length?" · 请先载入 "+missing.map(transportLabel).join(" + ")+" 凭据":""}`;
@@ -527,11 +612,11 @@ function renderEstimate() {
 function schedulePlan() {
   clearTimeout(planTimer);state.plan=null;renderEstimate();
   const version=++state.planVersion;
-  if(!state.aoi||!state.selected.size||state.busy||(isRtc()&&rtcPolarizations().issue))return;
+  if(!state.aoi||!(Batch.query?Batch.totalSelected():state.selected.size)||state.busy||(isRtc()&&rtcPolarizations().issue))return;
   planTimer=setTimeout(async()=>{
     try{
-      const result=await api("plan",downloadRequest());if(version!==state.planVersion)return;
-      state.plan=result;
+      const result=await api(Batch.query?"batch-plan":"plan",downloadRequest());if(version!==state.planVersion)return;
+      state.plan=result;Batch.updateReferences(result);
       if(missingAccess().includes("cdse-s3"))$("s3Access").open=true;
       if(missingAccess().includes("odata"))$("rawODataAccess").open=true;
       renderEstimate();
@@ -546,12 +631,25 @@ async function searchScenes() {
   if(dateEnabled()&&$("startDate").value>$("endDate").value){toast("开始日期不能晚于结束日期。",true);return;}
   if(drawHandler)drawHandler.disable();
   clearScenes();setBusy(true);showSearchProgress();
-  try{const result=await api("search",{geometry:state.aoi.geometry,profile:state.profile,...criteria()});state.jobId=result.job_id;$("cancelSearch").disabled=false;pollJob(result.job_id);}
+  try{const request={geometry:state.aoi.geometry,profile:state.profile,...criteria()};const result=await api(Batch.enabled()?"batch-search":"search",Batch.enabled()?Batch.searchRequest(request):request);state.jobId=result.job_id;$("cancelSearch").disabled=false;pollJob(result.job_id);}
   catch(error){setBusy(false);$("scenesLoading").hidden=true;$("scenesEmpty").hidden=false;toast(error.message,true);}
 }
 function renderPlanFolder() {
   const field=$("planPreviewFolder");
   if(field&&state.plan)field.textContent=$('outputDirectory').value.trim().replace(/[\\/]$/,"")+"\\"+(state.plan.folder_name||"S2L2A_"+state.plan.fingerprint);
+}
+function gediPlanItems(p) {
+  const mode=p.options.mode, o=p.options;
+  const items=[["GEDI 类别",p.collection_title],["原始文件",`${p.scene_count} 个 · 约 ${p.estimated_bytes?sizeLabel(p.estimated_bytes):"由服务确定"}`],
+    ["下载与导出",mode==="original"?"保留原始文件":p.data_kind==="raster"?"原始栅格 + 对齐 GeoTIFF":mode==="aligned"?"原始 HDF5 + CSV / GeoJSON + 均值 / 数量 GeoTIFF":"原始 HDF5 + CSV / GeoJSON"],
+    ["日期范围",`${p.criteria.start} — ${p.criteria.end}（UTC）`],["原始文件缓存",p.root_name+"/original（同一修订可复用）"]];
+  if(p.data_kind==="footprint"&&mode!=="original")items.push(["质量标志",o.quality==="recommended"?p.quality_paths.join(" / ")+" = "+(state.gediCollections.find(item=>item.id===o.collection)?.quality_value??1):"不按质量标志筛选，仍保留质量列"],
+    ["附加筛选",`${o.nondegraded?"degrade = 0":"保留定位降级"} · sensitivity ${o.min_sensitivity?"≥ "+o.min_sensitivity:"不额外筛选"} · ${o.beams.length} 个波束`],["导出参数",p.fields.map(f=>f.id+(f.units?" ("+f.units+")":"")).join(" / ")]);
+  if(p.grid)items.push(["输出网格",`${p.grid.width.toLocaleString()} × ${p.grid.height.toLocaleString()} 像元`],["坐标系",p.grid.crs_label],
+    ["像元大小",p.grid.pixel_size.map(x=>Number(x).toPrecision(7)).join(" × ")+" "+p.grid.pixel_unit],
+    ["网格来源",p.grid.reference?displayPath(p.grid.reference.path):"沿用同研究区、同像元大小的 UTM 输出规则"]);
+  if(o.sample_reference)items.push(["影像采样","足迹中心所在像元 · 应用参考文件的缩放与偏移"]);
+  return items;
 }
 function showDownloadPlan() {
   if(!state.plan||state.busy||!hasDownloadAccess())return;
@@ -559,16 +657,23 @@ function showDownloadPlan() {
   if(!$("outputDirectory").value.trim()){toast("请先选择输出文件夹。",true);$("outputDirectory").focus();return;}
   try{
     const p=state.plan;
-    const raw=p.kind==="original", pub=p.kind==="public";
-    const items=raw?[["产品类别",p.options.collection],["文件数量",`${p.requests} 个`],["下载范围","原产品范围，不按研究区裁剪"],
+    if(p.kind==="batch"){
+      $("planDetails").innerHTML=Batch.planHtml(p);
+      $("planNote").textContent="各来源共用研究区和 UTC 日期范围，保留各自的采集或汇总时间。独立来源可同时下载；跟随主影像的 GEDI 等待所选 GeoTIFF 完成。无匹配、失败和取消会分别记录，已完成的文件保留。";
+      renderPlanFolder();if(!$("downloadDialog").open)$("downloadDialog").showModal();return;
+    }
+    const raw=p.kind==="original", pub=p.kind==="public", gedi=p.kind==="gedi";
+    const items=gedi?gediPlanItems(p):raw?[["产品类别",p.options.collection],["文件数量",`${p.requests} 个`],["下载范围","原产品范围，不按研究区裁剪"],
       ["目录提供的体积",p.estimated_bytes?sizeLabel(p.estimated_bytes):"下载时确定"],["通道",p.transports.map(transportLabel).join(" + ")],
       ["文件形式",p.options.mode==="original"?(isDem()?"完整 DSM GeoTIFF":isModis()?"原始 HDF4":isSlc()?"完整原始 SAFE ZIP":"官方整包或单主文件"):p.options.mode==="metadata"?"目录元数据":"目录所列原始资产"]]:
       [["影像数量",`${p.scene_count} 景`],["输出网格",`${p.width.toLocaleString()} × ${p.height.toLocaleString()} 像元`],["像元大小",`${p.resolution} 米`],["输出内容",p.options.label],["坐标系",`${p.crs_label} · EPSG:${p.epsg}`],["预计文件体积",`${sizeLabel(p.bytes_per_scene*p.scene_count)}（未压缩）`],
        [pub?"需读取的公开源":"预计请求数量",pub?`${p.source_objects} 个源文件`:`最多 ${p.requests} 次 · 每景 ${p.tiles_per_scene} 区块`],["处理额度",pub?"无需 Sentinel Hub 额度":`约 ${p.estimated_pu} PU`]];
     const rows=items.map(([name,value])=>`<div class="plan-item"><span>${escapeHtml(name)}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
-    const files=raw? p.targets.map(t=>t.name).slice(0,6).join(" / ")+(p.targets.length>6?`（另 ${p.targets.length-6} 项）`:"") :p.options.output_bands.join(" / ");
-    $("planDetails").innerHTML=rows+`<div class="plan-item wide"><span>${raw?"原始文件/产品":"波段顺序"}</span><strong class="band-list">${escapeHtml(files)}</strong></div><div class="plan-item wide"><span>保存位置</span><strong id="planPreviewFolder" class="plan-path"></strong></div>`;
-    $("planNote").textContent=isSen3()?(p.sen3_complete?"不裁剪。仅当清单和所有原始成员验证通过，才发布完整 .SEN3 目录。":"不裁剪。选中的原始成员会保留文件名，存入单独目录；不是完整 .SEN3 产品。"):
+    const files=raw||gedi? p.targets.map(t=>t.name).slice(0,6).join(" / ")+(p.targets.length>6?`（另 ${p.targets.length-6} 项）`:"") :p.options.output_bands.join(" / ");
+    $("planDetails").innerHTML=rows+`<div class="plan-item wide"><span>${raw||gedi?"原始文件/产品":"波段顺序"}</span><strong class="band-list">${escapeHtml(files)}</strong></div><div class="plan-item wide"><span>保存位置</span><strong id="planPreviewFolder" class="plan-path"></strong></div>`;
+    $("planNote").textContent=gedi?(p.options.mode==="original"?"下载精确产品版本的原始文件。有 NASA 目录校验值时进行核对；所有文件记录本地 SHA-256。缺少目录校验值的原始文件另做完整解码检查。研究区只用于检索。":p.data_kind==="raster"?"保留原始约 1 km 栅格，按研究区裁剪并最近邻对齐。日期匹配整个汇总期，无法拆分为某一天的观测。":
+      "只导出研究区与 UTC 日期内通过所选条件的足迹。约 25 米离散观测按足迹中心入格，无观测处为 NoData，不插值。参数均值和观测数量分别保存；标准误及区间均值不能当作合并不确定性。高程默认是椭球高，RH 是相对高度。"):
+      isSen3()?(p.sen3_complete?"不裁剪。仅当清单和所有原始成员验证通过，才发布完整 .SEN3 目录。":"不裁剪。选中的原始成员会保留文件名，存入单独目录；不是完整 .SEN3 产品。"):
       isSlc()?"只保存完整原始 ZIP。分段接收并固定对象版本，核对 ASF 全文件 MD5 和 SAFE 全部文件 CRC；逐一校验清单成员及复数 I/Q 测量。":
       isModis()?"保留源 HDF4 / XML / COG 原字节。校验源版本及完整 MD5；COG 逐块解码、核对图层和 MODLAND 网格。HDF4 若有配套 XML，则额外校验 NASA 的文件长度和 MD5。物理缩放与 TIFF 标签分开记入下载记录。":
       isWorldCover()?"下载原始年度整瓦片，不裁剪或转换 DN。校验源 ETag、文件长度、栅格网格及产品标识；保留 NoData、缩放与偏移。":
@@ -583,19 +688,20 @@ function showDownloadPlan() {
 async function beginDownload() {
   $("confirmDownload").disabled=true;
   try{
-    const request={...downloadRequest(),plan_fingerprint:state.plan?.fingerprint};const result=await api("download",request);
+    const request={...downloadRequest(),plan_fingerprint:state.plan?.fingerprint};const result=await api(state.plan?.kind==="batch"?"batch-download":"download",request);
     $("downloadDialog").close();setBusy(true);state.jobId=result.job_id;
     showDownloadProgress();pollJob(result.job_id);
   }catch(error){toast(error.message,true);}
   finally{$("confirmDownload").disabled=false;}
 }
 function showSearchProgress(canCancel=false) {
-  $("scenesEmpty").hidden=true;$("scenesLoading").hidden=false;$("searchMessage").textContent="连接官方影像目录…";
+  $("scenesEmpty").hidden=true;$("scenesLoading").hidden=false;$("searchMessage").textContent=Batch.enabled()?"连接主数据及附带来源目录…":isGedi()?"连接 NASA CMR 目录…":"连接官方影像目录…";
   $("cancelSearch").disabled=!canCancel;$("cancelSearch").textContent="取消检索";
 }
 function showDownloadProgress(kind="download") {
   state.resultFolder="";
-  $("jobTitle").textContent=kind==="update"?"软件更新":"下载队列";
+  $("jobTitle").textContent=kind==="update"?"软件更新":Batch.query?"主数据及附带数据":isGedi()?"GEDI 数据下载":"下载队列";
+  Batch.progress([]);
   $("jobPanel").hidden=false;$("jobFiles").hidden=true;$("jobFiles").innerHTML="";$("openResultFolder").hidden=true;
   $("closeJobPanel").hidden=true;$("cancelJob").hidden=false;$("cancelJob").disabled=false;$("cancelJob").textContent="取消任务";
   $("jobLogs").innerHTML="";$("jobStatus").className="job-status";$("jobStatus").textContent="正在下载";
@@ -613,27 +719,30 @@ async function pollJob(id) {
     if(state.jobId!==id)return;
     try{
       const job=await api("job?id="+encodeURIComponent(id));retries=0;
-      if(job.kind==="search")$("searchMessage").textContent=job.message;
+      const searching=job.kind==="search"||job.kind==="batch-search";
+      if(searching)$("searchMessage").textContent=job.message;
       else{
         $("jobMessage").textContent=job.message;$("jobProgress").style.width=(job.progress*100).toFixed(1)+"%";$("jobFraction").textContent=Math.round(job.progress*100)+"%";
         $("jobLogs").innerHTML=job.logs.map(log=>`<div class="job-log"><time>${new Date(log.time*1000).toLocaleTimeString("zh-CN",{hour12:false})}</time><span>${escapeHtml(log.message)}</span></div>`).join("");
         $("jobLogs").scrollTop=$("jobLogs").scrollHeight;
+        Batch.progress(job.detail?.batch_groups);
         if(job.detail?.folder)state.resultFolder=job.detail.folder;
       }
-      if(job.status==="running"||job.status==="cancelling"){if(job.status==="cancelling"){const button=$(job.kind==="search"?"cancelSearch":"cancelJob");button.disabled=true;button.textContent="正在取消…";}setTimeout(poll,900);return;}
+      if(job.status==="running"||job.status==="cancelling"){if(job.status==="cancelling"){const button=$(searching?"cancelSearch":"cancelJob");button.disabled=true;button.textContent="正在取消…";}setTimeout(poll,900);return;}
       state.jobId=null;setBusy(false);
-      if(job.kind==="search"){
+      if(searching){
         $("scenesLoading").hidden=true;
-        if(job.status==="completed"){state.scenes=job.result.scenes;state.query=job.result.query;state.selected=firstSelection();renderScenes();if(state.scenes.length)toast(`找到 ${state.scenes.length} 个结果${state.selected.size?"，已选中首个可下载结果。":"，但没有可用下载入口。"}`);}
+        if(job.status==="completed"){state.scenes=job.result.scenes;state.query=job.result.query;state.selected=firstSelection();if(job.result.batch)Batch.accept(job.result.batch);renderScenes();if(job.result.batch)toast(job.message+"，请分别查看各来源结果。",job.result.batch.groups.some(g=>g.error));else if(state.scenes.length)toast(`找到 ${state.scenes.length} 个结果${state.selected.size?"，已选中首个可下载结果。":"，但没有可用下载入口。"}`);}
         else{$("scenesEmpty").hidden=false;toast(job.error||job.message,job.status==="failed");}
       }else{
         $("closeJobPanel").hidden=false;$("cancelJob").hidden=true;
-        $("jobStatus").className="job-status "+(job.status==="failed"?"failed":job.status==="cancelled"?"cancelled":"");
+        $("jobStatus").className="job-status "+(job.status==="failed"?"failed":job.status==="partial"?"partial":job.status==="cancelled"?"cancelled":"");
         const isUpdate=job.kind==="update";
-        $("jobStatus").textContent=job.status==="completed"?(isUpdate?"校验通过":job.result.files.length?"下载完成":"无有效输出"):job.status==="failed"?"下载失败":"已取消";
-        if(job.status==="completed"){
-          state.resultFolder=job.result.folder;$("jobFiles").innerHTML=job.result.files.map(file=>`<div class="job-file">${icon("check")}<span title="${escapeHtml(file.path)}">${file.status==="skipped"?"已有 · ":""}${escapeHtml(basename(file.path))}</span></div>`).join("");$("jobFiles").hidden=false;
-          toast(isUpdate?job.message:`${job.message}。来源记录已保存。`,false,12000);
+        if(job.result?.sources)Batch.progress(job.result.sources);
+        $("jobStatus").textContent=job.status==="completed"?(isUpdate?"校验通过":job.result.files.length?"下载完成":"无有效输出"):job.status==="partial"?"部分完成":job.status==="failed"?"下载失败":"已取消";
+        if(job.status==="completed"||job.status==="partial"){
+          state.resultFolder=job.result.folder;$("jobFiles").innerHTML=job.result.files.map(file=>`<div class="job-file">${icon("check")}<span title="${escapeHtml(displayPath(file.path))}">${file.status==="skipped"?"已有 · ":""}${escapeHtml(basename(file.path))}</span></div>`).join("");$("jobFiles").hidden=false;
+          toast(isUpdate?job.message:`${job.message}。来源记录已保存。`,job.status==="partial",12000);
         }else toast(job.error||job.message,job.status==="failed",12000);
         $("openResultFolder").hidden=!state.resultFolder;if(!isUpdate)schedulePlan();
       }
@@ -653,7 +762,7 @@ function bindEvents() {
   let datesBeforeWorldCover;
   $("sourceProfile").addEventListener("change",()=>{
     const wasWorldCover=isWorldCover();
-    state.profile=$("sourceProfile").value;
+    state.profile=$("sourceProfile").value;Batch.primaryChanged();
     if(!wasWorldCover&&isWorldCover()){
       const start=$("startDate").value,end=$("endDate").value;
       datesBeforeWorldCover=[start,end];
@@ -663,11 +772,29 @@ function bindEvents() {
     }else if(wasWorldCover&&!isWorldCover()&&datesBeforeWorldCover){
       [$("startDate").value,$("endDate").value]=datesBeforeWorldCover;
     }
-    for(const id of ["clientSecret","rawPassword","rawToken","rawTotp","s3AccessKey","s3SecretKey"])$(id).value="";
+    for(const id of ["clientSecret","rawPassword","rawToken","rawTotp","s3AccessKey","s3SecretKey","earthdataToken","earthdataPassword"])$(id).value="";
     $("radarMode").value="";$("rawMode").value=isRadar()?"metadata":isOpenOptical()||isL3()||isWorldCoverS2()||isModis()?"assets":"original";$("rawTransport").value="auto";
     clearScenes();renderProfile();if(isOfficial())loadCollections();
   });
   for(const id of ["s5pCollection","sen3Collection"])$(id).addEventListener("change",clearScenes);
+  $("gediCollection").addEventListener("change",()=>{clearScenes();renderProfile();});
+  $("gediMode").addEventListener("change",()=>{renderGediOptions();schedulePlan();});
+  for(const id of ["gediFields","gediBeams","gediQuality","gediNondegraded","gediSensitivity","gediResolution","gediSampleReference"])$(id).addEventListener("change",schedulePlan);
+  $("gediReference").addEventListener("change",()=>{renderGediOptions();schedulePlan();});
+  $("chooseGediReference").addEventListener("click",chooseGediReference);
+  $("clearGediReference").addEventListener("click",()=>{$("gediReference").value="";renderGediOptions();schedulePlan();});
+  $("earthdataLoginMode").addEventListener("change",()=>{
+    const token=$("earthdataLoginMode").value==="token";
+    $("earthdataTokenField").hidden=!token;$("earthdataAccountFields").hidden=token;
+    $("earthdataToken").value="";$("earthdataPassword").value="";
+  });
+  $("earthdataConnect").addEventListener("click",connectEarthdata);
+  for(const id of ["earthdataToken","earthdataPassword"])$(id).addEventListener("keydown",event=>{if(event.key==="Enter")connectEarthdata();});
+  $("earthdataDisconnect").addEventListener("click",async()=>{
+    try{await api("earthdata-disconnect",{});delete Accounts.errors.earthdata;for(const id of ["earthdataUsername","earthdataPassword","earthdataToken"])$(id).value="";await Accounts.refresh();renderAuth();renderEstimate();}catch(e){toast(e.message,true);}
+  });
+  for(const [id,name] of [["getEarthdataToken","earthdata-token"],["earthdataRegister","earthdata-register"],["earthdataAuthDocs","earthdata-auth"]])$(id).addEventListener("click",()=>api("open-link",{name}).catch(e=>toast(e.message,true)));
+  $("gediDocs").addEventListener("click",()=>api("open-link",{name:"gedi:"+$("gediCollection").value}).catch(e=>toast(e.message,true)));
   $("collectionFilter").addEventListener("input",renderCollectionPicker);
   $("refreshCollections").addEventListener("click",()=>loadCollections(true));
   $("rawCollection").addEventListener("change",()=>{
@@ -710,7 +837,7 @@ function bindEvents() {
   $("rawAuthDocs").addEventListener("click",()=>api("open-link",{name:"raw-auth"}).catch(e=>toast(e.message,true)));
   $("rawConnect").addEventListener("click",connectRaw);
   $("rawDisconnect").addEventListener("click",async()=>{
-    try{await api("raw-disconnect",{});state.rawConnected=false;renderAuth();renderEstimate();}catch(e){toast(e.message,true);}
+    try{await api("raw-disconnect",{});delete Accounts.errors.odata;for(const id of ["rawUsername","rawPassword","rawTotp","rawToken"])$(id).value="";await Accounts.refresh();renderAuth();renderEstimate();}catch(e){toast(e.message,true);}
   });
 
   $("getS3KeyButton").addEventListener("click",()=>api("open-link",{name:"s3-keys"}).catch(e=>toast(e.message,true)));
@@ -718,7 +845,7 @@ function bindEvents() {
   $("s3Connect").addEventListener("click",connectS3);
   $("s3SecretKey").addEventListener("keydown",event=>{if(event.key==="Enter")connectS3();});
   $("s3Disconnect").addEventListener("click",async()=>{
-    try{await api("s3-disconnect",{});state.s3Connected=false;renderAuth();renderEstimate();}catch(e){toast(e.message,true);}
+    try{await api("s3-disconnect",{});delete Accounts.errors.s3;$("s3AccessKey").value="";$("s3SecretKey").value="";await Accounts.refresh();renderAuth();renderEstimate();}catch(e){toast(e.message,true);}
   });
   $("modisDocs").addEventListener("click",()=>api("open-link",{name:state.profile}).catch(e=>toast(e.message,true)));
   $("worldcoverDocs").addEventListener("click",()=>api("open-link",{name:"worldcover"}).catch(e=>toast(e.message,true)));
@@ -727,7 +854,7 @@ function bindEvents() {
   $("connectButton").addEventListener("click",connect);
   $("clientSecret").addEventListener("keydown",event=>{if(event.key==="Enter")connect();});
   $("toggleSecret").addEventListener("click",()=>{$("clientSecret").type=$("clientSecret").type==="password"?"text":"password";});
-  $("disconnectButton").addEventListener("click",async()=>{try{await api("disconnect",{});state.connected=false;clearScenes();renderAuth();$("clientSecret").focus();}catch(error){toast(error.message,true);}});
+  $("disconnectButton").addEventListener("click",async()=>{try{await api("disconnect",{});delete Accounts.errors.oauth;$("clientId").value="";$("clientSecret").value="";await Accounts.refresh();clearScenes();renderAuth();$("clientId").focus();}catch(error){toast(error.message,true);}});
   $("helpButton").addEventListener("click",()=>$("helpDialog").showModal());
   $("openAuthDocs").addEventListener("click",()=>api("open-link",{name:"auth"}).catch(e=>toast(e.message,true)));
   $("openQuotaDocs").addEventListener("click",()=>api("open-link",{name:"quotas"}).catch(e=>toast(e.message,true)));
@@ -756,8 +883,8 @@ function bindEvents() {
   document.querySelectorAll("#basemapSwitch button").forEach(button=>button.addEventListener("click",()=>changeBasemap(button.dataset.basemap)));
   $("exportBoundary").addEventListener("click",()=>$("exportDialog").showModal());$("saveBoundary").addEventListener("click",exportBoundary);
   $("searchScenes").addEventListener("click",searchScenes);
-  $("selectAll").addEventListener("click",()=>{state.selected=new Set(state.scenes.filter(selectable).map(scene=>scene.key));renderScenes();});
-  $("selectNone").addEventListener("click",()=>{state.selected.clear();renderScenes();});
+  $("selectAll").addEventListener("click",()=>{if(Batch.selectAll())return;state.selected=new Set(state.scenes.filter(selectable).map(scene=>scene.key));renderScenes();});
+  $("selectNone").addEventListener("click",()=>{if(Batch.selectAll(true))return;state.selected.clear();renderScenes();});
   $("scenesBody").addEventListener("click",event=>{if(state.busy)return;const row=event.target.closest("tr[data-key]");if(!row||row.classList.contains("scene-unavailable"))return;const key=row.dataset.key;if(state.selected.has(key))state.selected.delete(key);else state.selected.add(key);row.classList.toggle("selected",state.selected.has(key));row.querySelector("input").checked=state.selected.has(key);renderAssetPicker();schedulePlan();});
   $("scenesBody").addEventListener("mouseover",event=>{const row=event.target.closest("tr[data-key]");if(!row||!footprintLayer)return;const scene=state.scenes.find(scene=>scene.key===row.dataset.key);footprintLayer.clearLayers();for(const product of scene?.products||[])L.geoJSON(product.footprint,{style:{color:"#699cac",weight:1,fillOpacity:0,dashArray:"5,5",interactive:false}}).addTo(footprintLayer);});
   $("scenesBody").addEventListener("mouseleave",()=>footprintLayer?.clearLayers());
@@ -770,13 +897,15 @@ function bindEvents() {
 
 async function initialize() {
   $("customBands").innerHTML=allBands.map(band=>`<label class="band-choice"><input type="checkbox" value="${band}" ${["B02","B03","B04","B08"].includes(band)?"checked":""} data-lock>${band}</label>`).join("");
+  $("gediBeams").innerHTML=["BEAM0000","BEAM0001","BEAM0010","BEAM0011","BEAM0101","BEAM0110","BEAM1000","BEAM1011"].map(beam=>`<label class="band-choice"><input type="checkbox" value="${beam}" checked data-lock>${beam}</label>`).join("");
   const today=new Date(), before=new Date(today);before.setUTCDate(before.getUTCDate()-30);
   const dateString=(date)=>date.toISOString().slice(0,10);
   $("startDate").value=dateString(before);$("endDate").value=dateString(today);
   for(const id of ["startDate","endDate"]){$(id).min="2015-06-23";$(id).max=dateString(today);}
-  configureMap();bindEvents();
+  configureMap();bindEvents();Accounts.initialize();
   try{
-    const data=await api("bootstrap");state.connected=data.connected;state.rawConnected=data.raw_connected;state.s3Connected=data.s3_connected;state.nativeDialogs=data.native_dialogs;
+    const data=await api("bootstrap");state.connected=data.connected;state.rawConnected=data.raw_connected;state.s3Connected=data.s3_connected;state.earthdataConnected=Boolean(data.earthdata_connected);state.gediCollections=data.gedi_collections||[];state.nativeDialogs=data.native_dialogs;
+    Batch.initialize(data.batch_sources||[]);
     updates.configured=Boolean(data.update_repository);
     $("updateCurrent").textContent=`当前版本 v${data.version}`;
     $("updateButton").disabled=false;
@@ -785,11 +914,13 @@ async function initialize() {
     const q=data.query||data.active_job?.detail?.criteria;
     renderOpenCollections("s5pCollection", data.s5p_collections||[], data.s5p_default||"", true);
     renderOpenCollections("sen3Collection", data.sen3_collections||[], data.sen3_default||"");
+    renderOpenCollections("gediCollection", state.gediCollections, data.gedi_default||"");
     if(q){
       state.query=data.query;
       state.profile=q.profile||data.active_job?.detail?.search_profile||state.profile;
       $("sourceProfile").value=state.profile;
       if(isS5p()||isSen3())$(isSen3()?"sen3Collection":"s5pCollection").value=q.collection;
+      else if(isGedi())$("gediCollection").value=q.collection;
       else state.collection=q.collection||"";
       $("radarMode").value=q.radar_mode||"";
       $("allDates").checked=isOfficial()&&!q.start&&!q.end;
@@ -797,10 +928,12 @@ async function initialize() {
       if(q.end)$("endDate").value=q.end;
       if(q.max_cloud!==undefined){$("maxCloud").value=q.max_cloud;$("maxCloud").dispatchEvent(new Event("input"));}
     }
+    if(data.batch)Batch.accept(data.batch,true);
     renderProfile();
-    if(isOfficial())loadCollections();
+    if(isOfficial()||Batch.checked.has("cdse-original"))loadCollections().then(()=>Batch.renderSettings());
     if(data.query){state.scenes=data.scenes||[];state.selected=firstSelection();renderScenes();}
-    if(data.active_job){state.jobId=data.active_job.id;setBusy(true);if(data.active_job.kind==="search")showSearchProgress(true);else showDownloadProgress(data.active_job.kind);pollJob(state.jobId);}
+    if(data.active_job){state.jobId=data.active_job.id;setBusy(true);if(["search","batch-search"].includes(data.active_job.kind))showSearchProgress(true);else showDownloadProgress(data.active_job.kind);pollJob(state.jobId);}
+    await Accounts.startup(data.accounts);
   }catch(error){toast(error.message,true);}
   updateAvailability();
 }

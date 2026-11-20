@@ -12,15 +12,17 @@ from .http import HttpClient, TOKEN_URL
 class RawAuth:
     def __init__(self):
         self._lock = threading.RLock()
+        self._state_lock = threading.RLock()
+        self.on_refresh = None
         self.clear()
 
     def clear(self):
-        with self._lock:
+        with self._lock, self._state_lock:
             self._access, self._refresh, self._expires = "", "", 0.0
 
     @property
     def connected(self):
-        with self._lock:
+        with self._state_lock:
             return bool(self._access and (self._refresh or self._expires > time.monotonic()))
 
     def connect(self, request):
@@ -29,7 +31,7 @@ class RawAuth:
             access = request.get("token", "")
             if not isinstance(access, str) or not 16 <= len(access.strip()) <= 12000 or any(c.isspace() for c in access.strip()):
                 raise UserError("请输入正确的 CDSE 临时访问令牌；不要填写 Sentinel Hub Client Secret。")
-            with self._lock:
+            with self._lock, self._state_lock:
                 # A pasted access token is validated by the download endpoint, not by decoding it locally.
                 self._access, self._refresh, self._expires = access.strip(), "", time.monotonic() + 3600
             return {"connected": True, "verified": False}
@@ -50,6 +52,17 @@ class RawAuth:
                 payload.clear()
         return {"connected": True, "verified": True}
 
+    def refresh_for_storage(self):
+        with self._lock:
+            return self._refresh
+
+    def restore_refresh(self, refresh_token):
+        if not isinstance(refresh_token, str) or not refresh_token or len(refresh_token) > 20000:
+            raise UserError("保存的 CDSE 会话已失效，请重新登录。")
+        with self._lock:
+            self._exchange({"grant_type": "refresh_token", "refresh_token": refresh_token})
+        return {"connected": True, "verified": True}
+
     def _exchange(self, payload, cancel=None):
         http = HttpClient()
         try:
@@ -65,7 +78,10 @@ class RawAuth:
             lifetime = int(data.get("expires_in", 0))
             if not isinstance(access, str) or not access or not isinstance(refresh, str) or not 0 < lifetime <= 86400:
                 raise ValueError
-            self._access, self._refresh, self._expires = access, refresh, time.monotonic() + lifetime
+            with self._state_lock:
+                self._access, self._refresh, self._expires = access, refresh, time.monotonic() + lifetime
+            if refresh and self.on_refresh is not None:
+                self.on_refresh(refresh)
         except (ValueError, TypeError, AttributeError, OverflowError):
             raise UserError("CDSE 认证服务没有返回可用访问令牌。") from None
         finally:

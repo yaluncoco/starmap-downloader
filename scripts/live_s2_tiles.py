@@ -85,6 +85,8 @@ class Local:
         raise RuntimeError(f"Local {route} did not finish before validation timeout")
 
 
+from browser_flow import open_data_page
+
 def digest(path):
     with Path(path).open("rb") as fd:
         return hashlib.file_digest(fd, "sha256").hexdigest()
@@ -378,7 +380,7 @@ def verify_browser(origin, out, cases):
         errors=[]
         page.on("pageerror",lambda err: errors.append(str(err)))
         page.route("https://**/*",lambda route: route.abort())  # Browser map tiles only; imagery requests use the live server.
-        page.goto(origin,wait_until="domcontentloaded")
+        open_data_page(page, origin)
         expect(page.locator("#outputDirectory")).not_to_have_value("")
         names=[]
         for case in cases:

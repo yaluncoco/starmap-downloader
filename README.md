@@ -1,11 +1,11 @@
-# 星图影像下载器 1.1 · Copernicus
+# 星图影像下载器 1.4.1
 
-Windows 10/11 x64 桌面工具。按研究区和 UTC 日期检索影像，可导出区域 GeoTIFF，也可保存指定的整瓦片、元数据或官方原始产品。
+Windows 10/11 x64 桌面工具。按研究区和 UTC 日期检索影像与 NASA GEDI，可导出区域 GeoTIFF、GEDI 足迹参数与对齐栅格，也可保存指定的整瓦片、元数据或官方原始产品。可在绘制区域前登录所需平台，勾选附带来源后，主数据与附带数据共用研究区和 UTC 日期。GEDI 可跟随本次选中的主 GeoTIFF 网格，并附带采样其像元值。登录与保存规则见 [账号说明](docs/ACCOUNTS.md)，详细用法见 [联合下载](docs/BATCH.md) 和 [GEDI 参数与影像对齐](docs/GEDI.md)。
 
 ## 安装与首次试用
 
-1. 在 [GitHub Releases](https://github.com/yaluncoco/starmap-downloader/releases/latest) 下载并打开 `StarmapDownloader-Setup-1.1-win-x64.exe`（本地构建输出在 `dist`）。按当前用户安装，无需 Python 或管理员权限；需要 Microsoft Edge WebView2 Evergreen Runtime。安装包未签名，可对照同目录的 `.sha256` 文件核对完整性。卸载不删除另存的输出和配置。
-2. 在「数据来源与下载方式」选择路线：
+1. 从 [GitHub 稳定版发布页](https://github.com/yaluncoco/starmap-downloader/releases/tag/v1.4.1) 下载 `StarmapDownloader-Setup-1.4.1-win-x64.exe`；源码构建产物位于 `dist/`，也可直接运行 `dist/StarmapDownloader/StarmapDownloader.exe`。按当前用户安装，无需 Python 或管理员权限；需要 Microsoft Edge WebView2 Evergreen Runtime。安装包未签名，可对照同目录的 `.sha256` 文件核对完整性。卸载不删除另存的输出和配置。
+2. 首次打开自动弹出「登录账号」，在同一窗口按需填写 NASA Earthdata、Sentinel Hub、CDSE OData / S3 的完整信息。登录成功后默认加密保存，下次启动自动恢复。可选择「暂不登录，选择数据」使用公开数据；未登录时，每次启动仍会弹出登录窗口。左侧只保留数据、日期、研究区和保存位置。再在「数据来源与下载方式」选择主路线：
 
    | 路线 | 文件 | 认证 |
    | --- | --- | --- |
@@ -24,17 +24,38 @@ Windows 10/11 x64 桌面工具。按研究区和 UTC 日期检索影像，可导
    | ESA WorldCover · Sentinel-1 年度 Gamma0 | 2020 / 2021：1° VV、VH、VH/VV COG；非单次过境 | 无需登录 |
    | ESA WorldCover · 土地覆盖分类 | 2020 v100 / 2021 v200：3° 分类瓦片，保留分类编码、NoData 和调色板 | 无需登录 |
    | NASA MODIS Collection 6.1（五类） | 13Q1 NDVI/EVI、09Q1 反射率、11A2 地表温度、15A2H LAI/FPAR、43A4 NBAR；整瓦片 HDF4、可用 XML 或分层 COG | 无需登录；程序自动申请短期只读授权 |
+   | NASA GEDI · L1B / L2A / L2B / L3 / L4A / L4B / L4C | 明确选择 V003 或历史版本；原始 HDF5/GeoTIFF、足迹 CSV/GeoJSON、参数均值与观测数量栅格；可完整对齐已有影像网格 | 检索免登录；下载使用 NASA Earthdata 用户名密码或 User Token，首次可能需数据中心授权 |
    | Copernicus DEM GLO-30 / GLO-90 | 区域 GeoTIFF 或完整源瓦片，不改变完整瓦片网格 | 无需登录 |
    | Copernicus 官方目录 | 整包、可确定的单一数据主文件、元数据或指定资产；不裁剪 | 检索免登录；下载按计划使用 CDSE OData 账号/临时访问令牌，或 CDSE S3 Access Key + Secret Key |
 
 3. 设置研究区：按地点搜索地图后画矩形/多边形；导入面状 SHP/GeoJSON；或输入 WGS84 经纬度。四点请沿边界顺序，每行 `经度,纬度`；矩形也可输入 `西,南,东,北`。SHP 的 `.shp/.shx/.dbf/.prj` 放在同一目录；没有 `.prj` 时手动填写源坐标系（例如 `EPSG:32650`）。可以把研究区另存为 SHP 或 GeoJSON。
-4. 选择日期、类别和内容，检索并勾选结果，确认输出文件夹和计划。选「勾选多个文件」时，先单选一个产品，再勾选需要的波段和配套文件（最多 100 个）。文件筛选不清空已勾选项目。原始产品的研究区只参与检索；多个文件不等于完整产品包。各类 Secret、密码、S3 密钥与访问令牌仅在运行内存中使用，不写配置、日志或下载记录。不要在聊天中提交这些凭据。
+4. 选择共同日期、类别和内容；需要其他数据时，在「附带下载」勾选来源并设置参数。一次检索后，在「主数据」和各附带来源页签分别勾选产品与原始文件，确认完整联合计划后下载。同一来源失败或无匹配会单独记录，已完成的文件保留。选「勾选多个文件」时，先单选一个产品，再勾选需要的波段和配套文件（最多 100 个）。文件筛选不清空已勾选项目。原始产品的研究区只参与检索；多个文件不等于完整产品包。各类 Secret、密码、S3 密钥与访问令牌默认以当前 Windows 用户绑定的方式加密保存，不写入普通配置、日志或下载记录；一次性验证码不保存。不要在聊天中提交这些凭据。
 
 ### 检查更新
 
 点击右上角「检查更新」。配置了公开更新渠道的安装版只查询 GitHub 稳定版，不会在后台自动检查，不需要 GitHub 登录，也不会发送影像账号或密钥。有新版时，可打开发布页或点击「下载并校验」。校验通过后，在保存文件夹中找到安装包；先等影像任务结束并关闭软件，再手动安装。校验失败不会保存安装包，也不会替换上一次成功下载的文件。
 
-这是首个公开版本。用过本地预览版的用户，请从发布页手动下载安装包并覆盖安装，不要依赖旧预览版自动识别首发版本。无更新渠道的本地开发构建会明确提示。版本变化见 [CHANGELOG.md](CHANGELOG.md)。
+当前稳定版为 1.4.1，可覆盖安装公开 1.1 以及本地 1.2.0 / 1.3.0 / 1.4.0。用过本地预览版的用户，可手动运行稳定版安装包覆盖安装。无更新渠道的本地开发构建会明确提示。版本变化见 [CHANGELOG.md](CHANGELOG.md)。本版测试范围与实传结果见 [验证记录](docs/VALIDATION.md)。
+
+### Sentinel-2 + GEDI 联合下载
+
+选择 Sentinel-2 L2A 公开裁剪 →「附带下载」勾选 GEDI → 可先连接 Earthdata → 绘制或导入一片区域 → 选择共同日期 → 分别勾选影像和 GEDI 参数 → 确认联合计划。选择「跟随本次主 GeoTIFF」后，先完成选中的主影像，再读取实际网格导出 GEDI；有多景或多个原始 TIFF 时可选择具体参考。年度、季度与 GEDI 汇总产品保留完整周期含义，DEM 等静态产品仅共用区域。新图标用于 Windows 桌面与开始菜单快捷方式、窗口、EXE、安装包和界面。
+
+### GEDI 快速开始
+
+选择 NASA GEDI → L2A 高度或 L4A 生物量 → 设置研究区与实际观测日期 → 勾选参数 → 在顶部「登录账号」连接 Earthdata。需要与已有影像配对时，选择「对齐已有 GeoTIFF」，可附带读取各足迹所在的影像像元。约 25 米离散足迹不会填满细网格；无观测处保留 NoData。
+
+公开目录与本机实传检查分别使用：
+
+```powershell
+.\.venv\Scripts\python.exe -X utf8 scripts\live_gedi.py
+# 私密交互输入令牌，只下载一个精确文件，再独立核对校验值、观测数量与像元均值。
+.\.venv\Scripts\python.exe -X utf8 scripts\live_gedi.py --download
+# 通过打包程序检查真实 NASA 目录；不会输入凭据或下载受保护文件。
+.\.venv\Scripts\python.exe -X utf8 scripts\live_gedi.py --exe .\dist\StarmapDownloader\StarmapDownloader.exe
+```
+
+没有 Earthdata 凭据时，只验证公共目录；不要把目录结果或模拟测试当作认证实传结果。完整产品、字段、质量和垂直基准说明见 [GEDI.md](docs/GEDI.md)。
 
 ### 不用密钥的验证样例
 
@@ -122,32 +143,36 @@ Windows 10/11 x64 桌面工具。按研究区和 UTC 日期检索影像，可导
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
-.\.venv\Scripts\python.exe app.py
-.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -X utf8 -m pip install -r requirements-dev.txt
+.\.venv\Scripts\python.exe -X utf8 app.py
+.\.venv\Scripts\python.exe -X utf8 -m pytest -q
 
 # 使用可信的 Inno Setup 6 编译器，传入 ISCC.exe 的实际完整路径
 .\scripts\build_installer.ps1 -Compiler 'C:\Tools\Inno Setup 6\ISCC.exe'
+# 同一 SHP 和 UTC 日期检索 Sentinel-2、GEDI、DEM，并实传公开 Sentinel-2 + DEM。
+.\.venv\Scripts\python.exe -X utf8 scripts\live_batch.py --exe .\dist\StarmapDownloader\StarmapDownloader.exe --output .\verification\batch\packaged-live
+# 安装后复测联合下载；需在干净测试用户中运行。
+.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.4.1-win-x64.exe -Batch
 # 可选：在干净测试用户中验证从上版升级、保留输出设置以及卸载。
 # -Slc 实传 VV 样本；同时加 -SlcDual 会再实传 VV+VH 样本（共约 2.50 GB）。
-.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.1-win-x64.exe -Slc -SlcDual -ModisSmoke
+.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.4.1-win-x64.exe -Slc -SlcDual -ModisSmoke
 # 若有旧的本地预览版 1.12.0，复测编号重置下的覆盖安装时加 -ReplacePreview -UpgradeFrom 'C:\备份\StarmapDownloader-Setup-1.12.0-win-x64.exe'。
 # 独立 MODIS 参考需要可选 pyhdf；--fetch 下载缺失的已锁定的源对象。
-.\.venv\Scripts\python.exe scripts\check_modis_reference.py .\verification\modis-next-source --fetch
-.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.1-win-x64.exe -Modis
+.\.venv\Scripts\python.exe -X utf8 scripts\check_modis_reference.py .\verification\modis-next-source --fetch
+.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.4.1-win-x64.exe -Modis
 # 安装后复测 ESA WorldCover 三类数据、独立源文件、真实缺层、损坏重下与界面。
-.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.1-win-x64.exe -WorldCover
+.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.4.1-win-x64.exe -WorldCover
 # 安装后复测 L2A 整瓦片和 L3 季度镶嵌，再验证卸载保留。
-.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.1-win-x64.exe -S2Tiles
+.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.4.1-win-x64.exe -S2Tiles
 # 安装、复测 RTC 的 IW 两组极化 + 覆盖边缘；-RtcEw 还要求一份指定 EW 样本。
-.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.1-win-x64.exe -RtcEw
+.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.4.1-win-x64.exe -RtcEw
 # 雷达测量 TIFF、Landsat 红波段是可选大样本；-Live 也运行新增光学路线、RTC IW 和整 DEM
-.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.1-win-x64.exe -Live -RadarMeasurement -LandsatMeasurement -S5pAllNrti
+.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.4.1-win-x64.exe -Live -RadarMeasurement -LandsatMeasurement -S5pAllNrti
 # 复测 9 类 Sentinel-3 样本、3 条 Sentinel-5P 处理流和卸载保留
-.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.1-win-x64.exe -Sen3 -S5p
+.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.4.1-win-x64.exe -Sen3 -S5p
 # -Sen3LargeFiles 也实传 WST（约 647 MB）与 SRAL（约 2.52 GB）。
 # -Sen3FullRbt 覆盖所有 11 类样本，并另外验证 RBT 的全部 98 个文件。两种模式都需要较长时间。
-.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.1-win-x64.exe -Sen3FullRbt
+.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.4.1-win-x64.exe -Sen3FullRbt
 ```
 
 本地 `verification/` 保存安装和实传测试产物，不随源码提交。目录检索或模拟测试通过不代表实下载链路已验收。Playwright 页面测试需要 Edge，Evalscript 测试需要 Node.js。已安装二进制的认证链路可用独立的本机交互脚本复测。传入**安装后的程序**（或同版打包目录中的程序），不是安装器。每个模式使用新输出目录，不要把凭据放进命令行、脚本或聊天：
@@ -155,19 +180,19 @@ python -m venv .venv
 ```powershell
 $exe = 'C:\实际安装路径\StarmapDownloader.exe'
 # 加 --preflight 只核对缺凭据处理；不输入密钥，也不尝试认证下载。
-.\.venv\Scripts\python.exe scripts\live_auth_packaged.py --exe $exe --service s3 --preflight --output-dir .\verification\preflight-s3-new
-.\.venv\Scripts\python.exe scripts\live_auth_packaged.py --exe $exe --service process --output-dir .\verification\private-process-new
-.\.venv\Scripts\python.exe scripts\live_auth_packaged.py --exe $exe --service odata --odata-token --output-dir .\verification\private-odata-new
-.\.venv\Scripts\python.exe scripts\live_auth_packaged.py --exe $exe --service s3 --output-dir .\verification\private-s3-new
+.\.venv\Scripts\python.exe -X utf8 scripts\live_auth_packaged.py --exe $exe --service s3 --preflight --output-dir .\verification\preflight-s3-new
+.\.venv\Scripts\python.exe -X utf8 scripts\live_auth_packaged.py --exe $exe --service process --output-dir .\verification\private-process-new
+.\.venv\Scripts\python.exe -X utf8 scripts\live_auth_packaged.py --exe $exe --service odata --odata-token --output-dir .\verification\private-odata-new
+.\.venv\Scripts\python.exe -X utf8 scripts\live_auth_packaged.py --exe $exe --service s3 --output-dir .\verification\private-s3-new
 # 仅复测 SRAL 大文件：指定新输出目录及更长的下载时限（秒）。
-.\.venv\Scripts\python.exe scripts\live_sen3.py --exe $exe --only sr-1-sra-a-ntc --download-timeout 7200 --output .\verification\sral-retest-new
+.\.venv\Scripts\python.exe -X utf8 scripts\live_sen3.py --exe $exe --only sr-1-sra-a-ntc --download-timeout 7200 --output .\verification\sral-retest-new
 ```
 
 单独复测一份 RTC 产品和覆盖边缘（命令行支持 `--only`，可省略 `--exe` 测试源码）：
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\live_rtc.py --exe $exe --only beijing-iw-edge --output .\verification\rtc-edge-retest-new
-.\.venv\Scripts\python.exe scripts\live_rtc.py --exe $exe --only svalbard-iw-cross-zone --output .\verification\rtc-cross-zone-retest-new
+.\.venv\Scripts\python.exe -X utf8 scripts\live_rtc.py --exe $exe --only beijing-iw-edge --output .\verification\rtc-edge-retest-new
+.\.venv\Scripts\python.exe -X utf8 scripts\live_rtc.py --exe $exe --only svalbard-iw-cross-zone --output .\verification\rtc-cross-zone-retest-new
 ```
 
 ## 官方来源

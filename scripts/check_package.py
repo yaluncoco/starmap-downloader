@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import re
 import socket
 import subprocess
@@ -14,7 +16,7 @@ import requests
 
 
 def check_executable(executable, *, set_output=None, require_output=None, require_version=None,
-                     require_update_repository=None, require_no_update_channel=False, expect_update_status=None):
+                     require_update_repository=None, require_no_update_channel=False, expect_update_status=None, require_gedi=False, require_batch=False, require_accounts=False):
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]
@@ -24,7 +26,10 @@ def check_executable(executable, *, set_output=None, require_output=None, requir
     with tempfile.TemporaryDirectory(prefix="starmap-package-") as folder, requests.Session() as session:
         session.trust_env = False
         temporary = Path(folder)
-        process = subprocess.Popen([executable, "--server", "--port", str(port)], cwd=temporary, startupinfo=launch)
+        environment = os.environ.copy()
+        if set_output is None and require_output is None:
+            environment["LOCALAPPDATA"] = str(temporary / "AppData")
+        process = subprocess.Popen([executable, "--server", "--port", str(port)], cwd=temporary, startupinfo=launch, env=environment)
         try:
             for _ in range(100):
                 if process.poll() is not None:
@@ -60,6 +65,40 @@ def check_executable(executable, *, set_output=None, require_output=None, requir
                 result.raise_for_status()
                 return result.json()
 
+            accounts_checked = False
+            if require_accounts or "accounts" in bootstrap:
+                account_status = session.get(origin + "/api/accounts", timeout=3).json()
+                assert set(account_status["providers"]) == {"oauth", "odata", "s3", "earthdata"}
+                assert 'src="accounts.js"' in home.text and 'id="accountComplete"' in home.text
+                assert 'id="manageAccountsSidebar"' not in home.text and 'id="loginBeforeBatch"' not in home.text
+                session.get(origin + "/accounts.js", timeout=3).raise_for_status()
+                if set_output is None and require_output is None:
+                    assert account_status["login_required"] and not account_status["has_saved_accounts"]
+                    assert not account_status["storage_error"]
+                accounts_checked = True
+            gedi_checked = False
+            if require_gedi or "gedi_collections" in bootstrap:
+                collections = bootstrap.get("gedi_collections")
+                expected = {"gedi01-b-003", "gedi01-b-002", "gedi02-a-003", "gedi02-a-002",
+                            "gedi02-b-003", "gedi02-b-002", "gedi03-003", "gedi03-002",
+                            "gedi04-a-003", "gedi04-a-021", "gedi04-b-021", "gedi04-c-003", "gedi04-c-002"}
+                assert isinstance(collections, list) and len(collections) == len(expected)
+                assert {item["id"] for item in collections} == expected, "Packaged GEDI collections are incomplete"
+                assert bootstrap.get("gedi_default") == "gedi02-a-003"
+                had_saved_earthdata = bootstrap.get("accounts", {}).get("providers", {}).get("earthdata", {}).get("saved", False)
+                if not had_saved_earthdata:
+                    assert bootstrap.get("earthdata_connected") is False
+                invalid = session.post(origin + "/api/earthdata-connect", json={"token": "short"}, timeout=4)
+                assert invalid.status_code == 400 and "Earthdata" in invalid.json()["error"]
+                if not had_saved_earthdata:
+                    connected = call("earthdata-connect", {"token": "synthetic-package-check-earthdata-token"})
+                    assert connected["connected"] is True and connected["verified"] is False, "Local token state mismatch"
+                    if accounts_checked:
+                        assert connected["saved"] is True
+                    assert session.get(origin + "/api/bootstrap", timeout=3).json()["earthdata_connected"] is True
+                    assert call("earthdata-disconnect", {})["connected"] is False
+                    assert session.get(origin + "/api/bootstrap", timeout=3).json()["earthdata_connected"] is False
+                gedi_checked = True
             if set_output is not None:
                 call("preferences", {"output_dir": str(set_output)})
             area = call("aoi", {"geometry": boundary, "source_crs": "EPSG:32650"})
@@ -68,7 +107,38 @@ def check_executable(executable, *, set_output=None, require_output=None, requir
             call("export-aoi", {"geometry": area["geometry"], "path": str(path)})
             imported = call("aoi", {"path": str(path)})
             assert imported["bounds"] == area["bounds"]
+            batch_checked = False
+            if require_batch or "batch_sources" in bootstrap:
+                sources = bootstrap.get("batch_sources")
+                expected_sources = {"s2-process", "s2-earth-search", "s2-l1c-aws", "s2-l2a-cog", "s2-l3-quarterly", "landsat-pc-l2",
+                                    "s1-aws-original", "s1-slc-seasia", "s1-rtc-pc", "sen3-aws-original", "s5p-aws-l2",
+                                    "worldcover-s2", "worldcover-s1", "worldcover-map", "dem-30", "dem-90", "gedi-earthdata", "cdse-original",
+                                    "modis-13Q1-061", "modis-09Q1-061", "modis-11A2-061", "modis-15A2H-061", "modis-43A4-061"}
+                assert isinstance(sources, list) and {s["id"] for s in sources} == expected_sources
+                assert bootstrap.get("batch") is None
+                assert 'id="manageAccounts"' in home.text and 'id="companionSources"' in home.text
+                for asset in ("/batch.js", "/assets/globe-orbit.svg", "/assets/globe-orbit.ico", "/assets/globe-orbit.png"):
+                    session.get(origin + asset, timeout=3).raise_for_status()
+                svg = session.get(origin + "/assets/globe-orbit.svg", timeout=3).content
+                assert hashlib.sha256(svg).hexdigest() == "ff0ca0015bcdb3f73441fbc3719bd8fd2f727800ad87ed2b73f353e50d9b8581"
+                rejected = session.post(origin + "/api/batch-search", json={"profile": "s2-earth-search", "geometry": area["geometry"],
+                                        "start": "2024-06-10", "end": "2024-06-10", "shared_dates": {"start": "2024-06-10", "end": "2024-06-10"},
+                                        "companions": []}, timeout=4)
+                assert rejected.status_code == 400 and "附带" in rejected.json()["error"]
+                for route in ("batch-plan", "batch-download"):
+                    rejected = session.post(origin + "/api/" + route, json={"output_dir": str(temporary / "batch-no-output")}, timeout=4)
+                    assert rejected.status_code == 400 and "联合检索" in rejected.json()["error"]
+                assert not (temporary / "batch-no-output").exists()
+                batch_checked = True
             check = {"packaged_version": version, "loopback_resources": "ok", "projected_shapefile_roundtrip": "ok"}
+            if accounts_checked:
+                check["account_platforms_and_startup_contract"] = "ok (Windows encrypted saving, no real credentials)"
+            if batch_checked:
+                check["batch_sources"] = len(sources)
+                check["batch_routes_and_icon"] = "ok"
+            if gedi_checked:
+                check["gedi_collections"] = len(collections)
+                check["earthdata_local_routes"] = "ok (synthetic token, no NASA authentication)"
             if "update_repository" in bootstrap:
                 check["update_repository"] = repository
             if expect_update_status is not None:
@@ -90,6 +160,9 @@ if __name__ == "__main__":
     parser.add_argument("--set-output", type=Path, help="Save a known output path in isolated test preferences")
     parser.add_argument("--require-output", type=Path, help="Assert an existing output preference was loaded")
     parser.add_argument("--require-version")
+    parser.add_argument("--require-gedi", action="store_true", help="Require GEDI collections and local authentication routes")
+    parser.add_argument("--require-batch", action="store_true", help="Require companion sources, batch routes and the supplied icon")
+    parser.add_argument("--require-accounts", action="store_true", help="Require centralized accounts, encrypted saving and startup state")
     channel = parser.add_mutually_exclusive_group()
     channel.add_argument("--require-update-repository")
     channel.add_argument("--require-no-update-channel", action="store_true")
@@ -97,4 +170,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
     check_executable(args.exe.resolve(strict=True), set_output=args.set_output, require_output=args.require_output,
                      require_version=args.require_version, require_update_repository=args.require_update_repository,
-                     require_no_update_channel=args.require_no_update_channel, expect_update_status=args.expect_update_status)
+                     require_no_update_channel=args.require_no_update_channel, expect_update_status=args.expect_update_status,
+                     require_gedi=args.require_gedi, require_batch=args.require_batch, require_accounts=args.require_accounts)

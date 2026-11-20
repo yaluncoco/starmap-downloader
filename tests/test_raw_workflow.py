@@ -117,7 +117,7 @@ def search_raw(client):
 
 def auth_token(client):
     result = client.post("raw-connect", {"method": "token", "token": TOKEN})
-    assert result == {"connected": True, "verified": False}
+    assert result == {"connected": True, "verified": False, "saved": True}
 
 
 def test_raw_full_product_plan_download_and_tamper(client, raw_provider, tmp_path):

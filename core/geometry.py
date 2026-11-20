@@ -5,6 +5,8 @@ import math
 import re
 from pathlib import Path
 
+from .local_paths import io_path
+
 import shapefile
 from pyproj import CRS, Geod, Transformer
 from shapely import force_2d, transform, wkt
@@ -158,7 +160,7 @@ def parse_coordinates(text: str):
 
 
 def load_aoi(path, source_crs=None):
-    path = Path(path)
+    path = io_path(path)
     if not path.is_file():
         raise UserError("找不到边界文件，请重新选择。")
     if path.stat().st_size > 100 * 1024 * 1024:
@@ -189,7 +191,7 @@ def load_aoi(path, source_crs=None):
 
 
 def save_aoi(geometry, path, name="研究区"):
-    path = Path(path)
+    path = io_path(path)
     if not path.is_absolute():
         raise UserError("请选择完整的保存路径。")
     if path.suffix.lower() not in (".shp", ".geojson", ".json"):

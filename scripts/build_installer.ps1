@@ -17,27 +17,27 @@ foreach ($target in @($dist,$package)) {
         }
     }
 }
-$version=& $python -c 'from core import VERSION; print(VERSION)'
+$version=& $python -X utf8 -c 'from core import VERSION; print(VERSION)'
 if ($LASTEXITCODE -ne 0 -or $version -notmatch '^[0-9]+\.[0-9]+(?:\.[0-9]+)?$') { throw 'Invalid application version' }
 $env:PYTHONUTF8='1'
 $env:STARMAP_CONSOLE='0'
 $previousRepository=$env:STARMAP_RELEASE_REPOSITORY
 try {
     $env:STARMAP_RELEASE_REPOSITORY=$UpdateRepository
-    & $python -m PyInstaller --noconfirm --distpath $dist StarmapDownloader.spec
+    & $python -X utf8 -m PyInstaller --noconfirm --distpath $dist StarmapDownloader.spec
     if ($LASTEXITCODE -ne 0) { throw 'PyInstaller build failed' }
 } finally {
     $env:STARMAP_RELEASE_REPOSITORY=$previousRepository
 }
-$packageArgs=@((Join-Path $package 'StarmapDownloader.exe'),'--require-version',$version)
+$packageArgs=@((Join-Path $package 'StarmapDownloader.exe'),'--require-version',$version,'--require-gedi','--require-batch','--require-accounts')
 if ($UpdateRepository) {
     $packageArgs+=@('--require-update-repository',$UpdateRepository)
 } else {
     $packageArgs+=@('--require-no-update-channel','--expect-update-status','unconfigured')
 }
-& $python scripts\check_package.py @packageArgs
+& $python -X utf8 scripts\check_package.py @packageArgs
 if ($LASTEXITCODE -ne 0) { throw 'Packaged startup check failed' }
-foreach ($notice in @('installer\快速开始.txt', 'installer\ChineseSimplified.LICENSE.txt', 'THIRD_PARTY_NOTICES.md')) {
+foreach ($notice in @('installer\快速开始.txt', 'installer\ChineseSimplified.LICENSE.txt', 'THIRD_PARTY_NOTICES.md', 'docs\GEDI.md', 'docs\BATCH.md', 'docs\ACCOUNTS.md')) {
     Copy-Item -LiteralPath (Join-Path $project $notice) -Destination $package
 }
 $compilerArgs=@("/DAppRoot=$package","/DOutputRoot=$dist","/DAppVersion=$version")

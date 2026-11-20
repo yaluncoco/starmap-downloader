@@ -30,3 +30,66 @@
 .asset-entry+.asset-entry{border-top:1px solid var(--line,#dbe2e7)}
 .asset-entry input[type=checkbox]{width:14px;height:14px;margin:2px 0 0;flex:none}
 .asset-entry span{min-width:0;display:grid;gap:1px}.asset-entry small{overflow-wrap:anywhere;color:var(--muted,#54616b);font-weight:400}
+
+/* Keep download actions visible when a GEDI plan has many fields or a long reference path. */
+.download-modal{width:min(720px,calc(100vw - 60px));overflow:hidden}
+.download-modal[open]{display:flex;flex-direction:column}
+.download-modal .modal-heading,.download-modal .modal-footer{flex-shrink:0}
+.download-plan-scroll{min-height:0;overflow-y:auto;scrollbar-width:thin;scrollbar-color:#dce5e7 transparent}
+
+/* Shared-region companions and upfront account access. */
+.brand-mark{width:46px;height:42px;background:transparent;box-shadow:none;border-radius:0}
+.brand-mark img{width:46px;height:46px;display:block;object-fit:contain}
+.companion-picker{border:1px solid var(--line);border-radius:8px;padding:9px 10px}
+.companion-picker summary,.source-settings summary{cursor:pointer;font-size:12px;font-weight:600;color:var(--ink)}
+.companion-picker input[type=search]{margin-top:9px;height:31px}
+.source-checklist{max-height:185px;margin-bottom:0}
+.source-checklist .asset-entry small{font-size:9px}
+.source-settings{margin-top:10px;padding:10px;border:1px solid #dce9e4;border-radius:8px;background:#f8fbf9}
+.source-settings summary{display:flex;align-items:center;gap:6px}
+.source-settings summary span{flex:1}
+.source-settings .remove-companion{font-size:10px}
+.source-settings .field-note{color:#698178}
+.source-settings .asset-checklist{background:#fff;max-height:145px}
+.source-settings .band-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+.source-settings .band-choice{min-width:0;overflow-wrap:anywhere}
+.source-settings .two-columns{gap:8px}
+.batch-result-tabs{display:flex;gap:5px;padding:0 14px 8px;overflow-x:auto;flex-shrink:0;border-bottom:1px solid var(--line)}
+.batch-result-tabs button{border:1px solid #dce7e2;border-radius:6px;background:#f7faf8;font-size:11px;padding:4px 9px;white-space:nowrap}
+.batch-result-tabs button[aria-selected=true]{color:var(--green);border-color:#aad3c5;background:#eaf6ef;font-weight:600}
+.companion-results{flex:1;min-height:0;overflow:auto;padding:7px 15px;scrollbar-width:thin}
+.companion-result-note{font-size:10px;color:var(--muted);padding-bottom:7px}
+.companion-scene{padding:6px 0;border-bottom:1px solid #e8efeb}
+.companion-scene-label{display:flex;align-items:flex-start;gap:8px;margin:0;font-weight:400;font-size:11px}
+.companion-scene-label>span{min-width:0;flex:1;overflow-wrap:anywhere}
+.companion-scene-label strong{font-size:11px;font-weight:600;display:block}
+.companion-scene-label small{font-size:10px;color:var(--muted);display:block}
+.companion-scene details{margin:5px 0 2px 22px}
+.companion-scene details summary{font-size:10px;color:var(--green);cursor:pointer}
+.companion-scene .asset-checklist{max-height:170px}
+.companion-scene .asset-entry{font-size:10px}
+.companion-error{color:var(--red);font-size:11px;line-height:1.65}
+.scenes-panel.has-companions{height:min(370px,43vh)}
+.plan-source-title{grid-column:1/-1;border-bottom:1px solid #dce7df;padding-bottom:7px;color:var(--green);font-size:12px;font-weight:600}
+.plan-source-summary{grid-column:1/-1;font-size:11px;line-height:1.8;color:#547363;overflow-wrap:anywhere}
+.plan-source-summary.error{color:var(--red)}
+.accounts-modal{width:min(680px,calc(100vw - 60px))}
+.accounts-modal #accountPanels{margin-top:16px}
+.accounts-modal .section-description{font-size:12px}
+.accounts-modal #processAuth,.accounts-modal #gediAuth,.accounts-modal #rawAuth{padding:0 2px}
+.job-sources{display:grid;gap:5px;font-size:10px;margin:8px 0}
+.job-source-row{display:flex;justify-content:space-between;gap:12px;color:var(--muted)}
+.job-source-row.failed,.job-status.partial{color:var(--red)}
+.job-source-row.completed{color:var(--green)}
+@media(max-height:820px){.scenes-panel.has-companions{height:300px}.batch-result-tabs{padding-bottom:5px}.map-panel{min-height:220px}}
+
+.accounts-modal[open]{display:flex;flex-direction:column;overflow:hidden;max-height:calc(100vh - 40px)}
+.accounts-modal .modal-heading,.accounts-modal>.section-description,.accounts-modal #accountTabs,.accounts-modal .modal-footer,.accounts-modal .account-status{flex-shrink:0}
+.accounts-modal #accountPanels{min-height:0;overflow-y:auto;padding:0 6px 2px 0;scrollbar-width:thin;scrollbar-color:#dce5e7 transparent}
+.accounts-modal #accountTabs{margin:0 0 15px}
+.accounts-modal #accountTabs button{display:flex;flex-direction:column;gap:2px;align-items:center;padding:6px 8px}
+.accounts-modal #accountTabs small{font-size:9px;font-weight:400;opacity:.8}
+.accounts-modal #accountTabs .account-connected small{color:var(--green)}
+.accounts-modal .modal-footer{justify-content:space-between;margin-top:16px;padding-top:14px;border-top:1px solid var(--line)}
+.account-status{padding:8px 10px;background:var(--green-light);color:var(--green);font-size:12px;border-radius:7px;margin-bottom:12px}
+.account-status-error{background:#fff5f2;color:var(--red)}

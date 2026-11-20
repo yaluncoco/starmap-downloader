@@ -11,6 +11,8 @@ import threading
 from pathlib import Path
 
 import numpy as np
+from scripts.browser_flow import open_data_page
+
 import pytest
 import rasterio
 import requests
@@ -311,7 +313,7 @@ def test_rtc_ui_reports_no_common_polarization_until_selection_is_fixed(tmp_path
         browser = driver.chromium.launch(channel=os.environ.get("STARMAP_TEST_BROWSER", "msedge"), headless=True)
         page = browser.new_page(viewport={"width": 1360, "height": 900})
         page.route("https://**/*", lambda route: route.abort())
-        page.goto(server.origin, wait_until="domcontentloaded")
+        open_data_page(page, server.origin)
         pw.expect(page.locator("#outputDirectory")).not_to_have_value("")
         page.locator("#sourceProfile").select_option(S1_RTC)
         page.locator('[data-tab="coordinates"]').click()

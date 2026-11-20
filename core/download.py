@@ -16,7 +16,8 @@ from rasterio.windows import Window
 from shapely.geometry import mapping
 
 from . import VERSION
-from .errors import Cancelled, UserError
+from .errors import Cancelled, UserError, keep_download_result
+from .local_paths import io_path
 from .http import HttpClient, check_cancel
 from .integrity import audit_raster, checked_local_receipt, publish_file
 from .planning import build_plan
@@ -70,7 +71,7 @@ def _parts(tile, reference_transform, plan, options, tile_file):
 
 
 def download_scenes(geometry, scenes, options, output_dir, auth, *, cancel=None, progress=None, planned=None):
-    base = Path(output_dir).expanduser()
+    base = io_path(output_dir)
     if not base.is_absolute():
         raise UserError("请选择完整的输出文件夹路径。")
     if not auth.connected:
@@ -229,11 +230,13 @@ def download_scenes(geometry, scenes, options, output_dir, auth, *, cancel=None,
         manifest["status"] = "completed" if results else "empty"
         return {"folder": str(folder), "files": results, "manifest": str(manifest_path), "plan": plan,
                 "empty_scenes": [item["scene"]["key"] for item in manifest["items"] if item["status"] == "empty"]}
-    except Cancelled:
+    except Cancelled as error:
         manifest["status"] = "cancelled"
+        keep_download_result(error, results, folder, manifest_path, plan)
         raise
-    except Exception:
+    except Exception as error:
         manifest["status"] = "failed"
+        keep_download_result(error, results, folder, manifest_path, plan)
         raise
     finally:
         try:

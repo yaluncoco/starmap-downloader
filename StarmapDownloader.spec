@@ -47,5 +47,5 @@ a = Analysis([str(root / "app.py")], pathex=[str(root)], binaries=binaries, data
              hiddenimports=["webview.platforms.winforms", "webview.platforms.edgechromium"] + collect_submodules("rasterio"),
              excludes=["tkinter", "PyQt5", "PyQt6", "PySide2", "PySide6"], noarchive=False)
 pyz = PYZ(a.pure)
-application = EXE(pyz, a.scripts, [], exclude_binaries=True, name="StarmapDownloader", console=os.environ.get("STARMAP_CONSOLE") == "1", upx=False)
+application = EXE(pyz, a.scripts, [], exclude_binaries=True, name="StarmapDownloader", icon=str(root / "ui" / "assets" / "globe-orbit.ico"), console=os.environ.get("STARMAP_CONSOLE") == "1", upx=False)
 coll = COLLECT(application, a.binaries, a.datas, upx=False, name="StarmapDownloader")

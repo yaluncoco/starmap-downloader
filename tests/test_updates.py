@@ -8,6 +8,8 @@ import threading
 from collections import deque
 from pathlib import Path
 
+from scripts.browser_flow import open_data_page
+
 import pytest
 import requests
 from requests.structures import CaseInsensitiveDict
@@ -326,7 +328,7 @@ def test_desktop_update_dialog_no_automatic_actions_and_manual_verified_download
         page = browser.new_page(viewport={"width": 1100, "height": 740})
         page.route(re.compile(r"^https://"), lambda route: route.abort())
         page.on("pageerror", lambda error: failures.append(str(error)))
-        page.goto(server.origin, wait_until="domcontentloaded")
+        open_data_page(page, server.origin)
         button = page.get_by_role("button", name="检查更新", exact=True)
         pw.expect(button).to_be_enabled()
         assert transport.calls == [] and opened == []

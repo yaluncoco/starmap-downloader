@@ -22,7 +22,8 @@ from shapely import normalize
 
 from . import VERSION
 from .download import _save_json
-from .errors import Cancelled, UserError
+from .errors import Cancelled, UserError, keep_download_result
+from .local_paths import io_path
 from .http import CATALOGUE_URL, HttpClient, check_cancel
 from .integrity import publish_file, sha256_file
 from .native_catalogue import DOWNLOAD_ROOT, _json, download_asset, product_stem
@@ -672,7 +673,7 @@ def _basename(item):
 
 
 def download_original(geometry, plan, output_dir, auth, *, s3_auth=None, cancel=None, progress=None):
-    base = Path(output_dir).expanduser()
+    base = io_path(output_dir)
     if not base.is_absolute():
         raise UserError("请选择本地绝对输出目录。")
     folder = base / plan["folder_name"]
@@ -928,11 +929,13 @@ def download_original(geometry, plan, output_dir, auth, *, s3_auth=None, cancel=
                 partial.unlink(missing_ok=True)
         manifest["status"] = "completed"
         return {"files": result, "folder": str(folder), "manifest": str(record_path), "plan": plan, "empty_scenes": []}
-    except Cancelled:
+    except Cancelled as error:
         manifest["status"] = "cancelled"
+        keep_download_result(error, result, folder, record_path, plan)
         raise
-    except Exception:
+    except Exception as error:
         manifest["status"] = "failed"
+        keep_download_result(error, result, folder, record_path, plan)
         raise
     finally:
         try:

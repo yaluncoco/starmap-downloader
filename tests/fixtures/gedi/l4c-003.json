@@ -1,0 +1,340 @@
+{
+  "hits": 67,
+  "took": 45,
+  "items": [
+    {
+      "meta": {
+        "concept-type": "granule",
+        "concept-id": "G4302783896-ORNL_CLOUD",
+        "revision-id": 3,
+        "native-id": "GEDI04_C_2020152223952_O08318_03_T02007_02_003_01_V003",
+        "collection-concept-id": "C4302347663-ORNL_CLOUD",
+        "provider-id": "ORNL_CLOUD",
+        "format": "application/vnd.nasa.cmr.umm+json",
+        "revision-date": "2026-11-01T20:08:41.010Z"
+      },
+      "umm": {
+        "TemporalExtent": {
+          "RangeDateTime": {
+            "BeginningDateTime": "2020-05-31T22:39:52.000Z",
+            "EndingDateTime": "2020-06-01T00:12:45.000Z"
+          }
+        },
+        "OrbitCalculatedSpatialDomains": [
+          {
+            "BeginOrbitNumber": 8318,
+            "EndOrbitNumber": 8318
+          }
+        ],
+        "GranuleUR": "GEDI04_C_2020152223952_O08318_03_T02007_02_003_01_V003",
+        "AdditionalAttributes": [
+          {
+            "Name": "Reference_Ground_Track",
+            "Values": [
+              "2007"
+            ]
+          },
+          {
+            "Name": "SEGMENT_NUMBER",
+            "Values": [
+              "03"
+            ]
+          },
+          {
+            "Name": "identifier_product_doi_authority",
+            "Values": [
+              "https://doi.org"
+            ]
+          },
+          {
+            "Name": "identifier_product_doi",
+            "Values": [
+              "10.3334/ORNLDAAC/2520"
+            ]
+          }
+        ],
+        "SpatialExtent": {
+          "HorizontalSpatialDomain": {
+            "Geometry": {
+              "GPolygons": [
+                {
+                  "Boundary": {
+                    "Points": [
+                      {
+                        "Latitude": 51.7589626998,
+                        "Longitude": -82.8499394402
+                      },
+                      {
+                        "Latitude": 51.6027399825,
+                        "Longitude": -76.8714484411
+                      },
+                      {
+                        "Latitude": 51.1202996818,
+                        "Longitude": -70.9819414972
+                      },
+                      {
+                        "Latitude": 50.323663074,
+                        "Longitude": -65.2568493929
+                      },
+                      {
+                        "Latitude": 49.2305909044,
+                        "Longitude": -59.7618666937
+                      },
+                      {
+                        "Latitude": 47.8658386547,
+                        "Longitude": -54.546506837
+                      },
+                      {
+                        "Latitude": 46.2545421918,
+                        "Longitude": -49.6340431793
+                      },
+                      {
+                        "Latitude": 44.4241762008,
+                        "Longitude": -45.0346874452
+                      },
+                      {
+                        "Latitude": 42.3998549209,
+                        "Longitude": -40.7424022401
+                      },
+                      {
+                        "Latitude": 40.2072128161,
+                        "Longitude": -36.7457121843
+                      },
+                      {
+                        "Latitude": 37.8673466536,
+                        "Longitude": -33.0209850884
+                      },
+                      {
+                        "Latitude": 35.4002985553,
+                        "Longitude": -29.5450080888
+                      },
+                      {
+                        "Latitude": 32.8244976141,
+                        "Longitude": -26.2943491752
+                      },
+                      {
+                        "Latitude": 30.1550892354,
+                        "Longitude": -23.2430414822
+                      },
+                      {
+                        "Latitude": 27.4053100382,
+                        "Longitude": -20.3667861556
+                      },
+                      {
+                        "Latitude": 24.5881791814,
+                        "Longitude": -17.6432004551
+                      },
+                      {
+                        "Latitude": 21.7131543694,
+                        "Longitude": -15.0507416524
+                      },
+                      {
+                        "Latitude": 18.7908107726,
+                        "Longitude": -12.5702854984
+                      },
+                      {
+                        "Latitude": 15.833332677,
+                        "Longitude": -10.1872199273
+                      },
+                      {
+                        "Latitude": 12.8402480207,
+                        "Longitude": -7.8767619118
+                      },
+                      {
+                        "Latitude": 9.8185698995,
+                        "Longitude": -5.6235230221
+                      },
+                      {
+                        "Latitude": 6.7829804115,
+                        "Longitude": -3.4189862253
+                      },
+                      {
+                        "Latitude": 3.734333805,
+                        "Longitude": -1.2453714733
+                      },
+                      {
+                        "Latitude": 0.6785811774,
+                        "Longitude": 0.911776561
+                      },
+                      {
+                        "Latitude": 0.1694463178,
+                        "Longitude": 1.2703575396
+                      },
+                      {
+                        "Latitude": 0.2096392492,
+                        "Longitude": 1.3478844507
+                      },
+                      {
+                        "Latitude": 0.7187716407,
+                        "Longitude": 0.9893084968
+                      },
+                      {
+                        "Latitude": 3.7746799156,
+                        "Longitude": -1.1678054325
+                      },
+                      {
+                        "Latitude": 6.8236556381,
+                        "Longitude": -3.3412673836
+                      },
+                      {
+                        "Latitude": 9.8597550359,
+                        "Longitude": -5.5455162799
+                      },
+                      {
+                        "Latitude": 12.8817088322,
+                        "Longitude": -7.7989652955
+                      },
+                      {
+                        "Latitude": 15.8735120256,
+                        "Longitude": -10.1063926492
+                      },
+                      {
+                        "Latitude": 18.8346733996,
+                        "Longitude": -12.490671013
+                      },
+                      {
+                        "Latitude": 21.7583108747,
+                        "Longitude": -14.9704360043
+                      },
+                      {
+                        "Latitude": 24.6348828366,
+                        "Longitude": -17.5621643493
+                      },
+                      {
+                        "Latitude": 27.453757366,
+                        "Longitude": -20.2850397892
+                      },
+                      {
+                        "Latitude": 30.2049979177,
+                        "Longitude": -23.1600683451
+                      },
+                      {
+                        "Latitude": 32.8764785417,
+                        "Longitude": -26.2106653872
+                      },
+                      {
+                        "Latitude": 35.4553117236,
+                        "Longitude": -29.4620346663
+                      },
+                      {
+                        "Latitude": 37.9250097101,
+                        "Longitude": -32.9383175675
+                      },
+                      {
+                        "Latitude": 40.2678103578,
+                        "Longitude": -36.6637102641
+                      },
+                      {
+                        "Latitude": 42.4636668313,
+                        "Longitude": -40.6616118979
+                      },
+                      {
+                        "Latitude": 44.4909473352,
+                        "Longitude": -44.9555629126
+                      },
+                      {
+                        "Latitude": 46.3252419828,
+                        "Longitude": -49.5603003195
+                      },
+                      {
+                        "Latitude": 47.9402618013,
+                        "Longitude": -54.4801261702
+                      },
+                      {
+                        "Latitude": 49.3083455101,
+                        "Longitude": -59.7036356104
+                      },
+                      {
+                        "Latitude": 50.4034552358,
+                        "Longitude": -65.2019124322
+                      },
+                      {
+                        "Latitude": 51.2027039423,
+                        "Longitude": -70.9368201278
+                      },
+                      {
+                        "Latitude": 51.6874465295,
+                        "Longitude": -76.8371184215
+                      },
+                      {
+                        "Latitude": 51.845192949,
+                        "Longitude": -82.8270380281
+                      },
+                      {
+                        "Latitude": 51.7589626998,
+                        "Longitude": -82.8499394402
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        },
+        "ProviderDates": [
+          {
+            "Date": "2026-08-11T19:46:26Z",
+            "Type": "Create"
+          }
+        ],
+        "CollectionReference": {
+          "ShortName": "GEDI_L4C_WSCI_V3_2520",
+          "Version": "3"
+        },
+        "PGEVersionClass": {
+          "PGEVersion": "003"
+        },
+        "RelatedUrls": [
+          {
+            "URL": "https://data.ornldaac.earthdata.nasa.gov/ornl-cumulus-prod-protected/gedi/GEDI_L4C_WSCI_V3/data/GEDI04_C_2020152223952_O08318_03_T02007_02_003_01_V003.h5",
+            "Description": "Download GEDI04_C_2020152223952_O08318_03_T02007_02_003_01_V003.h5",
+            "Type": "GET DATA"
+          },
+          {
+            "URL": "s3://ornl-cumulus-prod-protected/gedi/GEDI_L4C_WSCI_V3/data/GEDI04_C_2020152223952_O08318_03_T02007_02_003_01_V003.h5",
+            "Description": "This link provides direct download access via S3 to the granule",
+            "Type": "GET DATA VIA DIRECT ACCESS"
+          },
+          {
+            "URL": "https://data.ornldaac.earthdata.nasa.gov/s3credentials",
+            "Description": "api endpoint to retrieve temporary credentials valid for same-region direct s3 access",
+            "Type": "VIEW RELATED INFORMATION"
+          },
+          {
+            "URL": "https://opendap.earthdata.nasa.gov/collections/C4302347663-ORNL_CLOUD/granules/GEDI04_C_2020152223952_O08318_03_T02007_02_003_01_V003",
+            "Type": "USE SERVICE API",
+            "Subtype": "OPENDAP DATA",
+            "Description": "OPeNDAP request URL"
+          }
+        ],
+        "DataGranule": {
+          "ArchiveAndDistributionInformation": [
+            {
+              "Name": "GEDI04_C_2020152223952_O08318_03_T02007_02_003_01_V003.h5",
+              "SizeInBytes": 518577446,
+              "Format": "HDF5",
+              "MimeType": "application/x-hdf5",
+              "Checksum": {
+                "Value": "0168fb2d6162030a807ec397de3f2b3a4c97570e94aa887f06167d0f96de8bb460f2731f1e2afa27072542b59b2223dfb62123c3d3e8b56aff22419c80886024",
+                "Algorithm": "SHA-512"
+              }
+            }
+          ],
+          "DayNightFlag": "Both",
+          "Identifiers": [
+            {
+              "Identifier": "GEDI04_C_2020152223952_O08318_03_T02007_02_003_01_V003",
+              "IdentifierType": "ProducerGranuleId"
+            }
+          ],
+          "ProductionDateTime": "2026-08-11T19:46:26Z"
+        },
+        "MetadataSpecification": {
+          "Name": "UMM-G",
+          "URL": "https://cdn.earthdata.nasa.gov/umm/granule/v1.6.7",
+          "Version": "1.6.7"
+        }
+      }
+    }
+  ]
+}

@@ -57,6 +57,8 @@ GAP = "S3A_OL_1_EFR____20240610T023612_20240610T023912_20240920T182055_0179_113_
 LARGE_CASES = {"sl-2-wst-ntc", "sr-1-sra-a-ntc"}
 
 
+from browser_flow import open_data_page
+
 def manifest_from_source(prefix, feature):
     for trial in range(4):
         try:
@@ -196,7 +198,7 @@ def browser_check(origin, output, reference, category_count):
         errors = []
         page.on("pageerror", lambda error: errors.append(str(error)))
         page.route("https://**/*", lambda route: route.abort())
-        page.goto(origin, wait_until="domcontentloaded")
+        open_data_page(page, origin)
         expect(page.locator("#sen3Collection option")).to_have_count(category_count)
         page.locator("#sourceProfile").select_option(PROFILE)
         expect(page.locator("#publicAuth")).to_be_visible()

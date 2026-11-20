@@ -16,7 +16,7 @@ from shapely.geometry import mapping
 
 from . import VERSION
 from .download import _save_json
-from .errors import Cancelled, UserError
+from .errors import Cancelled, UserError, keep_download_result
 from .http import HttpClient, check_cancel
 from .integrity import publish_file
 from .open_sen3 import MAX_XML, parse_xfdu
@@ -300,11 +300,13 @@ def download_sen3(geometry, plan, output_dir, *, cancel=None, progress=None):
                 raise
         record["status"] = "completed"
         return {"files": result, "folder": _report_path(folder), "manifest": _report_path(record_path), "plan": plan, "empty_scenes": []}
-    except Cancelled:
+    except Cancelled as error:
         record["status"] = "cancelled"
+        keep_download_result(error, result, _report_path(folder), _report_path(record_path), plan)
         raise
-    except Exception:
+    except Exception as error:
         record["status"] = "failed"
+        keep_download_result(error, result, _report_path(folder), _report_path(record_path), plan)
         raise
     finally:
         try:

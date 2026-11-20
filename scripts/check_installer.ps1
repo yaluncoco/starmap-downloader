@@ -5,6 +5,8 @@
     [string]$UpdateRepository,
     [ValidateSet('unconfigured','not_published','current','available')][string]$ExpectUpdateStatus,
     [switch]$Live,
+    [switch]$Batch,
+    [switch]$Accounts,
     [switch]$RadarMeasurement,
     [switch]$LandsatMeasurement,
     [switch]$S2Tiles,
@@ -71,7 +73,7 @@ try {
         $env:LOCALAPPDATA=$userAppData
         $env:PYTHONUTF8='1'
         try {
-            & $python (Join-Path $project 'scripts\check_package.py') (Join-Path $app 'StarmapDownloader.exe') --set-output $userOutput
+            & $python -X utf8 (Join-Path $project 'scripts\check_package.py') (Join-Path $app 'StarmapDownloader.exe') --set-output $userOutput
             if ($LASTEXITCODE -ne 0) { throw 'Could not save verification preferences in baseline app' }
         } finally {
             if ($null -eq $oldAppData) { Remove-Item Env:LOCALAPPDATA -ErrorAction SilentlyContinue } else { $env:LOCALAPPDATA=$oldAppData }
@@ -94,6 +96,20 @@ try {
     $uninstaller=(Get-ChildItem -LiteralPath $app -File -Filter 'unins*.exe' | Select-Object -First 1).FullName
     if (!(Test-Path -LiteralPath (Join-Path $startMenu '星图影像下载器.lnk') -PathType Leaf)) { throw 'Start menu entry missing' }
     $check.StartMenuShortcut=$true
+    if ([version]$check.RegisteredVersion -ge [version]'1.4.0') {
+        $taskIcon=Join-Path $app '_internal\ui\assets\globe-orbit.ico'
+        $taskShell=New-Object -ComObject WScript.Shell
+        $taskStartShortcut=$taskShell.CreateShortcut((Join-Path $startMenu '星图影像下载器.lnk'))
+        if ($taskStartShortcut.IconLocation.Split(',')[0] -ne $taskIcon) { throw 'Start menu icon does not reference supplied ICO' }
+        if ((Get-FileHash -LiteralPath $taskIcon -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath (Join-Path $project 'ui\assets\globe-orbit.ico') -Algorithm SHA256).Hash) { throw 'Installed ICO differs from supplied icon' }
+        $taskDesktopPath=Join-Path ([Environment]::GetFolderPath('DesktopDirectory')) '星图影像下载器.lnk'
+        if (Test-Path -LiteralPath $taskDesktopPath) {
+            $taskDesktopShortcut=$taskShell.CreateShortcut($taskDesktopPath)
+            if ($taskDesktopShortcut.TargetPath -ne $exe -or $taskDesktopShortcut.IconLocation.Split(',')[0] -ne $taskIcon) { throw 'Desktop shortcut target or icon mismatch' }
+            $check.DesktopShortcutSuppliedIcon=$true
+        }
+        $check.StartMenuSuppliedIcon=$true
+    }
     $env:LOCALAPPDATA=$userAppData
     $env:PYTHONUTF8='1'
     $pkgArgs=@($exe,'--require-version',$check.RegisteredVersion)
@@ -109,7 +125,7 @@ try {
         $check.UpgradePreservedPreferencesAndOutput=$true
         $pkgArgs+=@('--require-output',$userOutput)
     }
-    & $python (Join-Path $project 'scripts\check_package.py') @pkgArgs
+    & $python -X utf8 (Join-Path $project 'scripts\check_package.py') @pkgArgs
     if ($LASTEXITCODE -ne 0) { throw 'Installed binary portable smoke check failed' }
     $check.InstalledApiAndShapefile=$true
 
@@ -125,12 +141,32 @@ try {
         Start-Sleep -Milliseconds 250
     }
     if (!$webView) { throw 'Installed native desktop did not start Edge WebView2' }
-    $homeResponse=Invoke-WebRequest -Uri $origin -TimeoutSec 5
+    $homeResponse=Invoke-WebRequest -UseBasicParsing -Uri $origin -TimeoutSec 5
     if ($homeResponse.Content -notmatch '<meta name="app-token" content="([^"<>]+)"') { throw 'Installed native desktop did not serve its UI' }
     $headers=@{'X-App-Token'=$Matches[1]}
     $bootstrap=Invoke-RestMethod -Uri "$origin/api/bootstrap" -Headers $headers -TimeoutSec 5
     if (!$bootstrap.native_dialogs -or $bootstrap.version -ne $check.RegisteredVersion) { throw 'Installed native API mismatch' }
     if ($UpdateRepository -and $bootstrap.update_repository -ne $UpdateRepository) { throw 'Installed native API update channel mismatch' }
+    if ($bootstrap.PSObject.Properties.Name -contains 'gedi_collections') {
+        if ($bootstrap.gedi_collections.Count -ne 13 -or $bootstrap.gedi_default -ne 'gedi02-a-003') { throw 'Installed GEDI collections mismatch' }
+        if ((Get-Content -LiteralPath (Join-Path $app '快速开始.txt') -Raw -Encoding UTF8) -notmatch 'NASA GEDI' -or
+            !(Test-Path -LiteralPath (Join-Path $app 'GEDI.md') -PathType Leaf)) { throw 'Installer did not include GEDI instructions' }
+        $check.InstalledGediInterfaceAndInstructions=$true
+    }
+
+    if ($bootstrap.PSObject.Properties.Name -contains 'batch_sources') {
+        if ($bootstrap.batch_sources.Count -ne 23 -or !(Test-Path -LiteralPath (Join-Path $app 'BATCH.md') -PathType Leaf)) {
+            throw 'Installed batch sources or instructions are incomplete'
+        }
+        if ((Get-Content -LiteralPath (Join-Path $app '快速开始.txt') -Raw -Encoding UTF8) -notmatch '联合下载') {
+            throw 'Installed quick-start guide omitted batch downloads'
+        }
+        foreach ($asset in @('batch.js','assets/globe-orbit.svg','assets/globe-orbit.ico')) {
+            Invoke-WebRequest -UseBasicParsing -Uri "$origin/$asset" -TimeoutSec 5 | Out-Null
+        }
+        $check.InstalledBatchInterfaceAndInstructions=$true
+    }
+
     # Before the public version numbering reset, infer support from the legacy preview version.
     $publicSeries=$bootstrap.PSObject.Properties.Name -contains 'update_repository'
     function Supports-PreviewFeature([version]$Introduced) {
@@ -146,10 +182,28 @@ try {
     if ($ExpectUpdateStatus) { $check.ExpectedUpdateStatus=$ExpectUpdateStatus }
     Invoke-RestMethod -Uri "$origin/api/preferences" -Method Post -Headers $headers -ContentType 'application/json; charset=utf-8' -Body (@{output_dir=$userOutput} | ConvertTo-Json -Compress) -TimeoutSec 5 | Out-Null
     $check.NativeWebView2=$true
+    if ([version]$check.RegisteredVersion -ge [version]'1.4.0') {
+        if (@($bootstrap.accounts.providers.PSObject.Properties).Count -ne 4) { throw 'Installed account platforms missing' }
+        if (!(Test-Path -LiteralPath (Join-Path $app 'ACCOUNTS.md'))) { throw 'Installed account instructions missing' }
+        Invoke-WebRequest -UseBasicParsing -Uri "$origin/accounts.js" -TimeoutSec 5 | Out-Null
+        $check.InstalledAccountInterfaceAndInstructions=$true
+    }
     if (!$desktop.CloseMainWindow()) { Stop-Process -Id $desktop.Id -ErrorAction SilentlyContinue }
     if (!$desktop.WaitForExit(6000)) { Stop-Process -Id $desktop.Id }
     $desktop=$null
 
+    if ($Accounts) {
+        $taskAccountOutput=Join-Path $root 'accounts'
+        & $python -X utf8 (Join-Path $project 'scripts\check_accounts_package.py') --exe $exe --output $taskAccountOutput
+        if ($LASTEXITCODE -ne 0) { throw 'Installed startup/login/persistence verification failed' }
+        $check.AccountsReport=Join-Path $taskAccountOutput 'accounts-package-report.json'
+    }
+    if ($Batch) {
+        $batchOutput=Join-Path $userOutput 'batch'
+        & $python -X utf8 (Join-Path $project 'scripts\live_batch.py') --exe $exe --output $batchOutput
+        if ($LASTEXITCODE -ne 0) { throw 'Installed shared-area batch verification failed' }
+        $check.BatchReport=Join-Path $batchOutput 'batch-live-report.json'
+    }
     if ($Slc -or $SlcDual) {
         if (!(Supports-PreviewFeature '1.12.0')) { throw 'IW SLC acceptance requires 1.12.0 or later' }
         if ((Get-Content -LiteralPath (Join-Path $app '快速开始.txt') -Raw -Encoding UTF8) -notmatch 'Sentinel-1 IW SLC') {
@@ -160,7 +214,7 @@ try {
         if ($SlcReference) { $slcArgs+=@('--reference-dir',(Resolve-Path -LiteralPath $SlcReference).Path) }
         if ($Slc -and $SlcDual) { $slcArgs+='--both' }
         elseif ($SlcDual) { $slcArgs+='--dual' }
-        & $python (Join-Path $project 'scripts\live_slc.py') @slcArgs
+        & $python -X utf8 (Join-Path $project 'scripts\live_slc.py') @slcArgs
         if ($LASTEXITCODE -ne 0) { throw 'Installed IW SLC byte or I/Q verification failed' }
         $check.SlcReport=Join-Path $slcOutput 'slc-live-report.json'
     }
@@ -173,7 +227,7 @@ try {
         $modisArgs=@('--exe',$exe,'--output',$modisOutput)
         if ($ModisReference) { $modisArgs+=@('--reference-dir',(Resolve-Path -LiteralPath $ModisReference).Path) }
         if ($ModisSmoke) { $modisArgs+='--smoke' }
-        & $python (Join-Path $project 'scripts\live_modis.py') @modisArgs
+        & $python -X utf8 (Join-Path $project 'scripts\live_modis.py') @modisArgs
         if ($LASTEXITCODE -ne 0) { throw 'Installed MODIS reference or transfer verification failed' }
         $check.ModisReport=Join-Path $modisOutput 'modis-live-report.json'
     }
@@ -185,7 +239,7 @@ try {
         $wcOutput=Join-Path $userOutput 'worldcover'
         $wcArgs=@('--exe',$exe,'--output',$wcOutput)
         if ($WorldCoverReference) { $wcArgs+=@('--reference-dir',(Resolve-Path -LiteralPath $WorldCoverReference).Path) }
-        & $python (Join-Path $project 'scripts\live_worldcover.py') @wcArgs
+        & $python -X utf8 (Join-Path $project 'scripts\live_worldcover.py') @wcArgs
         if ($LASTEXITCODE -ne 0) { throw 'Installed ESA WorldCover transfer, independent reference or browser verification failed' }
         $check.WorldCoverReport=Join-Path $wcOutput 'worldcover-live-report.json'
     }
@@ -194,7 +248,7 @@ try {
         $s2Output=Join-Path $userOutput 's2-tiles'
         $s2Args=@('--exe',$exe,'--output',$s2Output)
         foreach ($selectedCase in $S2Cases) { $s2Args+=@('--only',$selectedCase) }
-        & $python (Join-Path $project 'scripts\live_s2_tiles.py') @s2Args
+        & $python -X utf8 (Join-Path $project 'scripts\live_s2_tiles.py') @s2Args
         if ($LASTEXITCODE -ne 0) { throw 'Installed Sentinel-2 whole tile transfer, source pixel or browser verification failed' }
         $check.S2NativeReport=Join-Path $s2Output 's2-native-live-report.json'
     }
@@ -203,7 +257,7 @@ try {
         $rtcOutput=Join-Path $userOutput 'rtc'
         $rtcArgs=@('--exe',$exe,'--output',$rtcOutput)
         if ($RtcEw) { $rtcArgs+='--include-ew' }
-        & $python (Join-Path $project 'scripts\live_rtc.py') @rtcArgs
+        & $python -X utf8 (Join-Path $project 'scripts\live_rtc.py') @rtcArgs
         if ($LASTEXITCODE -ne 0) { throw 'Installed Sentinel-1 RTC download and independent exact-pixel comparison failed' }
         $check.RtcReport=Join-Path $rtcOutput 'rtc-live-report.json'
     }
@@ -213,10 +267,10 @@ try {
         $sen3Args=@('--exe',$exe,'--output',$userOutput)
         if ($Sen3FullRbt) { $sen3Args+='--full-rbt' }
         if (!$Sen3LargeFiles -and !$Sen3FullRbt) { $sen3Args+='--skip-large' }
-        & $python (Join-Path $project 'scripts\live_sen3.py') @sen3Args
+        & $python -X utf8 (Join-Path $project 'scripts\live_sen3.py') @sen3Args
         if ($LASTEXITCODE -ne 0) { throw 'Installed Sentinel-3 original member and SEN3 product verification failed' }
         $check.Sen3Report=Join-Path $userOutput 'sen3-live-report.json'
-        & $python (Join-Path $project 'scripts\check_sen3_reference.py') $check.Sen3Report
+        & $python -X utf8 (Join-Path $project 'scripts\check_sen3_reference.py') $check.Sen3Report
         if ($LASTEXITCODE -ne 0) { throw 'Independent Beijing geolocation, LST and flag comparison failed' }
         $check.Sen3PixelCheck=Join-Path $userOutput 'sen3-lst-geolocation-check.json'
     }
@@ -224,23 +278,23 @@ try {
         if (!(Supports-PreviewFeature '1.5.0')) { throw 'Sentinel-5P verification needs 1.5.0 or later' }
         $s5pArgs=@('--exe',$exe,'--output',$userOutput)
         if ($S5pAllNrti) { $s5pArgs+='--all-nrti' }
-        & $python (Join-Path $project 'scripts\live_s5p.py') @s5pArgs
+        & $python -X utf8 (Join-Path $project 'scripts\live_s5p.py') @s5pArgs
         if ($LASTEXITCODE -ne 0) { throw 'Installed Sentinel-5P original NetCDF verification failed' }
         $check.S5pReport=Join-Path $userOutput 's5p-live-report.json'
     }
     if ($Live) {
         $liveArgs=@('--exe',$exe,'--output',$userOutput,'--native-catalogue')
         if ($RadarMeasurement) { $liveArgs+='--radar-measurement' }
-        & $python (Join-Path $project 'scripts\live_public.py') @liveArgs
+        & $python -X utf8 (Join-Path $project 'scripts\live_public.py') @liveArgs
         if ($LASTEXITCODE -ne 0) { throw 'Installed live public data smoke check failed' }
         $check.LiveReport=Join-Path $userOutput 'live-report.json'
-        & $python (Join-Path $project 'scripts\check_reference_pixels.py') $check.LiveReport
+        & $python -X utf8 (Join-Path $project 'scripts\check_reference_pixels.py') $check.LiveReport
         if ($LASTEXITCODE -ne 0) { throw 'Independent live COG pixel comparison failed' }
         $check.PixelCheck=Join-Path $userOutput 'pixel-reference-check.json'
         if (Supports-PreviewFeature '1.4.0') {
             $nativeArgs=@('--exe',$exe,'--output',$userOutput)
             if ($LandsatMeasurement) { $nativeArgs+='--landsat-measurement' }
-            & $python (Join-Path $project 'scripts\live_open_native.py') @nativeArgs
+            & $python -X utf8 (Join-Path $project 'scripts\live_open_native.py') @nativeArgs
             if ($LASTEXITCODE -ne 0) { throw 'Installed L1C and Landsat multi-file verification failed' }
             $check.OpenNativeReport=Join-Path $userOutput 'open-native-report.json'
         } elseif ($LandsatMeasurement) { throw '-LandsatMeasurement needs a 1.4.0 or later installer' }

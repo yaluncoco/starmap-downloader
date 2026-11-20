@@ -21,8 +21,9 @@ from shapely.geometry import mapping
 
 from . import VERSION
 from .download import _existing_matches, _save_json
-from .errors import Cancelled, UserError
+from .errors import Cancelled, UserError, keep_download_result
 from .http import HttpClient, check_cancel
+from .local_paths import io_path
 from .integrity import audit_raster, checked_local_receipt, publish_file
 from .planning import build_plan
 from .public_catalogue import DEM, ES_COLLECTION, S2_PUBLIC
@@ -158,7 +159,7 @@ def _output(inputs, valid, options):
 
 def download_public(geometry, scenes, options, output_dir, *, cancel=None, progress=None, planned=None):
     check_cancel(cancel)
-    base = Path(output_dir).expanduser()
+    base = io_path(output_dir)
     if not base.is_absolute():
         raise UserError("请选择绝对输出文件夹。")
     plan, tiles, projected = planned or public_plan(geometry, scenes, options)
@@ -293,11 +294,13 @@ def download_public(geometry, scenes, options, output_dir, *, cancel=None, progr
                 partial.unlink(missing_ok=True)
         manifest["status"] = "completed" if files else "empty"
         return {"files": files, "folder": str(folder), "manifest": str(manifest_path), "plan": plan, "empty_scenes": empty}
-    except Cancelled:
+    except Cancelled as error:
         manifest["status"] = "cancelled"
+        keep_download_result(error, files, folder, manifest_path, plan, empty)
         raise
-    except Exception:
+    except Exception as error:
         manifest["status"] = "failed"
+        keep_download_result(error, files, folder, manifest_path, plan, empty)
         raise
     finally:
         try:

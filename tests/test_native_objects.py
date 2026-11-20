@@ -9,6 +9,8 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import numpy as np
+from scripts.browser_flow import open_data_page
+
 import pytest
 import rasterio
 import requests
@@ -157,7 +159,7 @@ def test_s3_service_credentials_and_receipts(client, s3_provider, tmp_path):
     client.post("raw-connect", {"method": "token", "token": "example-bearer-token"})
     assert "CDSE S3" in client.post("download", req, status=400)["error"]
     client.post("s3-connect", {"access_key": "bad", "secret_key": "short"}, status=400)
-    assert client.post("s3-connect", {"access_key": TEST_ACCESS, "secret_key": TEST_SECRET}) == {"connected": True, "verified": False}
+    assert client.post("s3-connect", {"access_key": TEST_ACCESS, "secret_key": TEST_SECRET}) == {"connected": True, "verified": False, "saved": True}
     client.post("raw-disconnect", {})
     assert client.get("bootstrap").json()["s3_connected"]
     result = client.wait(client.post("download", req)["job_id"])["result"]
@@ -169,7 +171,7 @@ def test_s3_service_credentials_and_receipts(client, s3_provider, tmp_path):
     assert TEST_SECRET not in record_text and TEST_ACCESS not in record_text
     assert all(TEST_SECRET not in p.read_text(encoding="utf-8") for p in tmp_path.rglob("preferences.json"))
     assert s3_provider.count(("GET", S3_URL)) == 1
-    assert client.post("s3-disconnect", {}) == {"connected": False}
+    assert client.post("s3-disconnect", {}) == {"connected": False, "saved": False}
     client.post("download", req, status=400)
 
 
@@ -268,7 +270,7 @@ def test_ui_s3_requires_its_own_keys_and_discards_them(server, s3_provider, tmp_
         errors = []
         page.on("pageerror", lambda error: errors.append(str(error)))
         page.route(re.compile(r"^https://"), lambda route: route.abort())
-        page.goto(server.origin, wait_until="domcontentloaded")
+        open_data_page(page, server.origin)
         pw.expect(page.locator("#outputDirectory")).not_to_have_value("")
         page.locator("#sourceProfile").select_option("cdse-original")
         pw.expect(page.locator("#rawCollection option")).to_have_count(2)
@@ -283,6 +285,8 @@ def test_ui_s3_requires_its_own_keys_and_discards_them(server, s3_provider, tmp_
         pw.expect(page.locator("#scenesBody")).to_contain_text(MODIS_KEY)
         pw.expect(page.locator("#downloadEstimate")).to_contain_text("CDSE S3")
         pw.expect(page.locator("#downloadSelected")).to_be_disabled()
+        page.locator("#manageAccounts").click()
+        page.locator('[data-account="cdse"]').click()
         pw.expect(page.locator("#getS3KeyButton")).to_be_visible()
         page.locator("#s3AccessKey").fill(TEST_ACCESS)
         page.locator("#s3SecretKey").fill(TEST_SECRET)
@@ -290,6 +294,7 @@ def test_ui_s3_requires_its_own_keys_and_discards_them(server, s3_provider, tmp_
         pw.expect(page.locator("#s3ConnectedPanel")).to_contain_text("下载时验证")
         pw.expect(page.locator("#s3AccessKey")).to_have_value("")
         pw.expect(page.locator("#s3SecretKey")).to_have_value("")
+        page.locator("#accountComplete").click()
         page.locator("#rawTransport").select_option("odata")
         pw.expect(page.locator("#downloadEstimate")).to_contain_text("没有此通道")
         pw.expect(page.locator("#downloadSelected")).to_be_disabled()
@@ -301,6 +306,8 @@ def test_ui_s3_requires_its_own_keys_and_discards_them(server, s3_provider, tmp_
         page.locator("#confirmDownload").click()
         pw.expect(page.locator("#jobStatus")).to_have_text("下载完成", timeout=12000)
         assert next(destination.rglob("*.hdf")).read_bytes() == HDF
+        page.locator("#manageAccounts").click()
+        page.locator('[data-account="cdse"]').click()
         page.locator("#s3Disconnect").click()
         pw.expect(page.locator("#downloadSelected")).to_be_disabled()
         pw.expect(page.locator("#connectionStatus")).to_contain_text("需载入 CDSE S3")

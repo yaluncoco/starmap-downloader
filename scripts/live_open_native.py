@@ -25,6 +25,8 @@ AZURE_ROOT = "https://landsateuwest.blob.core.windows.net/landsat-c2/"
 AZURE_TOKEN = "https://planetarycomputer.microsoft.com/api/sas/v1/token/landsateuwest/landsat-c2"
 
 
+from browser_flow import open_data_page
+
 def digest(path, constructor):
     with path.open("rb") as handle:
         return hashlib.file_digest(handle, constructor).hexdigest()
@@ -82,7 +84,7 @@ def verify_compiled_ui(origin, out):
         errors=[]
         page.on("pageerror",lambda error:errors.append(str(error)))
         page.route("https://**/*",lambda route:route.abort())  # map tiles are out of scope; Python still reaches the data providers.
-        page.goto(origin,wait_until="domcontentloaded")
+        open_data_page(page, origin)
         expect(page.locator("#outputDirectory")).not_to_have_value("")
         page.locator("#sourceProfile").select_option("s2-l1c-aws")
         page.locator('[data-tab="coordinates"]').click()

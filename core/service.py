@@ -10,11 +10,19 @@ import webbrowser
 from pathlib import Path
 
 from . import VERSION
+from .batch_sources import public_sources as batch_sources
+from .batch_workflow import BatchWorkflow
 from .catalogue import date_range
 from .download import download_scenes
 from .errors import Cancelled, UserError
+from .accounts import Accounts
+from .earthdata_auth import EarthdataAuth
+from .gedi_catalogue import GEDI, COLLECTIONS as GEDI_COLLECTIONS, DEFAULT_COLLECTION as GEDI_DEFAULT, search_gedi
+from .gedi_catalogue import collection_id as gedi_collection, public_collections as gedi_collections
+from .gedi_download import build_gedi_plan, download_gedi, normalize_options as gedi_options
 from .geometry import describe_aoi, load_aoi, normalize_aoi, parse_coordinates, save_aoi
 from .http import AuthManager, HttpClient, check_cancel
+from .local_paths import display_path, io_path
 from .planning import build_plan, normalize_options
 from .native_catalogue import collection_id, list_collections, search_original
 from .open_l2a import ES_COLLECTION, S2_L2A_COG, search_l2a
@@ -44,7 +52,7 @@ NATIVE_OPEN = {S1_PUBLIC: (S1_CATALOGUE, "public"), S2_L1C_OPEN: (L1C_COLLECTION
                S5P_PUBLIC: (None, "public"), SEN3_PUBLIC: (None, "public"), S1_SLC: (SLC_COLLECTION, "public"),
                **{profile: (profile, "public") for profile in WORLD_COVER},
                **{profile: (profile, "pc-public") for profile in MODIS}}
-PROFILE_IDS = (S2_PROCESS, S2_PUBLIC, *NATIVE_OPEN, S1_RTC, DEM_30, DEM_90, ORIGINAL)
+PROFILE_IDS = (S2_PROCESS, S2_PUBLIC, *NATIVE_OPEN, S1_RTC, DEM_30, DEM_90, GEDI, ORIGINAL)
 RADAR_MODES = ("", "IW", "EW", "SM", "WV")
 
 
@@ -55,7 +63,7 @@ def _profile(value):
     return profile
 
 
-def _criteria(value, profile):
+def _criteria(value, profile, *, shared_dates=False):
     if profile in DEM:
         if value.get("start") or value.get("end"):
             raise UserError("Copernicus DEM 是静态数据，请勿设置采集日期。")
@@ -75,6 +83,10 @@ def _criteria(value, profile):
             raise UserError("无效的 Sentinel-1 成像模式；RTC 仅提供 IW 和 EW。" if profile == S1_RTC else "无效的 Sentinel-1 GRD 雷达模式。")
         filters = {"radar_mode": mode}
         minimum = dt.date(2014, 4, 3)
+    elif profile == GEDI:
+        key = gedi_collection(value.get("collection"))
+        filters = {"collection": key}
+        minimum = dt.date(2019, 4, 4)
     elif profile == S1_SLC:
         filters = {}
         minimum = SLC_FIRST
@@ -93,7 +105,7 @@ def _criteria(value, profile):
     else:
         filters = {"max_cloud": cloud_limit(value.get("max_cloud", 20))}
         minimum = dt.date(1982, 1, 1) if profile == LANDSAT_OPEN else dt.date(2015, 6, 23)
-    start, stop = date_range(value.get("start"), value.get("end"), minimum)
+    start, stop = date_range(value.get("start"), value.get("end"), dt.date(1900, 1, 1) if shared_dates else minimum)
     return {**filters, "start": start.isoformat(), "end": (stop - dt.timedelta(days=1)).isoformat()}
 
 
@@ -108,6 +120,11 @@ OFFICIAL_LINKS = {
     "s3-keys": "https://eodata-s3keysmanager.dataspace.copernicus.eu/",
     "s3-docs": "https://documentation.dataspace.copernicus.eu/APIs/S3.html",
     "worldcover": "https://esa-worldcover.org/en/data-access",
+    "earthdata-register": "https://urs.earthdata.nasa.gov/users/new",
+    "earthdata-token": "https://urs.earthdata.nasa.gov/profile",
+    "earthdata-auth": "https://urs.earthdata.nasa.gov/documentation/for_users/user_token",
+    "gedi-docs": "https://gedi.umd.edu/data/products/",
+    **{"gedi:" + key: "https://search.earthdata.nasa.gov/search/granules?p=" + spec["concept_id"] for key, spec in GEDI_COLLECTIONS.items()},
     **{profile: f"https://planetarycomputer.microsoft.com/dataset/{profile}" for profile in MODIS},
 }
 
@@ -144,6 +161,7 @@ class Service:
         self.auth = AuthManager()
         self.raw_auth = RawAuth()
         self.s3_auth = CDSES3Auth()
+        self.earthdata_auth = EarthdataAuth()
         self._collections_lock = threading.Lock()
         self._collections_cache = None
         self.jobs = {}
@@ -152,6 +170,7 @@ class Service:
         self.last_aoi = None
         self.last_query = None
         self._query_geometry = None
+        self.batch = BatchWorkflow(self)
         self._connecting = False
         self._geocode_lock = threading.Lock()
         self._last_geocode = 0.0
@@ -163,6 +182,8 @@ class Service:
         self.updates = UpdateClient(packaged_repository())
         self._update_check_lock = threading.Lock()
         self._update_release = None
+        self.accounts = Accounts(root, self.auth, self.raw_auth, self.s3_auth, self.earthdata_auth)
+        self.accounts.start()
 
     def _load_preferences(self):
         defaults = {"output_dir": str(Path.home() / "Downloads" / "星图影像"), "client_id": ""}
@@ -175,7 +196,7 @@ class Service:
         return defaults
 
     def save_preferences(self, value):
-        # Deliberately allowlist fields. No password, secret, token, or AOI is persisted.
+        # Preferences remain allowlisted; reusable credentials use the separate DPAPI store.
         with self.lock:
             for key in ("output_dir", "client_id"):
                 if isinstance(value.get(key), str):
@@ -190,12 +211,17 @@ class Service:
     def bootstrap(self):
         with self.lock:
             active = self.active_job()
-            return {"version": VERSION, "connected": not self._connecting and self.auth.connected, "preferences": self.preferences.copy(),
-                    "raw_connected": not self._connecting and self.raw_auth.connected,
-                    "s3_connected": not self._connecting and self.s3_auth.connected,
+            restoring = self.accounts.restoring
+            return {"version": VERSION, "connected": not self._connecting and not restoring and self.auth.connected, "preferences": self.preferences.copy(),
+                    "raw_connected": not self._connecting and not restoring and self.raw_auth.connected,
+                    "s3_connected": not self._connecting and not restoring and self.s3_auth.connected,
+                    "earthdata_connected": not self._connecting and not restoring and self.earthdata_auth.connected,
+                    "accounts": self.account_status(),
                     "links": OFFICIAL_LINKS, "aoi": self.last_aoi, "query": self.last_query, "scenes": list(self.scenes.values()),
                     "s5p_collections": public_collections(), "s5p_default": S5P_DEFAULT,
                     "sen3_collections": sen3_collections(), "sen3_default": SEN3_DEFAULT,
+                    "gedi_collections": gedi_collections(), "gedi_default": GEDI_DEFAULT,
+                    "batch_sources": batch_sources(), "batch": self.batch.snapshot(),
                     "active_job": active.snapshot() if active else None,
                     "update_repository": self.updates.repository}
 
@@ -204,63 +230,78 @@ class Service:
             return next((job for job in self.jobs.values() if job.is_active()), None)
 
     def _assert_idle(self):
-        if self.active_job() or self._connecting:
+        if self.active_job() or self._connecting or self.accounts.restoring:
             raise UserError("已有任务或认证请求正在运行，请等待完成或先取消。")
 
     def _reset_query(self):
         self.scenes = {}
         self.last_query = None
         self._query_geometry = None
+        self.batch.clear()
 
-    def connect(self, value):
+    def account_status(self):
+        return self.accounts.status()
+
+    def _account_connect(self, provider, value):
         with self.lock:
             self._assert_idle()
             self._connecting = True
         try:
-            result = self.auth.connect(value.get("client_id", ""), value.get("client_secret", ""))
-            self.save_preferences({"client_id": result["client_id"]})
-            with self.lock:
-                if self.last_query and self.last_query["profile"] == S2_PROCESS:
-                    self._reset_query()
+            result = self.accounts.connect(provider, value)
+            if provider == "oauth":
+                self.save_preferences({"client_id": result["client_id"]})
+                with self.lock:
+                    if self.last_query and self.last_query["profile"] == S2_PROCESS:
+                        self._reset_query()
             return result
         finally:
             with self.lock:
                 self._connecting = False
 
+    def connect(self, value):
+        return self._account_connect("oauth", value)
+
     def disconnect(self):
         with self.lock:
             self._assert_idle()
-            self.auth.clear()
+            result = self.accounts.disconnect("oauth")
+            self.save_preferences({"client_id": ""})
             if self.last_query and self.last_query["profile"] == S2_PROCESS:
                 self._reset_query()
-        return {"connected": False}
+            return result
 
     def raw_connect(self, value):
-        with self.lock:
-            self._assert_idle()
-            self._connecting = True
-        try:
-            return self.raw_auth.connect(value)
-        finally:
-            with self.lock:
-                self._connecting = False
+        return self._account_connect("odata", value)
 
     def raw_disconnect(self):
         with self.lock:
             self._assert_idle()
-            self.raw_auth.clear()
-        return {"connected": False}
+            return self.accounts.disconnect("odata")
 
     def s3_connect(self, value):
-        with self.lock:
-            self._assert_idle()
-            return self.s3_auth.connect(value.get("access_key", ""), value.get("secret_key", ""))
+        return self._account_connect("s3", value)
 
     def s3_disconnect(self):
         with self.lock:
             self._assert_idle()
-            self.s3_auth.clear()
-        return {"connected": False}
+            return self.accounts.disconnect("s3")
+
+    def earthdata_connect(self, value):
+        return self._account_connect("earthdata", value)
+
+    def earthdata_disconnect(self):
+        with self.lock:
+            self._assert_idle()
+            return self.accounts.disconnect("earthdata")
+
+    def clear_accounts(self, _value):
+        with self.lock:
+            self._assert_idle()
+            status = self.accounts.clear()
+            self.save_preferences({"client_id": ""})
+            if self.last_query and self.last_query["profile"] == S2_PROCESS:
+                self._reset_query()
+            return status
 
     def collections(self, value):
         with self._collections_lock:
@@ -306,22 +347,37 @@ class Service:
             try:
                 result = operation(job)
                 with job.lock:
-                    job.data.update(status="completed", result=result, progress=1.0)
-                    if kind == "search":
+                    job.data.update(status=result.get("status", "completed") if kind == "batch-download" else "completed", result=result, progress=1.0)
+                    if kind == "batch-search":
+                        groups = result["batch"]["groups"]
+                        job.data["message"] = f"联合检索完成 · {len(groups)} 个来源 · {sum(len(g['scenes']) for g in groups)} 个结果"
+                    elif kind == "search":
                         unit = "次过境" if result["query"]["profile"] == S2_PROCESS else " 个匹配项"
                         job.data["message"] = f"找到 {len(result['scenes'])}{unit}"
+                    elif kind == "batch-download":
+                        groups = result["sources"]
+                        completed = sum(g["status"] == "completed" for g in groups)
+                        failed = sum(g["status"] in ("failed", "partial", "search_failed", "dependency_failed") for g in groups)
+                        empty = sum(g["status"] in ("empty", "not_selected") for g in groups)
+                        job.data["message"] = f"联合下载 · {completed} 个来源完成 · {empty} 个来源无选择或无匹配 · {failed} 个来源需重试"
                     elif kind == "update":
                         job.data["message"] = "SHA-256 校验通过。请先关闭本软件，再从保存文件夹手动运行安装包。"
                     else:
                         skipped = sum(file["status"] == "skipped" for file in result["files"])
                         saved = len(result["files"]) - skipped
-                        if result["plan"].get("kind") == "original":
+                        if result["plan"].get("kind") == "gedi":
+                            stats = result["statistics"]
+                            if "accepted_shots" in stats:
+                                job.data["message"] = f"GEDI 导出完成 · {stats['accepted_shots']} 个足迹 · 新保存 {saved} 个文件 · 已有 {skipped} 个"
+                            else:
+                                job.data["message"] = f"GEDI 下载完成 · 新保存 {saved} 个文件 · 已有 {skipped} 个"
+                        elif result["plan"].get("kind") == "original":
                             job.data["message"] = f"新保存 {saved} 个原始文件 · 完整性验证后跳过 {skipped} 个"
                         else:
                             job.data["message"] = f"新保存 {saved} 景 · 已有 {skipped} 景 · 无有效像元 {len(result['empty_scenes'])} 景"
             except Cancelled:
                 with job.lock:
-                    message = "已取消安装包下载" if kind == "update" else "任务已取消；已完成的影像已保留"
+                    message = "已取消安装包下载" if kind == "update" else "任务已取消；已完成的文件已保留"
                     job.data.update(status="cancelled", message=message)
             except UserError as error:
                 with job.lock:
@@ -336,6 +392,55 @@ class Service:
         threading.Thread(target=run, name=f"{kind}-{job.id[:6]}", daemon=True).start()
         return {"job_id": job.id}
 
+    def _search_profile(self, profile, geometry, criteria, *, cancel=None, progress=None):
+        start, end = criteria["start"], criteria["end"]
+        kwargs = {"cancel": cancel, "progress": progress}
+        if profile == ORIGINAL:
+            scenes = search_original(geometry, criteria["collection"], start, end, radar_mode=criteria["radar_mode"], **kwargs)
+        elif profile == GEDI:
+            scenes = search_gedi(geometry, criteria["collection"], start, end, **kwargs)
+        elif profile in DEM:
+            scenes = search_dem(geometry, profile, **kwargs)
+        elif profile == S1_PUBLIC:
+            scenes = search_public_radar(geometry, dt.date.fromisoformat(start), dt.date.fromisoformat(end) + dt.timedelta(days=1),
+                                         criteria["radar_mode"], **kwargs)
+        elif profile == S1_SLC:
+            scenes = search_slc(geometry, start, end, **kwargs)
+        elif profile == S1_RTC:
+            scenes = search_rtc(geometry, dt.date.fromisoformat(start), dt.date.fromisoformat(end) + dt.timedelta(days=1),
+                                criteria["radar_mode"], **kwargs)
+        elif profile == SEN3_PUBLIC:
+            scenes = search_sen3(geometry, criteria["collection"], start, end, **kwargs)
+        elif profile == S5P_PUBLIC:
+            scenes = search_s5p(geometry, criteria["collection"], start, end, **kwargs)
+        elif profile in WORLD_COVER:
+            scenes = search_worldcover(geometry, profile, start, end, **kwargs)
+        elif profile in MODIS:
+            scenes = search_modis(geometry, profile, start, end, **kwargs)
+        elif profile in (S2_L1C_OPEN, LANDSAT_OPEN):
+            scenes = search_open_native(profile, geometry, dt.date.fromisoformat(start), dt.date.fromisoformat(end) + dt.timedelta(days=1),
+                                        criteria["max_cloud"], **kwargs)
+        elif profile == S2_L3_PUBLIC:
+            scenes = search_l3(geometry, start, end, **kwargs)
+        elif profile == S2_L2A_COG:
+            scenes = search_l2a(geometry, dt.date.fromisoformat(start), dt.date.fromisoformat(end) + dt.timedelta(days=1),
+                                criteria["max_cloud"], **kwargs)
+        elif profile == S2_PUBLIC:
+            scenes = search_earth(geometry, dt.date.fromisoformat(start), dt.date.fromisoformat(end) + dt.timedelta(days=1),
+                                  criteria["max_cloud"], **kwargs)
+        else:
+            scenes = find_scenes(geometry, start, end, criteria["max_cloud"], self.auth, **kwargs)
+        return scenes
+
+    def batch_search(self, value):
+        return self.batch.search(value)
+
+    def batch_plan(self, value):
+        return self.batch.plan(value)
+
+    def batch_download(self, value):
+        return self.batch.download(value)
+
     def search(self, value):
         geometry = normalize_aoi(value.get("geometry"))
         profile = _profile(value)
@@ -345,39 +450,7 @@ class Service:
         def operation(job):
             kwargs = {"cancel": job.cancel_event, "progress": job.update}
             job.update("连接影像目录", 0.0, {"search_profile": profile, "criteria": criteria})
-            if profile == ORIGINAL:
-                scenes = search_original(geometry, criteria["collection"], start, end, radar_mode=criteria["radar_mode"], **kwargs)
-            elif profile in DEM:
-                scenes = search_dem(geometry, profile, **kwargs)
-            elif profile == S1_PUBLIC:
-                scenes = search_public_radar(geometry, dt.date.fromisoformat(start), dt.date.fromisoformat(end) + dt.timedelta(days=1),
-                                             criteria["radar_mode"], **kwargs)
-            elif profile == S1_SLC:
-                scenes = search_slc(geometry, start, end, **kwargs)
-            elif profile == S1_RTC:
-                scenes = search_rtc(geometry, dt.date.fromisoformat(start), dt.date.fromisoformat(end) + dt.timedelta(days=1),
-                                    criteria["radar_mode"], **kwargs)
-            elif profile == SEN3_PUBLIC:
-                scenes = search_sen3(geometry, criteria["collection"], start, end, **kwargs)
-            elif profile == S5P_PUBLIC:
-                scenes = search_s5p(geometry, criteria["collection"], start, end, **kwargs)
-            elif profile in WORLD_COVER:
-                scenes = search_worldcover(geometry, profile, start, end, **kwargs)
-            elif profile in MODIS:
-                scenes = search_modis(geometry, profile, start, end, **kwargs)
-            elif profile in (S2_L1C_OPEN, LANDSAT_OPEN):
-                scenes = search_open_native(profile, geometry, dt.date.fromisoformat(start), dt.date.fromisoformat(end) + dt.timedelta(days=1),
-                                            criteria["max_cloud"], **kwargs)
-            elif profile == S2_L3_PUBLIC:
-                scenes = search_l3(geometry, start, end, **kwargs)
-            elif profile == S2_L2A_COG:
-                scenes = search_l2a(geometry, dt.date.fromisoformat(start), dt.date.fromisoformat(end) + dt.timedelta(days=1),
-                                    criteria["max_cloud"], **kwargs)
-            elif profile == S2_PUBLIC:
-                scenes = search_earth(geometry, dt.date.fromisoformat(start), dt.date.fromisoformat(end) + dt.timedelta(days=1),
-                                      criteria["max_cloud"], **kwargs)
-            else:
-                scenes = find_scenes(geometry, start, end, criteria["max_cloud"], self.auth, **kwargs)
+            scenes = self._search_profile(profile, geometry, criteria, **kwargs)
             query = {"id": job.id, "profile": profile, **criteria}
             with self.lock:
                 check_cancel(job.cancel_event)
@@ -393,6 +466,59 @@ class Service:
             self.last_aoi = describe_aoi(geometry, self.last_aoi["name"] if self.last_aoi else "研究区")
             self._reset_query()
             return self._start_job("search", operation)
+
+    def _selection_options(self, profile, query, supplied, scenes):
+        keys = [scene["key"] for scene in scenes]
+        if profile in WORLD_COVER:
+            unavailable = next((scene["raw"] for scene in scenes if not scene["raw"]["available"]), None)
+            if unavailable:
+                raise UserError("所选 ESA WorldCover 年度瓦片不可下载：" + unavailable["unavailable_reason"] + "。不会换用其他产品。")
+        if profile == GEDI:
+            options = gedi_options(supplied, query["collection"])
+        elif profile == ORIGINAL or profile in NATIVE_OPEN:
+            modes = ("original", "metadata", "asset", "assets") if profile in (ORIGINAL, SEN3_PUBLIC) or profile in MODIS else (
+                ("assets", "asset") if profile in (S2_L3_PUBLIC, S2_ANNUAL) else
+                ("original",) if profile in (S5P_PUBLIC, S1_SLC) or profile in WORLD_COVER else ("metadata", "asset", "assets"))
+            mode = supplied.get("mode", modes[0])
+            if mode not in modes:
+                raise UserError("该来源不支持所选下载内容；此公开来源只提供目录中列出的原始文件。")
+            asset = supplied.get("asset")
+            if mode == "asset" and (not isinstance(asset, str) or not asset or len(keys) != 1):
+                raise UserError("下载指定原始文件时，请只选一个产品和一个文件。")
+            if mode == "assets" and len(keys) != 1:
+                raise UserError("同时下载多个原始文件时，请先单选一个产品。")
+            transport = supplied.get("transport", "auto")
+            if profile == ORIGINAL:
+                collection, allowed = query["collection"], ("auto", "odata", "cdse-s3")
+            else:
+                collection, only = NATIVE_OPEN[profile]
+                if profile in (S5P_PUBLIC, SEN3_PUBLIC):
+                    collection = query["collection"]
+                allowed = ("auto", only)
+            if transport not in allowed:
+                raise UserError("下载通道与所选目录不匹配。")
+            options = {"collection": collection, "mode": mode, "asset": asset if mode == "asset" else None,
+                       "transport": transport if profile == ORIGINAL else only}
+            if mode == "assets":
+                options["assets"] = supplied.get("assets")
+        elif profile in DEM:
+            mode = supplied.get("mode", "dem")
+            if mode == "original":
+                options = {"collection": f"cop-dem-glo-{DEM[profile][0]}", "mode": mode, "transport": "public"}
+            elif mode == "dem":
+                options = {"profile": profile, "mode": "dem", "label": "数字表面模型 DSM（米）", "resolution": int(DEM[profile][0]),
+                           "bands": ["DSM"], "output_bands": ["DSM"], "dtype": "float32", "nodata": -9999.0, "count": 1, "mask_clouds": False}
+            else:
+                raise UserError("选择按研究区裁剪 DEM GeoTIFF，或下载完整的原始 DEM 瓦片。")
+        elif profile == S1_RTC:
+            options = rtc_options(supplied)
+        else:
+            options = normalize_options(supplied)
+            if options["max_cloud"] != query["max_cloud"]:
+                raise UserError("云量上限已变化，请重新检索。")
+            if profile == S2_PUBLIC:
+                options["profile"] = profile
+        return options
 
     def _selection(self, value):
         geometry = normalize_aoi(value.get("geometry"))
@@ -415,62 +541,33 @@ class Service:
                 criteria = value.get("criteria")
                 if not isinstance(criteria, dict) or any(query.get(k) != v for k, v in _criteria(criteria, profile).items()):
                     raise UserError("类别、日期或筛选条件已变化，请重新检索。")
-            if profile in WORLD_COVER:
-                unavailable = next((self.scenes[key]["raw"] for key in keys if not self.scenes[key]["raw"]["available"]), None)
-                if unavailable:
-                    raise UserError("所选 ESA WorldCover 年度瓦片不可下载：" + unavailable["unavailable_reason"] + "。不会换用其他产品。")
-            if profile == ORIGINAL or profile in NATIVE_OPEN:
-                modes = ("original", "metadata", "asset", "assets") if profile in (ORIGINAL, SEN3_PUBLIC) or profile in MODIS else (
-                    ("assets", "asset") if profile in (S2_L3_PUBLIC, S2_ANNUAL) else
-                    ("original",) if profile in (S5P_PUBLIC, S1_SLC) or profile in WORLD_COVER else ("metadata", "asset", "assets"))
-                mode = supplied.get("mode", modes[0])
-                if mode not in modes:
-                    raise UserError("该来源不支持所选下载内容；此公开来源只提供目录中列出的原始文件。")
-                asset = supplied.get("asset")
-                if mode == "asset" and (not isinstance(asset, str) or not asset or len(keys) != 1):
-                    raise UserError("下载指定原始文件时，请只选一个产品和一个文件。")
-                if mode == "assets" and len(keys) != 1:
-                    raise UserError("同时下载多个原始文件时，请先单选一个产品。")
-                transport = supplied.get("transport", "auto")
-                if profile == ORIGINAL:
-                    collection, allowed = query["collection"], ("auto", "odata", "cdse-s3")
-                else:
-                    collection, only = NATIVE_OPEN[profile]
-                    if profile in (S5P_PUBLIC, SEN3_PUBLIC):
-                        collection = query["collection"]
-                    allowed = ("auto", only)
-                if transport not in allowed:
-                    raise UserError("下载通道与所选目录不匹配。")
-                options = {"collection": collection, "mode": mode, "asset": asset if mode == "asset" else None,
-                           "transport": transport if profile == ORIGINAL else only}
-                if mode == "assets":
-                    options["assets"] = supplied.get("assets")
-            elif profile in DEM:
-                mode = supplied.get("mode", "dem")
-                if mode == "original":
-                    options = {"collection": f"cop-dem-glo-{DEM[profile][0]}", "mode": mode, "transport": "public"}
-                elif mode == "dem":
-                    options = {"profile": profile, "mode": "dem", "label": "数字表面模型 DSM（米）", "resolution": int(DEM[profile][0]),
-                               "bands": ["DSM"], "output_bands": ["DSM"], "dtype": "float32", "nodata": -9999.0, "count": 1, "mask_clouds": False}
-                else:
-                    raise UserError("选择按研究区裁剪 DEM GeoTIFF，或下载完整的原始 DEM 瓦片。")
-            elif profile == S1_RTC:
-                options = rtc_options(supplied)
-            else:
-                options = normalize_options(supplied)
-                if options["max_cloud"] != query["max_cloud"]:
-                    raise UserError("云量上限已变化，请重新检索。")
-                if profile == S2_PUBLIC:
-                    options["profile"] = profile
+            scenes = [self.scenes[key] for key in keys]
+            options = self._selection_options(profile, query, supplied, scenes)
             return profile, geometry, options, [self.scenes[key] for key in keys]
 
-    def plan(self, value):
-        profile, geometry, options, scenes = self._selection(value)
+    def _plan_source(self, profile, geometry, options, scenes, criteria):
+        if profile == GEDI:
+            return build_gedi_plan(geometry, scenes, options, criteria)
         if "transport" in options:
             return raw_plan(geometry, scenes, options)
         if profile != S2_PROCESS:
             return public_plan(geometry, scenes, options)[0]
         return build_plan(geometry, options, len(scenes))[0]
+
+    def _run_source(self, profile, geometry, options, scenes, plan, output_dir, *, cancel=None, progress=None):
+        if profile == GEDI:
+            return download_gedi(geometry, plan, output_dir, self.earthdata_auth, cancel=cancel, progress=progress)
+        if "transport" in options:
+            if profile == SEN3_PUBLIC:
+                return download_sen3(geometry, plan, output_dir, cancel=cancel, progress=progress)
+            return download_original(geometry, plan, output_dir, self.raw_auth, s3_auth=self.s3_auth, cancel=cancel, progress=progress)
+        if profile == S2_PROCESS:
+            return download_scenes(geometry, scenes, options, output_dir, self.auth, cancel=cancel, progress=progress)
+        return download_public(geometry, scenes, options, output_dir, cancel=cancel, progress=progress)
+
+    def plan(self, value):
+        profile, geometry, options, scenes = self._selection(value)
+        return self._plan_source(profile, geometry, options, scenes, self.last_query)
 
     def download(self, value):
         output_dir = str(value.get("output_dir", "")).strip()
@@ -479,7 +576,15 @@ class Service:
         with self.lock:
             self._assert_idle()
             profile, geometry, options, scenes = self._selection(value)
-            if "transport" in options:
+            if profile == GEDI:
+                plan = build_gedi_plan(geometry, scenes, options, self.last_query)
+                if value.get("plan_fingerprint", plan["fingerprint"]) != plan["fingerprint"]:
+                    raise UserError("GEDI 参数、所选文件或参考影像已变化，请重新确认下载计划。")
+                if not self.earthdata_auth.connected:
+                    raise UserError("请先连接 NASA Earthdata 账号或 User Token；它独立于 Copernicus 认证。")
+                def run(cancel, progress):
+                    return download_gedi(geometry, plan, output_dir, self.earthdata_auth, cancel=cancel, progress=progress)
+            elif "transport" in options:
                 plan = raw_plan(geometry, scenes, options)
                 if profile in MODIS and value.get("plan_fingerprint", plan["fingerprint"]) != plan["fingerprint"]:
                     raise UserError("MODIS 下载选择已变化，请重新确认所选文件。")
@@ -607,19 +712,21 @@ class Service:
         return {"opened": True}
 
     def open_folder(self, value):
-        path = Path(value.get("path") or self.preferences["output_dir"])
+        path = io_path(value.get("path") or self.preferences["output_dir"])
         if not path.is_absolute() or not path.is_dir():
             raise UserError("保存文件夹尚不存在。")
         if os.name == "nt":
-            os.startfile(str(path))
+            os.startfile(display_path(path))
         else:
             webbrowser.open(path.as_uri())
         return {"opened": True}
 
     def shutdown(self):
+        self.accounts.stop()
         with self.lock:
             for job in self.jobs.values():
                 job.cancel_event.set()
         self.auth.clear()
         self.raw_auth.clear()
         self.s3_auth.clear()
+        self.earthdata_auth.clear()

@@ -98,10 +98,11 @@ class HttpClient:
 
 
 class AuthManager:
-    """Secrets and tokens exist only in process memory; never in preferences."""
+    """Runtime OAuth manager; reusable client inputs are stored separately with Windows DPAPI."""
 
     def __init__(self):
         self._lock = threading.RLock()
+        self._state_lock = threading.RLock()
         self._client_id = ""
         self._secret = ""
         self._token = ""
@@ -109,11 +110,11 @@ class AuthManager:
 
     @property
     def connected(self):
-        with self._lock:
+        with self._state_lock:
             return bool(self._client_id and self._secret and self._token)
 
     def clear(self):
-        with self._lock:
+        with self._lock, self._state_lock:
             self._client_id = self._secret = self._token = ""
             self._expires = 0.0
 
@@ -125,8 +126,9 @@ class AuthManager:
             raise UserError("凭据长度不正确，请重新复制。")
         with self._lock:
             token, expires = self._fetch(client_id, client_secret)
-            self._client_id, self._secret = client_id, client_secret
-            self._token, self._expires = token, expires
+            with self._state_lock:
+                self._client_id, self._secret = client_id, client_secret
+                self._token, self._expires = token, expires
         return {"connected": True, "client_id": client_id, "expires_in": max(0, int(expires - time.monotonic()))}
 
     def _fetch(self, client_id, secret, cancel=None):
@@ -163,6 +165,8 @@ class AuthManager:
             if not self._secret:
                 raise UserError("请先连接 API 凭据。")
             if force or time.monotonic() >= self._expires - 45:
-                self._token, self._expires = self._fetch(self._client_id, self._secret, cancel)
+                token, expires = self._fetch(self._client_id, self._secret, cancel)
+                with self._state_lock:
+                    self._token, self._expires = token, expires
             return self._token
 

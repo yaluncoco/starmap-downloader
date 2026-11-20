@@ -58,6 +58,8 @@ CASES = (
 )
 
 
+from browser_flow import open_data_page
+
 def product(year, tile):
     return f"ESA_WorldCover_10m_{year}_v{100 if year == 2020 else 200}_{tile}"
 
@@ -273,7 +275,7 @@ def validate_browser(origin,out):
         errors=[]
         page.on("pageerror",lambda error: errors.append(str(error)))
         page.route("https://**/*",lambda route:route.abort())  # Local backend still contacts real AWS.
-        page.goto(origin,wait_until="domcontentloaded")
+        open_data_page(page, origin)
         expect(page.locator("#outputDirectory")).not_to_have_value("")
         page.locator("#sourceProfile").select_option("s2-earth-search")
         page.locator("#startDate").fill("2024-06-10");page.locator("#endDate").fill("2024-06-11")

@@ -1,0 +1,234 @@
+{
+  "hits": 67,
+  "took": 49,
+  "items": [
+    {
+      "meta": {
+        "concept-type": "granule",
+        "concept-id": "G4031111358-LPCLOUD",
+        "revision-id": 1,
+        "native-id": "GEDI02_B_2020152223952_O08318_01_T02007_02_004_01_V003",
+        "collection-concept-id": "C3974616135-LPCLOUD",
+        "provider-id": "LPCLOUD",
+        "format": "application/vnd.nasa.cmr.umm+json",
+        "revision-date": "2026-02-15T23:23:16.810Z"
+      },
+      "umm": {
+        "TemporalExtent": {
+          "RangeDateTime": {
+            "BeginningDateTime": "2020-05-31T22:39:52.000Z",
+            "EndingDateTime": "2020-06-01T00:12:45.000Z"
+          }
+        },
+        "OrbitCalculatedSpatialDomains": [
+          {
+            "BeginOrbitNumber": 8318,
+            "EndOrbitNumber": 8318
+          }
+        ],
+        "GranuleUR": "GEDI02_B_2020152223952_O08318_01_T02007_02_004_01_V003",
+        "AdditionalAttributes": [
+          {
+            "Name": "Reference_Ground_Track",
+            "Values": [
+              "2007"
+            ]
+          },
+          {
+            "Name": "SEGMENT_NUMBER",
+            "Values": [
+              "01"
+            ]
+          },
+          {
+            "Name": "identifier_product_doi_authority",
+            "Values": [
+              "https://doi.org"
+            ]
+          },
+          {
+            "Name": "identifier_product_doi",
+            "Values": [
+              "10.5067/GEDI/GEDI02_B.003"
+            ]
+          }
+        ],
+        "SpatialExtent": {
+          "HorizontalSpatialDomain": {
+            "Geometry": {
+              "GPolygons": [
+                {
+                  "Boundary": {
+                    "Points": [
+                      {
+                        "Longitude": 165.1011779025,
+                        "Latitude": -33.2185009467
+                      },
+                      {
+                        "Longitude": 168.1666390542,
+                        "Latitude": -30.5853323578
+                      },
+                      {
+                        "Longitude": 171.058699489,
+                        "Latitude": -27.8507816631
+                      },
+                      {
+                        "Longitude": 173.7973685189,
+                        "Latitude": -25.0451603762
+                      },
+                      {
+                        "Longitude": 176.4020150745,
+                        "Latitude": -22.1811422141
+                      },
+                      {
+                        "Longitude": 178.893399719,
+                        "Latitude": -19.2678487762
+                      },
+                      {
+                        "Longitude": -178.7107550002,
+                        "Latitude": -16.3138498739
+                      },
+                      {
+                        "Longitude": -178.1702950207,
+                        "Latitude": -15.618842476
+                      },
+                      {
+                        "Longitude": -178.2401128816,
+                        "Latitude": -15.6233049352
+                      },
+                      {
+                        "Longitude": -178.7717308703,
+                        "Latitude": -16.2502112676
+                      },
+                      {
+                        "Longitude": 178.8329964292,
+                        "Latitude": -19.2021851603
+                      },
+                      {
+                        "Longitude": 176.3416540754,
+                        "Latitude": -22.1143635564
+                      },
+                      {
+                        "Longitude": 173.7371963757,
+                        "Latitude": -24.9771051768
+                      },
+                      {
+                        "Longitude": 170.9996845708,
+                        "Latitude": -27.7806249184
+                      },
+                      {
+                        "Longitude": 168.1073054002,
+                        "Latitude": -30.514394663
+                      },
+                      {
+                        "Longitude": 165.063296146,
+                        "Latitude": -33.1866077573
+                      },
+                      {
+                        "Longitude": 165.1011779025,
+                        "Latitude": -33.2185009467
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        },
+        "ProviderDates": [
+          {
+            "Date": "2025-10-07T16:15:20Z",
+            "Type": "Create"
+          }
+        ],
+        "CollectionReference": {
+          "ShortName": "GEDI02_B",
+          "Version": "003"
+        },
+        "PGEVersionClass": {
+          "PGEVersion": "004"
+        },
+        "RelatedUrls": [
+          {
+            "URL": "10.5067/GEDI/GEDI02_B.003",
+            "Type": "VIEW RELATED INFORMATION",
+            "Description": "The Landing Page for this file may be accessed directly from this link",
+            "MimeType": "text/html"
+          },
+          {
+            "URL": "https://data.lpdaac.earthdatacloud.nasa.gov/lp-prod-protected/GEDI02_B.003/GEDI02_B_2020152223952_O08318_01_T02007_02_004_01_V003/GEDI02_B_2020152223952_O08318_01_T02007_02_004_01_V003.h5",
+            "Description": "Download GEDI02_B_2020152223952_O08318_01_T02007_02_004_01_V003.h5",
+            "Type": "GET DATA"
+          },
+          {
+            "URL": "https://data.lpdaac.earthdatacloud.nasa.gov/lp-prod-public/GEDI02_B.003/GEDI02_B_2020152223952_O08318_01_T02007_02_004_01_V003/GEDI02_B_2020152223952_O08318_01_T02007_02_004_01_V003.1.png",
+            "Description": "Download GEDI02_B_2020152223952_O08318_01_T02007_02_004_01_V003.1.png",
+            "Type": "GET RELATED VISUALIZATION"
+          },
+          {
+            "URL": "https://data.lpdaac.earthdatacloud.nasa.gov/lp-prod-protected/GEDI02_B.003/GEDI02_B_2020152223952_O08318_01_T02007_02_004_01_V003/GEDI02_B_2020152223952_O08318_01_T02007_02_004_01_V003.cmr.json",
+            "Description": "Download GEDI02_B_2020152223952_O08318_01_T02007_02_004_01_V003.cmr.json",
+            "Type": "EXTENDED METADATA"
+          },
+          {
+            "URL": "s3://lp-prod-protected/GEDI02_B.003/GEDI02_B_2020152223952_O08318_01_T02007_02_004_01_V003/GEDI02_B_2020152223952_O08318_01_T02007_02_004_01_V003.h5",
+            "Description": "This link provides direct download access via S3 to the granule",
+            "Type": "GET DATA VIA DIRECT ACCESS"
+          },
+          {
+            "URL": "s3://lp-prod-public/GEDI02_B.003/GEDI02_B_2020152223952_O08318_01_T02007_02_004_01_V003/GEDI02_B_2020152223952_O08318_01_T02007_02_004_01_V003.1.png",
+            "Description": "This link provides direct download access via S3 to the granule",
+            "Type": "GET RELATED VISUALIZATION"
+          },
+          {
+            "URL": "s3://lp-prod-protected/GEDI02_B.003/GEDI02_B_2020152223952_O08318_01_T02007_02_004_01_V003/GEDI02_B_2020152223952_O08318_01_T02007_02_004_01_V003.cmr.json",
+            "Description": "This link provides direct download access via S3 to the granule",
+            "Type": "EXTENDED METADATA"
+          },
+          {
+            "URL": "https://data.lpdaac.earthdatacloud.nasa.gov/s3credentials",
+            "Description": "api endpoint to retrieve temporary credentials valid for same-region direct s3 access",
+            "Type": "VIEW RELATED INFORMATION"
+          }
+        ],
+        "InputGranules": [
+          "GEDI01_B_2020152223952_O08318_01_T02007_02_006_02_V003.h5",
+          "GEDI02_A_2020152223952_O08318_01_T02007_02_004_02_V003.h5"
+        ],
+        "DataGranule": {
+          "Identifiers": [
+            {
+              "Identifier": "GEDI02_B_2020152223952_O08318_01_T02007_02_004_01_V003.h5",
+              "IdentifierType": "ProducerGranuleId"
+            }
+          ],
+          "DayNightFlag": "Unspecified",
+          "ProductionDateTime": "2025-10-07T16:15:20Z",
+          "ArchiveAndDistributionInformation": [
+            {
+              "Name": "GEDI02_B_2020152223952_O08318_01_T02007_02_004_01_V003.h5",
+              "SizeInBytes": 257103083,
+              "Checksum": {
+                "Value": "ad06ebdf41b1d915cd1fe05f583fa4b0edf4d7858536af8b176244178b17544adc746096eb4a7049830441c1f0ed67cc0f3adfc69ef976178586386f7d172201",
+                "Algorithm": "SHA-512"
+              }
+            },
+            {
+              "Name": "GEDI02_B_2020152223952_O08318_01_T02007_02_004_01_V003.1.png",
+              "SizeInBytes": 243164,
+              "Checksum": {
+                "Value": "4e2dd736dbe855633beca05b84f38d234e72ba985d374b305dcdde826c03b847ff421417e46e5bc8023346ac6d44cefe1d0cab613776248cef5b46ff1c3dd1cd",
+                "Algorithm": "SHA-512"
+              }
+            }
+          ]
+        },
+        "MetadataSpecification": {
+          "URL": "https://cdn.earthdata.nasa.gov/umm/granule/v1.6.7",
+          "Name": "UMM-G",
+          "Version": "1.6.7"
+        }
+      }
+    }
+  ]
+}

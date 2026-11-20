@@ -1,0 +1,309 @@
+{
+  "hits": 62,
+  "took": 42,
+  "items": [
+    {
+      "meta": {
+        "concept-type": "granule",
+        "concept-id": "G2613716668-ORNL_CLOUD",
+        "revision-id": 11,
+        "native-id": "GEDI_L4A_AGB_Density_V2_1.GEDI04_A_2020152223952_O08318_04_T02007_02_002_02_V002.h5",
+        "collection-concept-id": "C2237824918-ORNL_CLOUD",
+        "provider-id": "ORNL_CLOUD",
+        "format": "application/echo10+xml",
+        "revision-date": "2026-04-23T15:07:06.309Z"
+      },
+      "umm": {
+        "TemporalExtent": {
+          "RangeDateTime": {
+            "BeginningDateTime": "2020-05-31T23:49:05.000Z",
+            "EndingDateTime": "2020-06-01T00:00:38.000Z"
+          }
+        },
+        "GranuleUR": "GEDI_L4A_AGB_Density_V2_1.GEDI04_A_2020152223952_O08318_04_T02007_02_002_02_V002.h5",
+        "MeasuredParameters": [
+          {
+            "ParameterName": "FORESTS"
+          },
+          {
+            "ParameterName": "SHRUBLAND/SCRUB"
+          },
+          {
+            "ParameterName": "GRASSLANDS"
+          },
+          {
+            "ParameterName": "EVERGREEN VEGETATION"
+          },
+          {
+            "ParameterName": "DECIDUOUS VEGETATION"
+          },
+          {
+            "ParameterName": "BIOMASS"
+          },
+          {
+            "ParameterName": "LIDAR WAVEFORM"
+          },
+          {
+            "ParameterName": "CANOPY CHARACTERISTICS"
+          }
+        ],
+        "SpatialExtent": {
+          "HorizontalSpatialDomain": {
+            "Geometry": {
+              "GPolygons": [
+                {
+                  "Boundary": {
+                    "Points": [
+                      {
+                        "Longitude": 1.296247,
+                        "Latitude": 0.165348
+                      },
+                      {
+                        "Longitude": 3.4512961,
+                        "Latitude": -2.892247
+                      },
+                      {
+                        "Longitude": 5.6193829,
+                        "Latitude": -5.9445491
+                      },
+                      {
+                        "Longitude": 7.813704,
+                        "Latitude": -8.9855204
+                      },
+                      {
+                        "Longitude": 10.048048,
+                        "Latitude": -12.0089884
+                      },
+                      {
+                        "Longitude": 12.338377,
+                        "Latitude": -15.0092487
+                      },
+                      {
+                        "Longitude": 14.698864,
+                        "Latitude": -17.9788227
+                      },
+                      {
+                        "Longitude": 17.1473045,
+                        "Latitude": -20.9109192
+                      },
+                      {
+                        "Longitude": 19.7011795,
+                        "Latitude": -23.7975998
+                      },
+                      {
+                        "Longitude": 22.3798275,
+                        "Latitude": -26.6296387
+                      },
+                      {
+                        "Longitude": 25.2030621,
+                        "Latitude": -29.3966198
+                      },
+                      {
+                        "Longitude": 28.1945496,
+                        "Latitude": -32.0874977
+                      },
+                      {
+                        "Longitude": 29.8486099,
+                        "Latitude": -33.4729424
+                      },
+                      {
+                        "Longitude": 29.8908672,
+                        "Latitude": -33.4369812
+                      },
+                      {
+                        "Longitude": 28.2369537,
+                        "Latitude": -32.0522118
+                      },
+                      {
+                        "Longitude": 25.2455425,
+                        "Latitude": -29.3624706
+                      },
+                      {
+                        "Longitude": 22.4222488,
+                        "Latitude": -26.5965023
+                      },
+                      {
+                        "Longitude": 19.7434654,
+                        "Latitude": -23.7653675
+                      },
+                      {
+                        "Longitude": 17.1894112,
+                        "Latitude": -20.8794727
+                      },
+                      {
+                        "Longitude": 14.7407751,
+                        "Latitude": -17.9480515
+                      },
+                      {
+                        "Longitude": 12.3800888,
+                        "Latitude": -14.9790363
+                      },
+                      {
+                        "Longitude": 10.0895863,
+                        "Latitude": -11.9792318
+                      },
+                      {
+                        "Longitude": 7.8550911,
+                        "Latitude": -8.9561071
+                      },
+                      {
+                        "Longitude": 5.660656,
+                        "Latitude": -5.9153771
+                      },
+                      {
+                        "Longitude": 3.4925001,
+                        "Latitude": -2.863215
+                      },
+                      {
+                        "Longitude": 1.3374259,
+                        "Latitude": 0.194343
+                      },
+                      {
+                        "Longitude": 1.296247,
+                        "Latitude": 0.165348
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        },
+        "ProviderDates": [
+          {
+            "Date": "2026-04-21T00:00:00.000Z",
+            "Type": "Insert"
+          },
+          {
+            "Date": "2026-04-23T12:19:05.000Z",
+            "Type": "Update"
+          }
+        ],
+        "CollectionReference": {
+          "ShortName": "GEDI_L4A_AGB_Density_V2_1_2056",
+          "Version": "2.1"
+        },
+        "RelatedUrls": [
+          {
+            "URL": "https://data.ornldaac.earthdata.nasa.gov/protected/gedi/GEDI_L4A_AGB_Density_V2_1/data/GEDI04_A_2020152223952_O08318_04_T02007_02_002_02_V002.h5",
+            "Type": "GET DATA",
+            "Description": "Download GEDI04_A_2020152223952_O08318_04_T02007_02_002_02_V002.h5"
+          },
+          {
+            "URL": "s3://ornl-cumulus-prod-protected/gedi/GEDI_L4A_AGB_Density_V2_1/data/GEDI04_A_2020152223952_O08318_04_T02007_02_002_02_V002.h5",
+            "Type": "GET DATA VIA DIRECT ACCESS",
+            "Description": "This link provides direct download access via S3 to the granule"
+          },
+          {
+            "URL": "https://daac.ornl.gov/GEDI/guides/GEDI_L4A_AGB_Density_V2_1.html",
+            "Type": "VIEW RELATED INFORMATION",
+            "Description": "ORNL DAAC Data Set Documentation"
+          },
+          {
+            "URL": "https://doi.org/10.3334/ORNLDAAC/2056",
+            "Type": "VIEW RELATED INFORMATION",
+            "Description": "Data set Landing Page DOI URL"
+          },
+          {
+            "URL": "https://data.ornldaac.earthdata.nasa.gov/public/gedi/GEDI_L4A_AGB_Density_V2_1/comp/GEDI_ATBD_L4A_v1.0.pdf",
+            "Type": "VIEW RELATED INFORMATION",
+            "Description": "Data Set Documentation"
+          },
+          {
+            "URL": "https://data.ornldaac.earthdata.nasa.gov/public/gedi/GEDI_L4A_AGB_Density_V2_1/comp/GEDI_L4A_AGB_Density_V2_1.pdf",
+            "Type": "VIEW RELATED INFORMATION",
+            "Description": "Data Set Documentation"
+          },
+          {
+            "URL": "https://data.ornldaac.earthdata.nasa.gov/public/gedi/GEDI_L4A_AGB_Density_V2_1/comp/GEDI_L4A_V2_Common_Queries.pdf",
+            "Type": "VIEW RELATED INFORMATION",
+            "Description": "Data Set Documentation"
+          },
+          {
+            "URL": "https://data.ornldaac.earthdata.nasa.gov/public/gedi/GEDI_L4A_AGB_Density_V2_1/comp/GEDI_L4A_V2_Product_Data_Dictionary.pdf",
+            "Type": "VIEW RELATED INFORMATION",
+            "Description": "Data Set Documentation"
+          },
+          {
+            "URL": "https://data.ornldaac.earthdata.nasa.gov/public/gedi/GEDI_L4A_AGB_Density_V2_1/comp/list_of_deleted_files_mw_163_182.txt",
+            "Type": "VIEW RELATED INFORMATION",
+            "Description": "Data Set Documentation"
+          },
+          {
+            "URL": "https://data.ornldaac.earthdata.nasa.gov/public/gedi/GEDI_L4A_AGB_Density_V2_1/comp/list_of_deleted_files_orbits_17591_09899.txt",
+            "Type": "VIEW RELATED INFORMATION",
+            "Description": "Data Set Documentation"
+          },
+          {
+            "URL": "https://data.ornldaac.earthdata.nasa.gov/public/gedi/GEDI_L4A_AGB_Density_V2_1/comp/list_of_revised_files_mw_163_182.txt",
+            "Type": "VIEW RELATED INFORMATION",
+            "Description": "Data Set Documentation"
+          },
+          {
+            "URL": "https://data.ornldaac.earthdata.nasa.gov/public/gedi/GEDI_L4A_AGB_Density_V2_1/comp/list_of_revised_files_orbits_17591_09899.txt",
+            "Type": "VIEW RELATED INFORMATION",
+            "Description": "Data Set Documentation"
+          },
+          {
+            "URL": "https://data.ornldaac.earthdata.nasa.gov/s3credentials",
+            "Type": "VIEW RELATED INFORMATION",
+            "Description": "api endpoint to retrieve temporary credentials valid for same-region direct s3 access"
+          },
+          {
+            "URL": "https://opendap.earthdata.nasa.gov/collections/C2237824918-ORNL_CLOUD/granules/GEDI_L4A_AGB_Density_V2_1.GEDI04_A_2020152223952_O08318_04_T02007_02_002_02_V002.h5",
+            "Type": "USE SERVICE API",
+            "Subtype": "OPENDAP DATA",
+            "Description": "OPeNDAP request URL"
+          }
+        ],
+        "Projects": [
+          {
+            "ShortName": "Not provided",
+            "Campaigns": [
+              "GEDI"
+            ]
+          }
+        ],
+        "DataGranule": {
+          "DayNightFlag": "Both",
+          "ProductionDateTime": "2026-04-21T00:00:00.000Z",
+          "ArchiveAndDistributionInformation": [
+            {
+              "Name": "Not provided",
+              "Size": 162.003938,
+              "SizeInBytes": 162003938,
+              "Checksum": {
+                "Value": "22b213f918d4d06e3ed6b8712761bc003dc5e71474563986d3c2ae505ec993db",
+                "Algorithm": "SHA-256"
+              },
+              "SizeUnit": "MB"
+            }
+          ]
+        },
+        "Platforms": [
+          {
+            "ShortName": "COMPUTERS",
+            "Instruments": [
+              {
+                "ShortName": "Computer"
+              }
+            ]
+          },
+          {
+            "ShortName": "ISS",
+            "Instruments": [
+              {
+                "ShortName": "GEDI"
+              }
+            ]
+          }
+        ],
+        "MetadataSpecification": {
+          "URL": "https://cdn.earthdata.nasa.gov/umm/granule/v1.6.7",
+          "Name": "UMM-G",
+          "Version": "1.6.7"
+        }
+      }
+    }
+  ]
+}

@@ -6,13 +6,22 @@
 
 ```powershell
 $repo = 'OWNER/REPO'
-$version = .\.venv\Scripts\python.exe -c 'from core import VERSION; print(VERSION)'
+$version = .\.venv\Scripts\python.exe -X utf8 -c 'from core import VERSION; print(VERSION)'
 $tag = "v$version"
 $asset = ".\dist\StarmapDownloader-Setup-$version-win-x64.exe"
-.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -X utf8 -m pytest -q
 .\scripts\build_installer.ps1 -Compiler 'C:\Inno Setup 6\ISCC.exe' -UpdateRepository $repo
 .\scripts\check_installer.ps1 -Installer $asset -UpgradeFrom 'C:\备份\上一版完整安装包.exe' -UpdateRepository $repo
 ```
+
+1.4.1 的构建脚本会强制检查 GEDI、联合下载、统一账号界面与图标资源（`--require-gedi --require-batch --require-accounts`）。打包后还应验证同一区域与共同日期的真实联网流程：
+
+```powershell
+.\.venv\Scripts\python.exe -X utf8 scripts\check_package.py .\dist\StarmapDownloader\StarmapDownloader.exe --require-version $version --require-gedi --require-batch --require-accounts --require-update-repository $repo
+.\.venv\Scripts\python.exe -X utf8 scripts\live_batch.py --exe .\dist\StarmapDownloader\StarmapDownloader.exe --output .\verification\batch\packaged-live
+```
+
+`live_batch.py` 使用同一 SHP 和 UTC 日期检索 Sentinel-2、GEDI 与 DEM，检查缺少 Earthdata 连接时整批下载会被阻止，再实际下载公开 Sentinel-2 和 DEM 并核对像元、网格及校验记录。它不执行受保护的 NASA 下载；该部分需用户在本机界面完成 Earthdata 认证后另行验证。安装回归也可加 `-Batch` 运行同一联网检查；已安装正式版时继续使用独立测试用户，避免影响正式安装。
 
 首个公开版本为 `v1.1`。若从旧的本地预览版回归，预览版本号可能大于公开版，测试命令需另外指定 `-ReplacePreview`。正常发布不要使用此参数。
 

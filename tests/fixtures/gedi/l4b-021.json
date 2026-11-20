@@ -1,0 +1,152 @@
+{
+  "hits": 10,
+  "took": 34,
+  "items": [
+    {
+      "meta": {
+        "concept-type": "granule",
+        "concept-id": "G2792578595-ORNL_CLOUD",
+        "revision-id": 1,
+        "native-id": "GEDI_L4B_Gridded_Biomass_V2_1.GEDI04_B_MW019MW223_02_002_02_R01000M_SE.tif",
+        "collection-concept-id": "C2792577683-ORNL_CLOUD",
+        "provider-id": "ORNL_CLOUD",
+        "format": "application/echo10+xml",
+        "revision-date": "2023-10-30T15:04:57.948Z"
+      },
+      "umm": {
+        "TemporalExtent": {
+          "RangeDateTime": {
+            "BeginningDateTime": "2019-04-18T00:00:00.000Z",
+            "EndingDateTime": "2023-03-16T23:59:59.000Z"
+          }
+        },
+        "GranuleUR": "GEDI_L4B_Gridded_Biomass_V2_1.GEDI04_B_MW019MW223_02_002_02_R01000M_SE.tif",
+        "MeasuredParameters": [
+          {
+            "ParameterName": "TERRESTRIAL ECOSYSTEMS"
+          },
+          {
+            "ParameterName": "LIDAR WAVEFORM"
+          },
+          {
+            "ParameterName": "BIOMASS"
+          }
+        ],
+        "SpatialExtent": {
+          "HorizontalSpatialDomain": {
+            "Geometry": {
+              "BoundingRectangles": [
+                {
+                  "WestBoundingCoordinate": -180.0,
+                  "EastBoundingCoordinate": 180.0,
+                  "NorthBoundingCoordinate": 52.0,
+                  "SouthBoundingCoordinate": -52.0
+                }
+              ]
+            }
+          }
+        },
+        "ProviderDates": [
+          {
+            "Date": "2023-10-29T00:00:00.000Z",
+            "Type": "Insert"
+          },
+          {
+            "Date": "2023-10-30T15:04:54.000Z",
+            "Type": "Update"
+          }
+        ],
+        "CollectionReference": {
+          "ShortName": "GEDI_L4B_Gridded_Biomass_V2_1_2299",
+          "Version": "2.1"
+        },
+        "RelatedUrls": [
+          {
+            "URL": "https://data.ornldaac.earthdata.nasa.gov/protected/gedi/GEDI_L4B_Gridded_Biomass_V2_1/data/GEDI04_B_MW019MW223_02_002_02_R01000M_SE.tif",
+            "Type": "GET DATA",
+            "Description": "Download GEDI04_B_MW019MW223_02_002_02_R01000M_SE.tif"
+          },
+          {
+            "URL": "https://data.ornldaac.earthdata.nasa.gov/public/gedi/GEDI_L4B_Gridded_Biomass_V2_1/data/GEDI04_B_MW019MW223_02_002_02_R01000M_SE.tif.sha256",
+            "Type": "GET DATA",
+            "Description": "Download GEDI04_B_MW019MW223_02_002_02_R01000M_SE.tif.sha256"
+          },
+          {
+            "URL": "s3://ornl-cumulus-prod-protected/gedi/GEDI_L4B_Gridded_Biomass_V2_1/data/GEDI04_B_MW019MW223_02_002_02_R01000M_SE.tif",
+            "Type": "GET DATA VIA DIRECT ACCESS",
+            "Description": "This link provides direct download access via S3 to the granule"
+          },
+          {
+            "URL": "https://daac.ornl.gov/GEDI/guides/GEDI_L4B_Gridded_Biomass_V2_1.html",
+            "Type": "VIEW RELATED INFORMATION",
+            "Description": "ORNL DAAC Data Set Documentation"
+          },
+          {
+            "URL": "https://doi.org/10.3334/ORNLDAAC/2299",
+            "Type": "VIEW RELATED INFORMATION",
+            "Description": "Data set Landing Page DOI URL"
+          },
+          {
+            "URL": "https://data.ornldaac.earthdata.nasa.gov/public/gedi/GEDI_L4B_Gridded_Biomass_V2_1/comp/GEDI_L4B_ATBD_V2.0.pdf",
+            "Type": "VIEW RELATED INFORMATION",
+            "Description": "Data Set Documentation"
+          },
+          {
+            "URL": "https://data.ornldaac.earthdata.nasa.gov/public/gedi/GEDI_L4B_Gridded_Biomass_V2_1/comp/gedi_l4b_excluded_granules_v21.json",
+            "Type": "VIEW RELATED INFORMATION",
+            "Description": "Data Set Documentation"
+          },
+          {
+            "URL": "https://data.ornldaac.earthdata.nasa.gov/public/gedi/GEDI_L4B_Gridded_Biomass_V2_1/comp/GEDI_L4B_Gridded_Biomass_V2_1.pdf",
+            "Type": "VIEW RELATED INFORMATION",
+            "Description": "Data Set Documentation"
+          },
+          {
+            "URL": "https://data.ornldaac.earthdata.nasa.gov/s3credentials",
+            "Type": "VIEW RELATED INFORMATION",
+            "Description": "api endpoint to retrieve temporary credentials valid for same-region direct s3 access"
+          }
+        ],
+        "Projects": [
+          {
+            "ShortName": "Not provided",
+            "Campaigns": [
+              "GEDI"
+            ]
+          }
+        ],
+        "DataGranule": {
+          "DayNightFlag": "Both",
+          "ProductionDateTime": "2023-10-29T00:00:00.000Z",
+          "ArchiveAndDistributionInformation": [
+            {
+              "Name": "Not provided",
+              "Size": 503.270716,
+              "SizeInBytes": 503270716,
+              "Checksum": {
+                "Value": "1a215c58c2f18d2267a44151e125c26f834a6d6a29ec6aa8d5d5a245d5ecf7a9",
+                "Algorithm": "SHA-256"
+              },
+              "SizeUnit": "MB"
+            }
+          ]
+        },
+        "Platforms": [
+          {
+            "ShortName": "ISS",
+            "Instruments": [
+              {
+                "ShortName": "GEDI"
+              }
+            ]
+          }
+        ],
+        "MetadataSpecification": {
+          "URL": "https://cdn.earthdata.nasa.gov/umm/granule/v1.6.7",
+          "Name": "UMM-G",
+          "Version": "1.6.7"
+        }
+      }
+    }
+  ]
+}
