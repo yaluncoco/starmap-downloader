@@ -9,6 +9,7 @@ import json
 import re
 import shutil
 import time
+import xml.etree.ElementTree as ET
 import zipfile
 import zlib
 from pathlib import Path, PurePosixPath
@@ -25,7 +26,7 @@ from .download import _save_json
 from .errors import Cancelled, UserError, keep_download_result
 from .local_paths import io_path
 from .http import CATALOGUE_URL, HttpClient, check_cancel
-from .integrity import publish_file, sha256_file
+from .integrity import publish_file
 from .native_catalogue import DOWNLOAD_ROOT, _json, download_asset, product_stem
 from .open_l2a import check_l2a_target, verify_l2a_index, verify_l2a_xml
 from .open_l3 import ETAG as L3_ETAG, PROOF_KIND as L3_MOSAIC, check_l3_target, pin_l3_object, verify_l3_listing
@@ -49,6 +50,13 @@ OPEN_TRANSPORTS = {"public", "pc-public"}
 MAX_NATIVE_ASSETS = 100
 SLC_VALIDATION = "ASF full ZIP MD5; SAFE identity, all file CRCs, XFDU MD5s and complex I/Q TIFF types"
 TRANSFER_ERRORS = (requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError, requests.exceptions.ContentDecodingError)
+CACHED_EVIDENCE_FIELDS = (
+    "size", "expected_bytes", "etag", "content_type", "format_validation", "provider_checksum_verified", "source_checksums",
+    "aws_single_part_md5", "azure_blob_md5", "safe_product", "odata_name", "l1c_index_etag", "l2a_index_etag", "l2a_index_sha256",
+    "l3_index_etag", "l3_index_sha256", "reflectance_scale", "s5p_validation", "modis_validation", "asf_zip_md5", "slc_validation",
+    "worldcover_upload_part_bytes", "worldcover_grid_sha256",
+)
+SOURCE_CHECKSUM_FIELDS = (("SHA-256", "provider_sha256", 64), ("SHA3-256", "provider_sha3_256", 64), ("MD5", "provider_md5", 32))
 
 
 def _asset_target(scene, asset, route):
@@ -278,6 +286,36 @@ def _blob_md5(response):
     return digest.hex()
 
 
+def _s3_denied(response, cancel):
+    """Only recognized error codes become messages; never expose the service's credential-bearing XML."""
+    fallback = "CDSE S3 未授权访问此对象；请检查密钥、有效期、系统时间和数据权限。"
+    body = bytearray()
+    try:
+        for block in response.iter_content(4096):
+            check_cancel(cancel)
+            body.extend(block)
+            if len(body) > 16384:
+                return fallback
+        if b"<!DOCTYPE" in body.upper() or b"<!ENTITY" in body.upper():
+            return fallback
+        root = ET.fromstring(body)
+        if root.tag.rsplit("}", 1)[-1] != "Error":
+            return fallback
+        code = next((node.text for node in root if node.tag.rsplit("}", 1)[-1] == "Code"), None)
+    except (ET.ParseError, ValueError, *TRANSFER_ERRORS):
+        return fallback
+    messages = {
+        "AccessDenied": "CDSE S3 拒绝访问所选对象（AccessDenied）；请检查该产品的数据访问权限和密钥有效期。若所选产品提供 OData，可切换该通道。",
+        "SignatureDoesNotMatch": "CDSE S3 签名校验失败（SignatureDoesNotMatch）；请重新复制同一条密钥的 Access Key 与 Secret Key 并连接保存，同时核对系统时间。",
+        "InvalidAccessKeyId": "CDSE S3 Access Key 不存在或已失效（InvalidAccessKeyId）；请从 S3 Keys Manager 复制有效的成对密钥并连接保存。",
+        "RequestTimeTooSkewed": "CDSE S3 请求时间与服务器不一致（RequestTimeTooSkewed）；请同步系统日期、时间和时区后重试。",
+        "RequestExpired": "CDSE S3 请求时间已过期（RequestExpired）；请同步系统时间后重试。",
+        "ExpiredToken": "CDSE S3 凭据已过期（ExpiredToken）；请更新密钥并连接保存。",
+        "InvalidToken": "CDSE S3 凭据无效（InvalidToken）；请更新有效的成对密钥并连接保存。",
+    }
+    return messages.get(code, fallback)
+
+
 def _stream(http, auth, item, partial, cancel, progress, *, s3_auth=None, pc_auth=None, pinned_etag=None, pinned_md5=None):
     tag = total = blob_md5 = None
     channel = item.get("transport", "odata")
@@ -304,7 +342,7 @@ def _stream(http, auth, item, partial, cancel, progress, *, s3_auth=None, pc_aut
                 raise UserError("公开档案不再提供所选 SEN3 原始成员。未换用其他版本，请重新检索。")
             if response.status_code in (401, 403):
                 if channel == "cdse-s3":
-                    raise UserError("CDSE S3 未授权访问此对象；请检查密钥、有效期、系统时间和数据权限。")
+                    raise UserError(_s3_denied(response, cancel))
                 if channel == "pc-public":
                     raise UserError("公开 Landsat 服务未授权当前对象；程序未切换到其他产品。")
                 if channel == "public":
@@ -472,7 +510,6 @@ def _validate(path, item, cancel):
         _check_raw_raster(path, cancel, item.get("raster"))
         return ".jp2"
     if item["asset"] and suffix in (".xml", ".safe") and normalized.startswith(b"<") and path.stat().st_size <= 100*1024*1024:
-        import xml.etree.ElementTree as ET
         try:
             root = ET.parse(path).getroot()
             if root.tag.lower().rsplit("}",1)[-1] in ("error", "exception", "exceptionreport", "html"):
@@ -656,6 +693,30 @@ def _validated_digests(path, item, aws_md5, cancel, azure_md5=None):
     return digest, (" + ".join(verified) if verified else None)
 
 
+def _cached_digests(path, item, meta, cancel):
+    # The current catalogue remains authoritative even if both cached bytes and the local SHA-256 were replaced.
+    recorded = meta.get("source_checksums", {})
+    if not isinstance(recorded, dict):
+        raise UserError("已有原始文件的源校验记录无效，请移走文件和同名 .starmap.json 后重试。")
+    expected = item.copy()
+    for label, field, digits in SOURCE_CHECKSUM_FIELDS:
+        value = recorded.get(label)
+        if value is not None:
+            if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{" + str(digits) + "}", value):
+                raise UserError("已有原始文件的源校验记录无效，请移走文件和同名 .starmap.json 后重试。")
+            if not expected.get(field):
+                expected[field] = value
+    aws_md5 = meta.get("aws_single_part_md5") if item["transport"] == "public" else None
+    azure_md5 = meta.get("azure_blob_md5") if item["transport"] == "pc-public" else None
+    if any(value is not None and (not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{32}", value))
+           for value in (aws_md5, azure_md5)):
+        raise UserError("已有原始文件的源 MD5 记录无效，请移走文件和同名 .starmap.json 后重试。")
+    try:
+        return _validated_digests(path, expected, aws_md5, cancel, azure_md5)
+    except UserError as error:
+        raise UserError(f"已有原始文件的完整性校验失败：{error} 请移走文件和同名 .starmap.json 后重试。") from None
+
+
 def _basename(item):
     if is_slc(item):
         return check_slc_target(item).product  # Preserve the original SAFE ZIP filename.
@@ -745,6 +806,9 @@ def download_original(geometry, plan, output_dir, auth, *, s3_auth=None, cancel=
                     if (meta.get("url") != item["url"] or not target.is_file() or target.stat().st_size != meta.get("size")
                             or item.get("bytes") and meta["size"] != item["bytes"]):
                         raise UserError("已有原始文件的完整性校验失败；请移动损坏文件和同名 .starmap.json 后重试。")
+                    expected_identity = {"product": item["key"], "uuid": item["uuid"], "asset": item["asset"], "transport": item["transport"]}
+                    if any(field in meta and meta[field] != value for field, value in expected_identity.items()):
+                        raise UserError("已有原始文件的来源身份记录与所选产品不一致，请移走文件和同名 .starmap.json 后重试。")
                     if modis:
                         if filename != item["name"] or not isinstance(meta.get("etag"), str):
                             raise UserError("MODIS 已有文件缺少源对象记录；请将文件和同名 .starmap.json 移出后重试。")
@@ -790,7 +854,8 @@ def download_original(geometry, plan, output_dir, auth, *, s3_auth=None, cancel=
                                        provider_checksum_verified=verified, format_validation=meta.get("format_validation"),
                                        l3_index_sha256=proof["index_sha256"], l3_index_etag=proof["index_etag"])
                     else:
-                        existing_digest = sha256_file(target, cancel)
+                        existing_digest, verified = _cached_digests(target, item, meta, cancel)
+                        row["provider_checksum_verified"] = verified or meta.get("provider_checksum_verified")
                     if existing_digest != meta.get("sha256") or l2a and (
                             existing_digest != item["provider_sha256"] or meta.get("l2a_index_sha256") != proof["index_sha256"]
                             or filename != name + Path(item["name"]).suffix):
@@ -798,7 +863,10 @@ def download_original(geometry, plan, output_dir, auth, *, s3_auth=None, cancel=
                     if l2a:
                         row.update(provider_checksum_verified="SHA-256", l2a_index_sha256=proof["index_sha256"],
                                    safe_product=proof["product"], format_validation=meta.get("format_validation"))
-                    row.update(status="skipped", path=str(target), sha256=existing_digest)
+                    for field in CACHED_EVIDENCE_FIELDS:
+                        if field in meta:
+                            row.setdefault(field, meta[field])
+                    row.update(status="skipped", path=str(target), sha256=existing_digest, reused_receipt=receipt.name)
                 else:
                     if slc and (folder / item["name"]).exists():
                         raise UserError("输出目录中已有同名 SLC ZIP 但没有校验记录，未覆盖。")
@@ -886,6 +954,8 @@ def download_original(geometry, plan, output_dir, auth, *, s3_auth=None, cancel=
                     if digest is None:
                         digest, verified = _validated_digests(partial, validation_item, transfer["aws_single_part_md5"], cancel, transfer["azure_blob_md5"])
                     transfer["provider_checksum_verified"] = verified
+                    transfer["source_checksums"] = {label: validation_item[field] for label, field, _ in SOURCE_CHECKSUM_FIELDS
+                                                    if validation_item.get(field)}
                     if proof.get("kind") == "s5p-swath":
                         if suffix != ".nc" or not verified:
                             raise UserError("下载内容不是经源校验的原始 NetCDF，未保存。")
@@ -912,7 +982,9 @@ def download_original(geometry, plan, output_dir, auth, *, s3_auth=None, cancel=
                         raise UserError("输出目录中已有同名文件，避免覆盖，未写入。")
                     publish_file(partial, target)
                     try:
-                        _save_json(receipt, {"file": target.name, "url": item["url"], "sha256": digest, **transfer})
+                        _save_json(receipt, {"file": target.name, "url": item["url"], "product": item["key"], "uuid": item["uuid"],
+                                             "asset": item["asset"], "transport": item["transport"], "sha256": digest,
+                                             **({"odata_name": row["odata_name"]} if "odata_name" in row else {}), **transfer})
                     except Exception:
                         target.unlink(missing_ok=True)
                         raise

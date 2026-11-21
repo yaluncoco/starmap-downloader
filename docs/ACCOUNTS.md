@@ -13,6 +13,8 @@
 
 平台账号彼此独立，登录一个平台不会替代其他平台的登录。目录可检索、令牌已载入和数据中心已授权是不同状态。NASA 首次使用仍可能要求在 Earthdata Search 授权 LP DAAC / ORNL DAAC。
 
+S3 的对象权限在真实读取时验证。`AccessDenied`、`SignatureDoesNotMatch`、`InvalidAccessKeyId` 和时间错误有分别对应的提示；一个产品可读取不代表其他类别的对象也可访问。若拒绝的产品提供 OData，可手动切换该通道。
+
 账号文件位于当前用户的 `%LOCALAPPDATA%\CopernicusDownloader\accounts.v1.dpapi`，由 Windows DPAPI 加密并绑定当前 Windows 用户。普通 `preferences.json` 只保存输出位置和非秘密客户端标识；密码、令牌和密钥不会写入普通配置、日志、下载记录或接口返回，也不会回填为网页中的明文密码。
 
 已保存的账号需要重新验证时，可以留空密码或 Secret 沿用保存的信息；输入新的内容会更新保存。更换用户名或客户端标识时，需要填写匹配的新密码或 Secret。一次性两步验证码不保存；若 CDSE 会话过期且需要两步验证，窗口会提示补填当前验证码，可以沿用已保存的密码。

@@ -22,7 +22,7 @@ from core.errors import UserError
 from core.http import HttpClient
 from core.native_catalogue import DOWNLOAD_ROOT, STAC_ROOT, download_asset, raw_item
 from core.public_radar import public_radar_row
-from core.raw_download import _check_raw_raster, _stream, _validate, _validated_digests, raw_plan
+from core.raw_download import _check_raw_raster, _stream, _validate, _validated_digests, download_original, raw_plan
 from core.s3_source import CDSES3Auth, CDSE_HOST, S1_BUCKET, _sign_get, cdse_object
 
 AOI = box(116.350, 39.900, 116.355, 39.905)
@@ -171,8 +171,73 @@ def test_s3_service_credentials_and_receipts(client, s3_provider, tmp_path):
     assert TEST_SECRET not in record_text and TEST_ACCESS not in record_text
     assert all(TEST_SECRET not in p.read_text(encoding="utf-8") for p in tmp_path.rglob("preferences.json"))
     assert s3_provider.count(("GET", S3_URL)) == 1
+    repeat = client.wait(client.post("download", req)["job_id"])["result"]
+    cached, = json.loads(Path(repeat["manifest"]).read_text(encoding="utf-8"))["items"]
+    assert cached["status"] == "skipped" and cached["sha256"] == row["sha256"]
+    for field in ("size", "expected_bytes", "etag", "content_type", "format_validation", "provider_checksum_verified"):
+        assert cached[field] == row[field], f"Cache reuse lost {field} from the new download record"
+    assert s3_provider.count(("GET", S3_URL)) == 1
     assert client.post("s3-disconnect", {}) == {"connected": False, "saved": False}
     client.post("download", req, status=400)
+
+
+@pytest.mark.parametrize("algorithm,notice", [("sha256", "SHA-256"), ("sha3_256", "SHA3-256"), ("md5", "MD5")])
+def test_cached_native_file_checks_source_digest_even_if_local_receipt_changes(s3_provider, tmp_path, algorithm, notice):
+    feature = modis_feature()
+    digest = hashlib.new(algorithm, HDF, usedforsecurity=False).hexdigest()
+    feature["assets"]["data"]["file:checksum"] = {"sha256": "1220", "sha3_256": "1620", "md5": "d50110"}[algorithm] + digest
+    scene = raw_item(feature, AOI, MODIS)
+    plan = raw_plan(AOI, [scene], {"collection": MODIS, "mode": "original", "transport": "cdse-s3"})
+    auth = CDSES3Auth()
+    auth.connect(TEST_ACCESS, TEST_SECRET)
+    first = download_original(AOI, plan, tmp_path, None, s3_auth=auth)
+    path = Path(first["files"][0]["path"])
+    receipt, = path.parent.glob("*.starmap.json")
+    changed = HDF.replace(b"fixture", b"changed")
+    assert len(changed) == len(HDF)
+    path.write_bytes(changed)
+    local = json.loads(receipt.read_text(encoding="utf-8"))
+    local["sha256"] = hashlib.sha256(changed).hexdigest()
+    receipt.write_text(json.dumps(local), encoding="utf-8")
+    with pytest.raises(UserError, match=notice):
+        download_original(AOI, plan, tmp_path, None, s3_auth=auth)
+    assert path.read_bytes() == changed
+    assert s3_provider.count(("GET", S3_URL)) == 1
+
+
+@pytest.mark.parametrize("code,notice", [("AccessDenied", "数据访问权限"), ("SignatureDoesNotMatch", "签名校验失败"),
+                                         ("InvalidAccessKeyId", "已失效"), ("RequestTimeTooSkewed", "同步系统"),
+                                         ("ExpiredToken", "已过期"), ("UnknownCode", "未授权")])
+def test_s3_denial_distinguishes_official_codes_without_disclosing_error_xml(tmp_path, code, notice):
+    payload = f"<Error xmlns='urn:s3'><Code>{code}</Code><Message>{TEST_ACCESS} {TEST_SECRET}</Message><Signature>private-server-signature</Signature></Error>".encode()
+    response = StubResponse(403, content=payload)
+    class Http:
+        def request(self, method, url, **kwargs):
+            assert method == "GET" and url == S3_URL
+            return response
+    item = {"name": MODIS_KEY + ".hdf", "url": S3_URL, "transport": "cdse-s3", "asset": "data", "bytes": len(HDF)}
+    partial = tmp_path / "receive.part"
+    auth = CDSES3Auth()
+    auth.connect(TEST_ACCESS, TEST_SECRET)
+    with pytest.raises(UserError, match=notice) as caught:
+        _stream(Http(), None, item, partial, None, lambda *args: None, s3_auth=auth)
+    assert TEST_ACCESS not in str(caught.value) and TEST_SECRET not in str(caught.value)
+    assert "private-server-signature" not in str(caught.value)
+    assert not partial.exists() and response.closed
+
+
+@pytest.mark.parametrize("body", [b"not xml", b"<Error>" + b" " * 32768 + b"<Code>AccessDenied</Code></Error>"])
+def test_s3_denial_malformed_or_oversized_body_uses_safe_fallback(tmp_path, body):
+    response = StubResponse(403, content=body)
+    class Http:
+        def request(self, method, url, **kwargs):
+            return response
+    item = {"name": MODIS_KEY + ".hdf", "url": S3_URL, "transport": "cdse-s3", "asset": "data", "bytes": len(HDF)}
+    auth = CDSES3Auth()
+    auth.connect(TEST_ACCESS, TEST_SECRET)
+    with pytest.raises(UserError, match="未授权"):
+        _stream(Http(), None, item, tmp_path / "receive.part", None, lambda *args: None, s3_auth=auth)
+    assert response.closed
 
 
 class Interrupted(StubResponse):
