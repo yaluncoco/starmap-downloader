@@ -2,9 +2,10 @@
 
 const $ = (id) => document.getElementById(id);
 const appToken = document.querySelector('meta[name="app-token"]').content;
-const state = {profile:"s2-process",collection:"",collections:[],gediCollections:[],gediFieldCollection:"",earthdataConnected:false,loadingCollections:false,rawConnected:false,s3Connected:false,connected:false,connecting:false,nativeDialogs:false,aoi:null,scenes:[],selected:new Set(),pickedFiles:new Set(),fileScene:"",busy:false,jobId:null,plan:null,planVersion:0,resultFolder:"",places:[],editing:false,query:null};
+const state = {profile:"s2-process",collection:"",collections:[],gediCollections:[],gediFieldCollection:"",earthdataConnected:false,loadingCollections:false,rawConnected:false,s3Connected:false,connected:false,connecting:false,nativeDialogs:false,aoi:null,aoiPending:false,aoiVersion:0,scenes:[],selected:new Set(),pickedFiles:new Set(),fileScene:"",busy:false,jobId:null,plan:null,planVersion:0,resultFolder:"",places:[],editing:false,query:null};
 const updates = {configured:false, checking:false, working:false, release:null};
 let map, aoiLayer, footprintLayer, baseLayer, drawHandler, editHandler, planTimer;
+let aoiQueue=Promise.resolve();
 const modes = {
   research:"B02 / B03 / B04 / B08 / B05 / B06 / B07 / B8A / B11 / B12；配套保存 SCL、未掩膜反射率和逐像元来源。20 米波段最近邻对齐到所选网格。",
   rgbnir:"B04 / B03 / B02 / B08，Float32 派生反射率；仅保存这 4 个波段。",
@@ -14,8 +15,9 @@ const modes = {
   custom:"勾选需要的波段；原生分辨率不同的波段会重采样。"
 };
 const profiles = {
-  "s2-process":["Sentinel-2 L2A","Sentinel Hub · 区域裁剪","同一次过境的相邻瓦片可拼接。使用 Sentinel Hub OAuth，消耗处理额度。"],
-  "s2-earth-search":["Sentinel-2 L2A","Earth Search · 公开裁剪","选择一个 Collection‑1 瓦片，按研究区导出。无需凭据，也不会自动替换成其他影像。"],
+  "s2-process":["Sentinel-2 L2A","Sentinel Hub · 区域裁剪","按产品区块选择，可将不同日期拼成一份研究区影像。使用 Sentinel Hub OAuth，消耗处理额度。"],
+  "s2-earth-search":["Sentinel-2 L2A","Earth Search · 公开裁剪","选择 Collection‑1 产品区块，按研究区拼接或分别导出。无需凭据；仅使用勾选产品。"],
+  "s2-cdse-s3":["Sentinel-2 L2A","CDSE S3 · 官方原始像元拼接","用官方 XML 核对真实边界、采集时间与云量，再校验原始波段并按研究区拼接。检索和下载需要 CDSE S3 密钥，不消耗 Sentinel Hub 额度。首次会保留较大的官方原件缓存。"],
   "s2-l2a-cog":["Sentinel-2 L2A","Earth Search / AWS · 整瓦片 COG","可选地表反射率、场景分类、云雪概率、水汽、气溶胶、真彩和元数据。研究区只筛选瓦片；保留原始 DN，不裁剪、不重新打包成 SAFE。"],
   "s2-l3-quarterly":["Sentinel-2 L3 季度镶嵌","CDSE 目录 / Source Cooperative · 整瓦片 COG","按整季度与日期范围的重叠检索，不是单日过境。可选 B02、B03、B04、B08；保留原网格和 DN。镜像缺少精确记录时不会替换产品。"],
   "s2-l1c-aws":["Sentinel-2 L1C","Earth Search / AWS · 原始文件","选择同一瓦片的 JP2 波段及配套元数据。保持源像元和原始值，不按研究区裁剪。"],
@@ -59,16 +61,18 @@ const isGediRaster = () => isGedi() && gediProduct()?.kind==="raster";
 const isRaw = () => isOfficial() || isRadar() || isSlc() || isOpenOptical() || isL3() || isS5p() || isSen3() || isWorldCover() || isModis();
 const rawRoute = () => isOfficial()?$("rawTransport").value:(isLandsat()||isModis())?"pc-public":"public";
 const isProcess = () => state.profile === "s2-process";
+const isNativeS3 = () => state.profile === "s2-cdse-s3";
 const isDem = () => state.profile.startsWith("dem-");
 const primaryDateEnabled = () => !isDem() && !(isOfficial() && (Batch.enabled() ? Batch.isStatic(state.profile, state.collection) : $("allDates").checked));
 const dateEnabled = () => primaryDateEnabled() || Batch.enabled();
-const canSearch = () => state.aoi && !state.busy && !state.connecting && (!isProcess() || state.connected) && (!isOfficial() || state.collection) && (!isS5p() || $("s5pCollection").value) && (!isSen3() || $("sen3Collection").value) && (!isGedi() || $("gediCollection").value) && Batch.searchReady();
+const canSearch = () => state.aoi && !state.aoiPending && !state.editing && !state.busy && !state.connecting && (!isProcess() || state.connected) && (!isNativeS3() || state.s3Connected) && (!isOfficial() || state.collection) && (!isS5p() || $("s5pCollection").value) && (!isSen3() || $("sen3Collection").value) && (!isGedi() || $("gediCollection").value) && Batch.searchReady();
 const transportLabel = id => ({odata:"CDSE OData","cdse-s3":"CDSE S3",earthdata:"NASA Earthdata","sentinel-hub":"Sentinel Hub OAuth",public:isL3()?"Source Cooperative":"公开 AWS","pc-public":"Microsoft Planetary Computer"}[id] || id);
 const missingAccess = () => (state.plan?.requires || []).filter(id => id === "odata" ? !state.rawConnected : id === "cdse-s3" ? !state.s3Connected : id === "earthdata" ? !state.earthdataConnected : id === "sentinel-hub" ? !state.connected : true);
 const hasDownloadAccess = () => state.plan?.kind === "batch" ? missingAccess().length === 0 : isProcess() ? state.connected : missingAccess().length === 0;
-const selectable = (scene) => isGedi() ? scene.gedi?.available === true : !isRaw() || scene.raw?.available === true;
+const selectable = (scene) => scene.native ? scene.native.available === true : isGedi() ? scene.gedi?.available === true : !isRaw() || scene.raw?.available === true;
 const allBands = ["B01","B02","B03","B04","B05","B06","B07","B08","B8A","B09","B11","B12"];
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const cloudLabel = (value, unknown="未知") => value==null?unknown:Number(value).toFixed(2)+"%";
 const icon = (name) => `<svg class="icon" aria-hidden="true"><use href="#i-${name}"/></svg>`;
 const basename = (path) => String(path).split(/[\\/]/).pop();
 
@@ -159,7 +163,7 @@ function options() {
   if(isRaw())return {mode:$("rawMode").value,asset:$("rawAsset").value,assets:[...state.pickedFiles].sort(),transport:rawRoute()};
   if(isDem())return {mode:$("demMode").value};
   if(isRtc())return {mode:"rtc",resolution:Number($("rtcResolution").value),bands:rtcInputs().filter(input=>input.checked).map(input=>input.value)};
-  return {mode:$("imageMode").value,resolution:Number($("resolution").value),max_cloud:Number($("maxCloud").value),mask_clouds:$("maskClouds").checked,bands:[...document.querySelectorAll("#customBands input:checked")].map(input=>input.value)};
+  return {mode:$("imageMode").value,resolution:Number($("resolution").value),max_cloud:Number($("maxCloud").value),mask_clouds:$("maskClouds").checked,bands:[...document.querySelectorAll("#customBands input:checked")].map(input=>input.value),layout:isNativeS3()?"mosaic":$("imageLayout").value,priority:Spatial.priorityFor("primary"),fill_gaps:$("mosaicFallback").checked};
 }
 function downloadRequest() {
   const result={geometry:state.aoi.geometry,profile:state.profile,criteria:criteria(),query_id:state.query?.id,scene_keys:[...state.selected],options:options(),output_dir:$("outputDirectory").value.trim()};
@@ -223,7 +227,9 @@ function renderProfile() {
   $("rawMetadataOnly").textContent=isModis()?"每个产品的 NASA 配套 XML（如已列出）":"每个产品的一份元数据";
   if(isWorldCoverSingle()||isSlc())$("rawMode").value="original";
   else if((noMetadata&&$("rawMode").value==="metadata")||(!isOfficial()&&!isSen3()&&!isS5p()&&!isModis()&&$("rawMode").value==="original"&&isRaw()))$("rawMode").value=isRadar()?"metadata":"assets";
-  Accounts.visibility();$("publicAuth").hidden=isOfficial()||isProcess()||isGedi();
+  Accounts.visibility();$("publicAuth").hidden=isOfficial()||isProcess()||isNativeS3()||isGedi();
+  $("imageLayout").hidden=isNativeS3();document.querySelector('label[for="imageLayout"]').hidden=isNativeS3();
+  $("mosaicFallbackField").hidden=!isNativeS3()&&$("imageLayout").value!=="mosaic";
   $("opticalOptions").hidden=isRaw()||isDem()||isRtc()||isGedi();$("cloudOptions").hidden=isOfficial()||isRadar()||isRtc()||isDem()||isS5p()||isSen3()||isL3()||isWorldCover()||isModis()||isSlc()||isGedi();$("dateFields").hidden=!dateEnabled();
   $("radarModeField").hidden=!(isRadar()||isRtc()||(isOfficial()&&state.collection==="sentinel-1-grd"));
   for(const option of $("radarMode").options){option.disabled=option.hidden=isRtc()&&["SM","WV"].includes(option.value);}
@@ -365,8 +371,8 @@ function updateAvailability() {
   status.classList.toggle("connected",isOfficial()?!!(state.plan?!missing.length:loaded.length):isGedi()?state.earthdataConnected:hasDownloadAccess());
   status.querySelector("span").textContent=isOfficial()?(missing.length?`需载入 ${missing.map(transportLabel).join(" + ")}`:
     loaded.length?`${loaded.join(" / ")} 凭据已载入`:"免登录检索 · 按通道认证"):
-    isGedi()?(state.earthdataConnected?"Earthdata 凭据已载入 · 下载时验证":"GEDI 免登录检索 · 下载需 Earthdata 认证"):isProcess()?(state.connected?"API 已连接":"尚未连接 API"):isRtc()?"RTC · 下载时请求临时授权":isModis()?"MODIS · 无需个人密钥，自动请求临时读取":"公开数据 · 无需登录";
-  document.querySelectorAll("[data-lock]").forEach(element=>{element.disabled=state.busy||state.connecting;});
+    isGedi()?(state.earthdataConnected?"Earthdata 凭据已载入 · 下载时验证":"GEDI 免登录检索 · 下载需 Earthdata 认证"):isNativeS3()?(state.s3Connected?"S3 密钥已载入 · 读取原始元数据":"需 CDSE S3 密钥核对边界"):isProcess()?(state.connected?"API 已连接":"尚未连接 API"):isRtc()?"RTC · 下载时请求临时授权":isModis()?"MODIS · 无需个人密钥，自动请求临时读取":"公开数据 · 无需登录";
+  document.querySelectorAll("[data-lock]").forEach(element=>{element.disabled=state.busy||state.connecting||state.aoiPending;});
   $("gediSensitivity").disabled=state.busy||state.connecting||isGedi()&&gediProduct()?.level==="L1B";
   $("gediResolution").disabled=state.busy||state.connecting||Boolean($("gediReference").value.trim());
   if(isRtc()){
@@ -379,11 +385,12 @@ function updateAvailability() {
   $("toggleSecret").disabled=state.connected||state.busy||state.connecting;
   $("fitAoi").disabled=!state.aoi;
   $("clearAoi").disabled=!state.aoi||state.busy;
+  $("mapDeleteAoi").disabled=state.busy||!(state.aoi||drawHandler||state.editing||state.aoiPending);
   $("exportBoundary").disabled=!state.aoi||state.busy;
-  $("editBoundary").disabled=!state.aoi||state.busy;
+  $("editBoundary").disabled=!state.aoi||state.busy||state.aoiPending;
   $("mapFitAoi").disabled=!state.aoi;
-  $("mapDrawRectangle").disabled=state.busy;
-  $("mapDrawPolygon").disabled=state.busy;
+  $("mapDrawRectangle").disabled=state.busy||state.aoiPending;
+  $("mapDrawPolygon").disabled=state.busy||state.aoiPending;
   $("rawCollection").disabled=state.busy||state.connecting||state.loadingCollections;
   $("refreshCollections").disabled=state.busy||state.connecting||state.loadingCollections;
   if(Batch.enabled()) {
@@ -394,12 +401,13 @@ function updateAvailability() {
   const companion=Batch.results.get(Batch.active), count=Batch.query?Batch.totalSelected():state.selected.size;
   $("selectAll").disabled=!(companion?companion.scenes.length:state.scenes.some(selectable))||state.busy;
   $("selectNone").disabled=!(companion?companion.selected.size:state.selected.size)||state.busy;
-  $("downloadSelected").disabled=!hasDownloadAccess()||!state.aoi||!count||state.busy||state.connecting||!state.plan;
+  $("downloadSelected").disabled=!hasDownloadAccess()||!state.aoi||!count||state.busy||state.connecting||state.editing||state.aoiPending||!state.plan;
   Batch.availability();
   document.querySelectorAll("#companionResults input").forEach(element=>element.disabled=state.busy||element.dataset.unavailable==="1");
   document.querySelectorAll("#scenesBody input").forEach(element=>element.disabled=state.busy||element.dataset.unavailable==="1");
   updateButtons();
   Accounts.render();
+  Spatial.availability();
 }
 function setBusy(value) {state.busy=value;updateAvailability();}
 function renderAuth() {
@@ -439,13 +447,14 @@ function configureMap() {
   L.drawLocal.edit.handlers.edit.tooltip={text:"拖动顶点修改边界",subtext:"再次点击编辑按钮以保存"};
   map=L.map("map",{center:[35.3,108.5],zoom:4,zoomControl:true,attributionControl:true});
   aoiLayer=L.featureGroup().addTo(map);footprintLayer=L.featureGroup().addTo(map);
+  Spatial.initializeMap();
   changeBasemap("standard");
   map.on(L.Draw.Event.CREATED,async(event)=>{
     $("drawHint").hidden=true;drawHandler=null;
-    try{const result=await api("aoi",{geometry:event.layer.toGeoJSON(),name:"地图研究区"});setAoi(result,false);toast("研究区已设置，可查找可下载影像。");}
+    try{const result=await mutateAoi({geometry:event.layer.toGeoJSON(),name:"地图研究区"},false);if(result)toast("研究区已设置，可查找可下载影像。");}
     catch(error){toast(error.message,true);}
   });
-  map.on("draw:drawstop",()=>{$("drawHint").hidden=true;});
+  map.on("draw:drawstop",()=>{$("drawHint").hidden=true;updateAvailability();});
   setTimeout(()=>map.invalidateSize(),150);
   new ResizeObserver(()=>map.invalidateSize()).observe($("map"));
 }
@@ -461,28 +470,54 @@ function changeBasemap(kind) {
   document.querySelectorAll("#basemapSwitch button").forEach(button=>button.classList.toggle("active",button.dataset.basemap===kind));
 }
 function startDrawing(kind) {
-  if(state.busy)return;
+  if(state.busy||state.aoiPending)return;
   if(!map){toast("地图暂不可用，请改用导入边界或输入坐标。",true);return;}
   if(state.editing){toast("请先点击编辑按钮，保存边界修改。",true);return;}
   if(drawHandler)drawHandler.disable();
   drawHandler=kind==="polygon"?new L.Draw.Polygon(map,{allowIntersection:false,showArea:true,metric:true,shapeOptions:{color:"#117b65",weight:2,fillOpacity:.15}}):new L.Draw.Rectangle(map,{shapeOptions:{color:"#117b65",weight:2,fillOpacity:.15}});
   drawHandler.enable();$("drawHint").textContent=kind==="polygon"?"按顺序点击放置顶点，点击第一个点完成。Esc 取消。":"按住鼠标拖动，画出研究区。Esc 取消。";$("drawHint").hidden=false;
   activateAoiTab("map");
+  updateAvailability();
+}
+function stopBoundaryTools() {
+  if(drawHandler){drawHandler.disable();drawHandler=null;}
+  if(editHandler){editHandler.disable();editHandler=null;}
+  state.editing=false;$("editBoundary").classList.remove("active");$("drawHint").hidden=true;
+  if(map){map.getPane("aoiPane").style.pointerEvents="none";map.getPane("footprintPane").style.pointerEvents="";}
+}
+async function mutateAoi(value,fit=true) {
+  const version=++state.aoiVersion;state.aoiPending=true;stopBoundaryTools();updateAvailability();
+  // Serialize import/edit/clear so a late import cannot restore a deleted server boundary.
+  aoiQueue=aoiQueue.catch(()=>{}).then(()=>api("aoi",value));
+  try {
+    const result=await aoiQueue;if(version!==state.aoiVersion)return;
+    setAoi(result,fit);
+    if(value.clear){$("importFileName").textContent="";$("coordinates").value="";}
+    return result;
+  } catch(error) {if(version===state.aoiVersion)renderAoiLayer(false);throw error;}
+  finally{if(version===state.aoiVersion){state.aoiPending=false;updateAvailability();}}
+}
+async function deleteBoundary() {
+  if(state.busy)return;
+  try{await mutateAoi({clear:true},false);toast("研究区、影像区块和下载选择已清空。");}
+  catch(error){toast(error.message,true);}
 }
 async function toggleEditing() {
-  if(!map||!state.aoi||state.busy)return;
+  if(!map||!state.aoi||state.busy||state.aoiPending)return;
   if(!state.editing){
-    editHandler=new L.EditToolbar.Edit(map,{featureGroup:aoiLayer,selectedPathOptions:{maintainColor:true}});editHandler.enable();state.editing=true;$("editBoundary").classList.add("active");$("drawHint").textContent="拖动顶点修改边界，完成后再次点击编辑按钮。";$("drawHint").hidden=false;return;
+    stopBoundaryTools();state.editing=true;renderAoiLayer(false);map.getPane("aoiPane").style.pointerEvents="";map.getPane("footprintPane").style.pointerEvents="none";
+    editHandler=new L.EditToolbar.Edit(map,{featureGroup:aoiLayer,selectedPathOptions:{maintainColor:true}});editHandler.enable();$("editBoundary").classList.add("active");$("drawHint").textContent="拖动顶点修改边界，完成后再次点击编辑按钮。";$("drawHint").hidden=false;updateAvailability();return;
   }
-  editHandler.save();editHandler.disable();state.editing=false;$("editBoundary").classList.remove("active");$("drawHint").hidden=true;
-  try{const result=await api("aoi",{geometry:aoiLayer.toGeoJSON(),name:state.aoi.name});setAoi(result,false);toast("边界修改已保存。");}
+  const geometry=aoiLayer.toGeoJSON(),name=state.aoi.name;editHandler.save();
+  try{const result=await mutateAoi({geometry,name},false);if(result)toast("边界修改已保存。");}
   catch(error){toast(error.message,true);renderAoiLayer(false);}
 }
 function renderAoiLayer(fit) {
   if(!aoiLayer)return;
-  aoiLayer.clearLayers();footprintLayer.clearLayers();
+  aoiLayer.clearLayers();
   if(!state.aoi)return;
-  L.geoJSON(state.aoi.geometry,{style:{color:"#08785d",weight:2,fillColor:"#239878",fillOpacity:.14}}).eachLayer(layer=>aoiLayer.addLayer(layer));
+  const polygons=state.aoi.geometry.type==="MultiPolygon"?state.aoi.geometry.coordinates.map(coordinates=>({type:"Polygon",coordinates})):[state.aoi.geometry];
+  for(const geometry of polygons)L.geoJSON(geometry,{pane:"aoiPane",interactive:state.editing,style:{color:"#08785d",weight:2,fillColor:"#239878",fillOpacity:.08}}).eachLayer(layer=>aoiLayer.addLayer(layer));
   if(fit&&aoiLayer.getBounds().isValid())map.fitBounds(aoiLayer.getBounds(),{padding:[75,75],maxZoom:16});
 }
 function setAoi(aoi,fit=true,keepScenes=false) {
@@ -500,7 +535,7 @@ function activateAoiTab(name) {
   for(const tab of ["map","import","coordinates"])$("tab-"+tab).hidden=tab!==name;
 }
 async function applyCoordinates() {
-  try{const result=await api("aoi",{coordinates:$("coordinates").value,name:"坐标研究区"});setAoi(result);toast("坐标已应用。");}
+  try{const result=await mutateAoi({coordinates:$("coordinates").value,name:"坐标研究区"});if(result)toast("坐标已应用。");}
   catch(error){toast(error.message,true);}
 }
 async function choosePath(title,note,current="") {
@@ -524,7 +559,7 @@ async function importBoundary() {
     const path=await nativePath("choose_boundary",{},()=>choosePath("选择边界文件","桌面版可使用文件选择器；开发浏览器模式请填写完整 SHP 或 GeoJSON 路径。"));
     if(!path)return;
     $("importFileName").textContent="正在读取边界…";
-    const result=await api("aoi",{path,source_crs:$("sourceCrs").value.trim()});setAoi(result);$("importFileName").textContent=basename(path);toast("边界已导入，地图已定位到研究区。");
+    const result=await mutateAoi({path,source_crs:$("sourceCrs").value.trim()});if(result){$("importFileName").textContent=basename(path);toast("边界已导入，地图已定位到研究区。");}
   }catch(error){$("importFileName").textContent="";toast(error.message,true);}
 }
 async function chooseFolder() {
@@ -554,6 +589,7 @@ async function searchPlaces(event) {
 
 function clearScenes() {
   state.scenes=[];state.selected.clear();state.plan=null;state.query=null;state.planVersion++;Batch.clearResults();
+  Spatial.reset();
   $("sceneCount").textContent="0";$("scenesEmpty").hidden=false;$("scenesTableWrap").hidden=true;$("scenesLoading").hidden=true;
   $("scenesEmpty").querySelector("strong").textContent="让影像覆盖你的研究区";
   $("scenesEmpty").querySelector(":scope > span").textContent="设置影像类别、研究区和筛选条件，再点击检索。";
@@ -573,16 +609,16 @@ function renderScenes() {
     const available=selectable(scene), checked=state.selected.has(scene.key);
     const title=scene.title||scene.key;
     const description=isGedi()?`<span class="scene-product">${escapeHtml(title)}</span>${escapeHtml(available?scene.tiles.join(' / ')+(isGediRaster()?" · 汇总至 "+scene.gedi.end.slice(0,10):""):scene.gedi?.unavailable_reason||"无可用下载入口")}`:isRaw()?`<span class="scene-product">${escapeHtml(title)}</span>${available?escapeHtml(scene.tiles.join(' / ')+(scene.raw?.source_note?" · "+scene.raw.source_note:"")):(isS5p()||isSen3()||isL3()||isWorldCover()||isModis())?escapeHtml(scene.raw?.unavailable_reason||'无可用下载入口'):'无可用下载入口'}`:
-      (isProcess()?`${scene.tile_count} 块`:escapeHtml(scene.tiles.join(' / ')));
-    return `<tr data-key="${escapeHtml(scene.key)}" class="${checked?"selected":""} ${available?"":"scene-unavailable"}"><td><input type="checkbox" aria-label="选择 ${escapeHtml(title)}" ${checked?"checked":""} ${available?"":'disabled data-unavailable="1"'}></td><td class="scene-datetime">${escapeHtml(scene.date)}<span>${escapeHtml(scene.time)}</span></td><td><span class="platform-tag">${escapeHtml(scene.platform)}</span></td><td title="${escapeHtml(title+(scene.tiles.length?" · "+scene.tiles.join(', '):""))}">${description}</td><td><span class="cloud-cell"><span class="cloud-bar"><i style="width:${Math.max(0,Math.min(100,cloud))}%"></i></span>${scene.cloud_max==null?"—":scene.cloud_max+"%"}</span></td><td class="${coverage!=null&&coverage<95?"coverage-low":""}">${isGedi()?"导出后统计":coverage==null?"—":coverage+"%"}</td></tr>`;
+      escapeHtml(scene.tiles.join(' / ')+(scene.native&&!available?' · '+(scene.native.unavailable_reason||'无可用 S3 入口'):''));
+    return `<tr data-key="${escapeHtml(scene.key)}" class="${checked?"selected":""} ${available?"":"scene-unavailable"}"><td><input type="checkbox" aria-label="选择 ${escapeHtml(title)}" ${checked?"checked":""} ${available?"":'disabled data-unavailable="1"'}></td><td class="scene-datetime">${escapeHtml(scene.date)}<span>${escapeHtml(scene.time)}</span></td><td><span class="platform-tag">${escapeHtml(scene.platform)}</span></td><td title="${escapeHtml(title+(scene.tiles.length?" · "+scene.tiles.join(', '):""))}">${description}</td><td><span class="cloud-cell"><span class="cloud-bar"><i style="width:${Math.max(0,Math.min(100,cloud))}%"></i></span>${cloudLabel(scene.cloud_max,"—")}</span></td><td class="${coverage!=null&&coverage<95?"coverage-low":""}">${isGedi()?"导出后统计":coverage==null?"—":coverage+"%"}</td></tr>`;
   }).join("");
   if(state.query){
     const q=state.query, dates=q.start?`${q.start} — ${q.end}`:isDem()?"静态 DSM":"不限日期";
     $("scenesSubtitle").textContent=isGedi()?`${gediProduct()?.title||q.collection} · ${dates} · ${isGediRaster()?"按完整汇总期重叠匹配":"导出时精确筛选足迹日期与边界"}`:isRaw()?`${isOfficial()||isS5p()||isSen3()?q.collection:profiles[state.profile][0]} · ${dates}${q.radar_mode?" · "+q.radar_mode:""}${isOpenOptical()?" · 云量 ≤ "+q.max_cloud+"%":isL3()?" · 日期与季度重叠":isWorldCover()?" · 日期与年度重叠":isModis()?" · 按标称日筛选":""} · 不裁剪`:
       isDem()?`${dates} · 可裁剪或下载整瓦片`:isRtc()?`${dates}${q.radar_mode?" · "+q.radar_mode:""} · 每景单独裁剪 · 线性 γ⁰`:
-      `${dates} · 云量 ≤ ${q.max_cloud}% · 每${isProcess()?"次过境":"个瓦片"}一个输出`;
+      `${dates} · 云量 ≤ ${q.max_cloud}% · ${$("imageLayout").value==="mosaic"?"逐区块选择，跨日期拼接":"逐产品时间序列"}`;
   }
-  Batch.renderResults();renderAssetPicker();updateAvailability();schedulePlan();
+  Batch.renderResults();renderAssetPicker();updateAvailability();schedulePlan();Spatial.refresh();
 }
 function renderEstimate() {
   const selected=Batch.query?Batch.totalSelected():state.selected.size;
@@ -604,6 +640,9 @@ function renderEstimate() {
     headline.textContent=p.sen3_complete?`${p.scene_count} 个完整 SEN3 · ${p.requests} 个文件`:`${p.requests} 个原始文件 · 不裁剪`;
     const missing=missingAccess();
     body.textContent=`${p.transports.map(transportLabel).join(" + ")} · ${p.estimated_bytes?sizeLabel(p.estimated_bytes):"体积由服务确定"}${missing.length?" · 请先载入 "+missing.map(transportLabel).join(" + ")+" 凭据":""}`;
+  }else if(p.kind==="mosaic"){
+    headline.textContent=`${p.source_count} 块 · ${p.dates.length} 个日期 · 1 份拼接影像`;
+    body.textContent=`${p.resolution} 米 · 覆盖 ${p.coverage.coverage_percent.toFixed(2)}% · 未压缩约 ${sizeLabel(p.bytes_per_scene)} · ${p.transport==="cdse-s3"?`官方原件缓存约 ${sizeLabel(p.native_source_bytes)}${missingAccess().length?" · 需 S3 密钥":""}`:p.transport==="public"?"无需处理额度":`最多 ${p.requests} 次请求 / ${p.estimated_pu} PU`}`;
   }else{
     headline.textContent=`${count} 景 · ${p.resolution} 米 · ${p.options.output_bands.length} 波段`;
     body.textContent=`未压缩约 ${sizeLabel(p.bytes_per_scene*count)} · ${p.kind==="public"?`${p.source_objects} 个源文件 · 无处理额度`:`预计 ${p.estimated_pu} PU · ${p.requests} 次请求`}`;
@@ -613,7 +652,7 @@ function renderEstimate() {
 function schedulePlan() {
   clearTimeout(planTimer);state.plan=null;renderEstimate();
   const version=++state.planVersion;
-  if(!state.aoi||!(Batch.query?Batch.totalSelected():state.selected.size)||state.busy||(isRtc()&&rtcPolarizations().issue))return;
+  if(!state.aoi||state.aoiPending||state.editing||!(Batch.query?Batch.totalSelected():state.selected.size)||state.busy||(isRtc()&&rtcPolarizations().issue))return;
   planTimer=setTimeout(async()=>{
     try{
       const result=await api(Batch.query?"batch-plan":"plan",downloadRequest());if(version!==state.planVersion)return;
@@ -663,16 +702,17 @@ function showDownloadPlan() {
       $("planNote").textContent="各来源共用研究区和 UTC 日期范围，保留各自的采集或汇总时间。独立来源可同时下载；跟随主影像的 GEDI 等待所选 GeoTIFF 完成。无匹配、失败和取消会分别记录，已完成的文件保留。";
       renderPlanFolder();if(!$("downloadDialog").open)$("downloadDialog").showModal();return;
     }
-    const raw=p.kind==="original", pub=p.kind==="public", gedi=p.kind==="gedi";
+    const raw=p.kind==="original", native=p.transport==="cdse-s3"&&p.kind==="mosaic", pub=p.kind==="public"||p.kind==="mosaic"&&p.transport==="public", gedi=p.kind==="gedi";
     const items=gedi?gediPlanItems(p):raw?[["产品类别",p.options.collection],["文件数量",`${p.requests} 个`],["下载范围","原产品范围，不按研究区裁剪"],
       ["目录提供的体积",p.estimated_bytes?sizeLabel(p.estimated_bytes):"下载时确定"],["通道",p.transports.map(transportLabel).join(" + ")],
       ["文件形式",p.options.mode==="original"?(isDem()?"完整 DSM GeoTIFF":isModis()?"原始 HDF4":isSlc()?"完整原始 SAFE ZIP":"官方整包或单主文件"):p.options.mode==="metadata"?"目录元数据":"目录所列原始资产"]]:
       [["影像数量",`${p.scene_count} 景`],["输出网格",`${p.width.toLocaleString()} × ${p.height.toLocaleString()} 像元`],["像元大小",`${p.resolution} 米`],["输出内容",p.options.label],["坐标系",`${p.crs_label} · EPSG:${p.epsg}`],["预计文件体积",`${sizeLabel(p.bytes_per_scene*p.scene_count)}（未压缩）`],
-       [pub?"需读取的公开源":"预计请求数量",pub?`${p.source_objects} 个源文件`:`最多 ${p.requests} 次 · 每景 ${p.tiles_per_scene} 区块`],["处理额度",pub?"无需 Sentinel Hub 额度":`约 ${p.estimated_pu} PU`]];
+       [native?"官方原件缓存":pub?"需读取的公开源":"预计请求数量",native?`${p.source_objects} 个原件 · 约 ${sizeLabel(p.native_source_bytes)}${p.native_size_unknown?"，部分体积下载时确定":""}`:pub?`${p.source_objects} 个源文件`:`最多 ${p.requests} 次 · 每景 ${p.tiles_per_scene} 区块`],["处理额度",pub||native?"无需 Sentinel Hub 额度":`约 ${p.estimated_pu} PU`]];
     const rows=items.map(([name,value])=>`<div class="plan-item"><span>${escapeHtml(name)}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
+    const mosaicRows=p.kind==="mosaic"?[["拼接产品",`${p.source_count} 个区块 / 1 份区域输出`],["选中采集日期（UTC）",p.dates.join(" / ")],["产品边界覆盖",`${p.coverage.coverage_percent.toFixed(2)}% · 未覆盖 ${p.coverage.uncovered_percent.toFixed(2)}%`],["交叠优先级",p.coverage.priority_label]].map(([name,value])=>`<div class="plan-item"><span>${escapeHtml(name)}</span><strong>${escapeHtml(value)}</strong></div>`).join(""):"";
     const files=raw||gedi? p.targets.map(t=>t.name).slice(0,6).join(" / ")+(p.targets.length>6?`（另 ${p.targets.length-6} 项）`:"") :p.options.output_bands.join(" / ");
-    $("planDetails").innerHTML=rows+`<div class="plan-item wide"><span>${raw||gedi?"原始文件/产品":"波段顺序"}</span><strong class="band-list">${escapeHtml(files)}</strong></div><div class="plan-item wide"><span>保存位置</span><strong id="planPreviewFolder" class="plan-path"></strong></div>`;
-    $("planNote").textContent=gedi?(p.options.mode==="original"?"下载精确产品版本的原始文件。有 NASA 目录校验值时进行核对；所有文件记录本地 SHA-256。缺少目录校验值的原始文件另做完整解码检查。研究区只用于检索。":p.data_kind==="raster"?"保留原始约 1 km 栅格，按研究区裁剪并最近邻对齐。日期匹配整个汇总期，无法拆分为某一天的观测。":
+    $("planDetails").innerHTML=mosaicRows+rows+`<div class="plan-item wide"><span>${raw||gedi?"原始文件/产品":"波段顺序"}</span><strong class="band-list">${escapeHtml(files)}</strong></div><div class="plan-item wide"><span>保存位置</span><strong id="planPreviewFolder" class="plan-path"></strong></div>`;
+    $("planNote").textContent=native?"所选原始波段、SCL 和 XML 完整下载后核对源摘要及 SAFE 清单，再生成一份研究区拼接。官方原件缓存可复用；这些选定原件不是完整 SAFE 产品。实际日期见逐像元来源图。":gedi?(p.options.mode==="original"?"下载精确产品版本的原始文件。有 NASA 目录校验值时进行核对；所有文件记录本地 SHA-256。缺少目录校验值的原始文件另做完整解码检查。研究区只用于检索。":p.data_kind==="raster"?"保留原始约 1 km 栅格，按研究区裁剪并最近邻对齐。日期匹配整个汇总期，无法拆分为某一天的观测。":
       "只导出研究区与 UTC 日期内通过所选条件的足迹。约 25 米离散观测按足迹中心入格，无观测处为 NoData，不插值。参数均值和观测数量分别保存；标准误及区间均值不能当作合并不确定性。高程默认是椭球高，RH 是相对高度。"):
       isSen3()?(p.sen3_complete?"不裁剪。仅当清单和所有原始成员验证通过，才发布完整 .SEN3 目录。":"不裁剪。选中的原始成员会保留文件名，存入单独目录；不是完整 .SEN3 产品。"):
       isSlc()?"只保存完整原始 ZIP。分段接收并固定对象版本，核对 ASF 全文件 MD5 和 SAFE 全部文件 CRC；逐一校验清单成员及复数 I/Q 测量。":
@@ -734,7 +774,7 @@ async function pollJob(id) {
       state.jobId=null;setBusy(false);
       if(searching){
         $("scenesLoading").hidden=true;
-        if(job.status==="completed"){state.scenes=job.result.scenes;state.query=job.result.query;state.selected=firstSelection();if(job.result.batch)Batch.accept(job.result.batch);renderScenes();if(job.result.batch)toast(job.message+"，请分别查看各来源结果。",job.result.batch.groups.some(g=>g.error));else if(state.scenes.length)toast(`找到 ${state.scenes.length} 个结果${state.selected.size?"，已选中首个可下载结果。":"，但没有可用下载入口。"}`);}
+        if(job.status==="completed"){state.scenes=job.result.scenes;state.query=job.result.query;state.selected=firstSelection();if(job.result.batch)Batch.accept(job.result.batch);renderScenes();Spatial.autoSelect();if(job.result.batch)toast(job.message+"，请分别查看各来源结果。",job.result.batch.groups.some(g=>g.error));else if(state.scenes.length)toast(`找到 ${state.scenes.length} 个结果，可在地图和列表中按区块选择。`);}
         else{$("scenesEmpty").hidden=false;toast(job.error||job.message,job.status==="failed");}
       }else{
         $("closeJobPanel").hidden=false;$("cancelJob").hidden=true;
@@ -873,18 +913,14 @@ function bindEvents() {
   for(const id of ["startDate","endDate","maxCloud"])$(id).addEventListener("change",()=>{if(state.query)clearScenes();});
   $("imageMode").addEventListener("change",()=>{$("modeDescription").textContent=modes[$("imageMode").value];$("customBands").hidden=$("imageMode").value!=="custom";schedulePlan();});
   $("resolution").addEventListener("change",schedulePlan);$("maskClouds").addEventListener("change",schedulePlan);$("customBands").addEventListener("change",schedulePlan);
+  $("imageLayout").addEventListener("change",()=>{$("mosaicFallbackField").hidden=$("imageLayout").value!=="mosaic";renderScenes();});
+  $("mosaicFallback").addEventListener("change",schedulePlan);
   document.querySelectorAll("#aoiTabs button").forEach(button=>button.addEventListener("click",()=>activateAoiTab(button.dataset.tab)));
   for(const id of ["drawRectangle","mapDrawRectangle"])$(id).addEventListener("click",()=>startDrawing("rectangle"));
   for(const id of ["drawPolygon","mapDrawPolygon"])$(id).addEventListener("click",()=>startDrawing("polygon"));
   $("editBoundary").addEventListener("click",toggleEditing);
   for(const id of ["fitAoi","mapFitAoi"])$(id).addEventListener("click",()=>{if(aoiLayer?.getBounds().isValid())map.fitBounds(aoiLayer.getBounds(),{padding:[60,60],maxZoom:16});});
-  $("clearAoi").addEventListener("click",async()=>{
-    try{
-      await api("aoi",{clear:true});
-      if(state.editing){editHandler.disable();state.editing=false;$("editBoundary").classList.remove("active");$("drawHint").hidden=true;}
-      setAoi(null);
-    }catch(error){toast(error.message,true);}
-  });
+  for(const id of ["clearAoi","mapDeleteAoi"])$(id).addEventListener("click",deleteBoundary);
   $("applyCoordinates").addEventListener("click",applyCoordinates);$("importBoundary").addEventListener("click",importBoundary);$("chooseFolder").addEventListener("click",chooseFolder);
   $("outputDirectory").addEventListener("change",()=>api("preferences",{output_dir:$("outputDirectory").value}).catch(()=>{}));
   $("placeSearchForm").addEventListener("submit",searchPlaces);
@@ -893,11 +929,11 @@ function bindEvents() {
   document.querySelectorAll("#basemapSwitch button").forEach(button=>button.addEventListener("click",()=>changeBasemap(button.dataset.basemap)));
   $("exportBoundary").addEventListener("click",()=>$("exportDialog").showModal());$("saveBoundary").addEventListener("click",exportBoundary);
   $("searchScenes").addEventListener("click",searchScenes);
-  $("selectAll").addEventListener("click",()=>{if(Batch.selectAll())return;state.selected=new Set(state.scenes.filter(selectable).map(scene=>scene.key));renderScenes();});
-  $("selectNone").addEventListener("click",()=>{if(Batch.selectAll(true))return;state.selected.clear();renderScenes();});
-  $("scenesBody").addEventListener("click",event=>{if(state.busy)return;const row=event.target.closest("tr[data-key]");if(!row||row.classList.contains("scene-unavailable"))return;const key=row.dataset.key;if(state.selected.has(key))state.selected.delete(key);else state.selected.add(key);row.classList.toggle("selected",state.selected.has(key));row.querySelector("input").checked=state.selected.has(key);renderAssetPicker();schedulePlan();});
-  $("scenesBody").addEventListener("mouseover",event=>{const row=event.target.closest("tr[data-key]");if(!row||!footprintLayer)return;const scene=state.scenes.find(scene=>scene.key===row.dataset.key);footprintLayer.clearLayers();for(const product of scene?.products||[])L.geoJSON(product.footprint,{style:{color:"#699cac",weight:1,fillOpacity:0,dashArray:"5,5",interactive:false}}).addTo(footprintLayer);});
-  $("scenesBody").addEventListener("mouseleave",()=>footprintLayer?.clearLayers());
+  $("selectAll").addEventListener("click",()=>{Spatial.touched.add(Batch.active);if(Batch.selectAll())return;state.selected=new Set(state.scenes.filter(selectable).map(scene=>scene.key));renderScenes();});
+  $("selectNone").addEventListener("click",()=>{Spatial.touched.add(Batch.active);if(Batch.selectAll(true))return;state.selected.clear();renderScenes();});
+  $("scenesBody").addEventListener("click",event=>{const row=event.target.closest("tr[data-key]");if(row&&!row.classList.contains("scene-unavailable"))Spatial.toggle(row.dataset.key);});
+  $("scenesBody").addEventListener("mouseover",event=>{const row=event.target.closest("tr[data-key]");if(row)Spatial.highlight(row.dataset.key,true);});
+  $("scenesBody").addEventListener("mouseout",event=>{const row=event.target.closest("tr[data-key]");if(row&&!row.contains(event.relatedTarget))Spatial.highlight(row.dataset.key,false);});
   $("downloadSelected").addEventListener("click",showDownloadPlan);$("changePlanFolder").addEventListener("click",chooseFolder);$("confirmDownload").addEventListener("click",beginDownload);
   $("toggleJobLogs").addEventListener("click",()=>{$("jobLogs").hidden=!$("jobLogs").hidden;$("toggleJobLogs").textContent=$("jobLogs").hidden?"查看记录":"收起记录";});
   $("closeJobPanel").addEventListener("click",()=>$("jobPanel").hidden=true);
@@ -912,7 +948,7 @@ async function initialize() {
   const dateString=(date)=>date.toISOString().slice(0,10);
   $("startDate").value=dateString(before);$("endDate").value=dateString(today);
   for(const id of ["startDate","endDate"]){$(id).min="2015-06-23";$(id).max=dateString(today);}
-  configureMap();bindEvents();Accounts.initialize();
+  configureMap();bindEvents();Spatial.initialize();Accounts.initialize();
   try{
     const data=await api("bootstrap");state.connected=data.connected;state.rawConnected=data.raw_connected;state.s3Connected=data.s3_connected;state.earthdataConnected=Boolean(data.earthdata_connected);state.gediCollections=data.gedi_collections||[];state.nativeDialogs=data.native_dialogs;
     Batch.initialize(data.batch_sources||[]);
@@ -941,7 +977,7 @@ async function initialize() {
     if(data.batch)Batch.accept(data.batch,true);
     renderProfile();
     if(isOfficial()||Batch.checked.has("cdse-original"))loadCollections().then(()=>Batch.renderSettings());
-    if(data.query){state.scenes=data.scenes||[];state.selected=firstSelection();renderScenes();}
+    if(data.query){state.scenes=data.scenes||[];state.selected=firstSelection();renderScenes();Spatial.autoSelect();}
     if(data.active_job){state.jobId=data.active_job.id;setBusy(true);if(["search","batch-search"].includes(data.active_job.kind))showSearchProgress(true);else showDownloadProgress(data.active_job.kind);pollJob(state.jobId);}
     await Accounts.startup(data.accounts);
   }catch(error){toast(error.message,true);}

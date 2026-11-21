@@ -14,7 +14,8 @@ def _source(profile, title, group, kind, time_note, *, auth=None, modes=None, as
 
 
 _ACQUISITION = "按相同 UTC 日期范围检索采集数据；不保证各卫星同一时刻过境。"
-_OPTICAL = {"mode": "research", "resolution": 10, "max_cloud": 20, "mask_clouds": True}
+_OPTICAL = {"mode": "research", "resolution": 10, "max_cloud": 20, "mask_clouds": True,
+            "layout": "mosaic", "priority": "cloud", "fill_gaps": True}
 SOURCES = [
     _source("gedi-earthdata", "NASA GEDI · 高度 / 森林结构 / 生物量", "激光与森林参数", "gedi",
             "足迹按相同 UTC 日期范围筛选；L3/L4B 按整个汇总期重叠匹配。", auth="earthdata",
@@ -23,6 +24,8 @@ SOURCES = [
     _source("s2-earth-search", "Sentinel-2 L2A · 公开区域裁剪", "光学影像", "optical", _ACQUISITION, options=_OPTICAL),
     _source("s2-process", "Sentinel-2 L2A · Sentinel Hub 区域裁剪", "光学影像", "optical", _ACQUISITION,
             auth="sentinel-hub", options=_OPTICAL),
+    _source("s2-cdse-s3", "Sentinel-2 L2A · 官方 S3 区域拼接", "光学影像", "optical", _ACQUISITION,
+            auth="cdse-s3", options=_OPTICAL),
     _source("s2-l2a-cog", "Sentinel-2 L2A · 原始整瓦片 COG", "光学影像", "native", _ACQUISITION,
             modes=["assets", "metadata"], assets=["B04", "B03", "B02", "B08"], options={"mode": "assets", "max_cloud": 20}),
     _source("s2-l1c-aws", "Sentinel-2 L1C · 原始 JP2", "光学影像", "native", _ACQUISITION,

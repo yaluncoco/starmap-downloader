@@ -163,6 +163,7 @@ class Handler(BaseHTTPRequestHandler):
                 "/api/batch-plan": self.server.service.batch_plan,
                 "/api/batch-download": self.server.service.batch_download,
                 "/api/plan": self.server.service.plan,
+                "/api/coverage": self.server.service.coverage,
                 "/api/download": self.server.service.download,
                 "/api/cancel": lambda v: self.server.service.cancel(v.get("job_id", "")),
                 "/api/geocode": self.server.service.geocode,

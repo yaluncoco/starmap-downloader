@@ -77,6 +77,10 @@ def _parts(tile, reference_transform, plan, options, tile_file):
 
 
 def download_scenes(geometry, scenes, options, output_dir, auth, *, cancel=None, progress=None, planned=None):
+    if options.get("layout") == "mosaic":
+        from .mosaic import download_mosaic
+        return download_mosaic(geometry, scenes, options, output_dir, auth=auth,
+                               cancel=cancel, progress=progress, planned=planned)
     base = io_path(output_dir)
     if not base.is_absolute():
         raise UserError("请选择完整的输出文件夹路径。")

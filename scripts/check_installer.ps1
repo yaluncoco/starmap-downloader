@@ -155,7 +155,8 @@ try {
     }
 
     if ($bootstrap.PSObject.Properties.Name -contains 'batch_sources') {
-        if ($bootstrap.batch_sources.Count -ne 23 -or !(Test-Path -LiteralPath (Join-Path $app 'BATCH.md') -PathType Leaf)) {
+        $taskExpectedSources=if([version]$check.RegisteredVersion -ge [version]'1.5.0'){24}else{23}
+        if ($bootstrap.batch_sources.Count -ne $taskExpectedSources -or !(Test-Path -LiteralPath (Join-Path $app 'BATCH.md') -PathType Leaf)) {
             throw 'Installed batch sources or instructions are incomplete'
         }
         if ((Get-Content -LiteralPath (Join-Path $app '快速开始.txt') -Raw -Encoding UTF8) -notmatch '联合下载') {

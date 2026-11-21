@@ -1,16 +1,17 @@
-# 星图影像下载器 1.4.3
+# 星图影像下载器 1.5.0
 
 Windows 10/11 x64 桌面工具。按研究区和 UTC 日期检索影像与 NASA GEDI，可导出区域 GeoTIFF、GEDI 足迹参数与对齐栅格，也可保存指定的整瓦片、元数据或官方原始产品。可在绘制区域前登录所需平台，勾选附带来源后，主数据与附带数据共用研究区和 UTC 日期。GEDI 可跟随本次选中的主 GeoTIFF 网格，并附带采样其像元值。登录与保存规则见 [账号说明](docs/ACCOUNTS.md)，详细用法见 [联合下载](docs/BATCH.md) 和 [GEDI 参数与影像对齐](docs/GEDI.md)。
 
 ## 安装与首次试用
 
-1. 从 [GitHub 稳定版发布页](https://github.com/yaluncoco/starmap-downloader/releases/tag/v1.4.3) 下载 `StarmapDownloader-Setup-1.4.3-win-x64.exe`；源码构建产物位于 `dist/`，也可直接运行 `dist/StarmapDownloader/StarmapDownloader.exe`。按当前用户安装，无需 Python 或管理员权限；需要 Microsoft Edge WebView2 Evergreen Runtime。安装包未签名，可对照同目录的 `.sha256` 文件核对完整性。卸载不删除另存的输出和配置。
+1. 从 [GitHub 稳定版发布页](https://github.com/yaluncoco/starmap-downloader/releases/tag/v1.5.0) 下载 `StarmapDownloader-Setup-1.5.0-win-x64.exe`；源码构建产物位于 `dist/`，也可直接运行 `dist/StarmapDownloader/StarmapDownloader.exe`。按当前用户安装，无需 Python 或管理员权限；需要 Microsoft Edge WebView2 Evergreen Runtime。安装包未签名，可对照同目录的 `.sha256` 文件核对完整性。卸载不删除另存的输出和配置。
 2. 首次打开自动弹出「登录账号」，在同一窗口按需填写 NASA Earthdata、Sentinel Hub、CDSE OData / S3 的完整信息。登录成功后默认加密保存，下次启动自动恢复。可选择「暂不登录，选择数据」使用公开数据；未登录时，每次启动仍会弹出登录窗口。左侧只保留数据、日期、研究区和保存位置。再在「数据来源与下载方式」选择主路线：
 
    | 路线 | 文件 | 认证 |
    | --- | --- | --- |
-   | Sentinel‑2 L2A · Sentinel Hub | 区域 GeoTIFF；可拼接同一次过境的瓦片 | 同一个 Sentinel Hub OAuth 客户端的 Client ID + Client Secret |
-   | Sentinel‑2 L2A · 公开区域裁剪 | Earth Search Collection‑1；每个所选瓦片一个区域 GeoTIFF | 无需登录 |
+   | Sentinel‑2 L2A · Sentinel Hub | 按区块选择，可跨日期拼接为一份研究区 GeoTIFF，或逐产品导出 | 同一个 Sentinel Hub OAuth 客户端的 Client ID + Client Secret |
+   | Sentinel‑2 L2A · 公开区域裁剪 | Earth Search Collection‑1；跨日期区域拼接或逐产品导出 | 无需登录 |
+   | Sentinel‑2 L2A · 官方 S3 区域拼接 | 官方 XML 核对边界与采集时间；原件清单校验后生成一份区域研究包 | CDSE S3 Access Key + Secret Key，检索与下载均需要 |
    | Sentinel‑2 L2A · 整瓦片 COG | Earth Search Collection‑1；勾选源波段、分类、云雪、水汽、气溶胶、真彩或元数据；按 STAC SHA‑256 校验 | 无需登录 |
    | Sentinel‑2 L3 · 季度镶嵌 COG | CDSE 筛选与 Source Cooperative 镜像交叉核验；4 个 10 m 波段，保留整瓦片和 DN | 无需登录；镜像不匹配不下载 |
    | Sentinel‑2 L1C · 原始 JP2 | Earth Search / AWS；选取原始波段、瓦片级元数据，不裁剪 | 无需登录 |
@@ -35,13 +36,21 @@ Windows 10/11 x64 桌面工具。按研究区和 UTC 日期检索影像与 NASA 
 
 点击右上角「检查更新」。配置了公开更新渠道的安装版只查询 GitHub 稳定版，不会在后台自动检查，不需要 GitHub 登录，也不会发送影像账号或密钥。有新版时，可打开发布页或点击「下载并校验」。校验通过后，在保存文件夹中找到安装包；先等影像任务结束并关闭软件，再手动安装。校验失败不会保存安装包，也不会替换上一次成功下载的文件。
 
-当前稳定版为 1.4.3，可覆盖安装公开 1.4.2 / 1.4.1 / 1.1 以及本地 1.2.0 / 1.3.0 / 1.4.0。用过本地预览版的用户，可手动运行稳定版安装包覆盖安装。无更新渠道的本地开发构建会明确提示。版本变化见 [CHANGELOG.md](CHANGELOG.md)。本版测试范围与实传结果见 [验证记录](docs/VALIDATION.md)。
+当前稳定版为 1.5.0，可覆盖安装公开 1.4.2 / 1.4.1 / 1.1 以及本地 1.2.0 / 1.3.0 / 1.4.0。用过本地预览版的用户，可手动运行稳定版安装包覆盖安装。无更新渠道的本地开发构建会明确提示。版本变化见 [CHANGELOG.md](CHANGELOG.md)。本版测试范围与实传结果见 [验证记录](docs/VALIDATION.md)。
 
 ### Sentinel-2 研究分析包
 
-两条 L2A 区域裁剪路线默认保存 **10 个常用波段＋SCL＋未掩膜备份＋逐像元来源**，附带下载也采用相同默认值。波段为 B02、B03、B04、B08、B05、B06、B07、B8A、B11、B12。主 TIFF 用于分析，`.unmasked.tif` 保留云区及负反射率，`.scl.tif` 和 `.source.tif` 供重新筛选与追溯，`.sources.json` 和 `.starmap.json` 保存来源及完整性记录；整组文件缺失时不会报告下载完整。
+三条 L2A 区域路线默认保存 **10 个常用波段＋SCL＋未掩膜备份＋逐像元来源**，附带下载也采用相同默认值。波段为 B02、B03、B04、B08、B05、B06、B07、B8A、B11、B12。主 TIFF 用于分析，`.unmasked.tif` 保留云区及负反射率，`.scl.tif` 和 `.source.tif` 供重新筛选与追溯，`.sources.json` 和 `.starmap.json` 保存来源及完整性记录；整组文件缺失时不会报告下载完整。
 
 原有 RGB、RGB＋近红外、12 波段、NDVI 和自选模式继续可用。研究包仍是区域派生数据，20 米波段对齐至 10 米不增加源空间细节；完整角度、AOT/WVP、云概率和 SAFE 元数据请使用 **「下载完整 Sentinel-2 SAFE」** 入口。完整的文件、质量规则与来源限制见 [研究分析包说明](docs/S2_RESEARCH.md)。
+
+### 地图选块与跨日期拼接
+
+画出区域或导入 SHP / GeoJSON 后检索，地图持续显示各产品的虚线边框和采集时间。点击重叠处可分别勾选产品，地图与列表同步；覆盖面板显示区块数、选中日期、交叠、未覆盖范围和优先分配范围。推荐覆盖按当前优先级保留有新增覆盖的区块，不按瓦片编号简单去重。
+
+默认「跨日期拼接」生成一份共同 UTM 网格的区域影像。云量较低优先，可改为日期较新或手动上下排列；已选的后续产品可补齐云与 NoData。主影像、备份、SCL 和来源图采用相同的最终像元来源，实际使用日期见来源表。需要每个产品分别导出时选「时间序列」。地图上的删除按钮可清除导入边界、编辑状态或未完成绘制。
+
+要与同版官方 JP2 保持像元一致，优先使用「官方 S3 区域拼接」：每个研究产品先下载十个原生波段、SCL、两份 XML 与清单，共 14 个对象，保留可复用的较大原件缓存。它核对 XML 的真实边界与瓦片采集时间。Sentinel Hub 在本次边缘样区缺少部分官方有效像元，现有 Process 入口仍保留；其服务范围不能保证等于完整 SAFE。三条路线均是派生输出，完整 SAFE 入口单独提供。
 
 ### Sentinel-2 + GEDI 联合下载
 
@@ -107,7 +116,7 @@ Windows 10/11 x64 桌面工具。按研究区和 UTC 日期检索影像与 NASA 
 - 自动通道：对同一个所选产品，按目录优先使用 OData；无 OData 入口时使用满足身份核验的 S3 对象。也可选「仅 CDSE OData」或「仅 CDSE S3」。这是规划规则，不会在传输错误后静默换通道，更不会换成另一产品。确认计划会列出实际所需凭据。
 - S3 密钥从界面里的 **CDSE S3 Keys Manager** 取得，与 Sentinel Hub OAuth 客户端无关。点击载入只代表密钥格式通过检查；有效期及数据权限要在真实下载时验证。
 - S3 的 `AccessDenied` 表示所选对象访问被拒绝，程序会区分签名不匹配、Access Key 失效和系统时间问题。同一密钥可访问 Sentinel-2，但仍可能被某个 DEM 对象拒绝；有目录记录不保证各对象都获授权。
-- 多对象只列为可选资产，不会猜测整包。原始 ZIP 大小以实际响应为准。区域裁剪支持公开 Sentinel‑2 L2A、公开 DEM、Sentinel‑1 RTC（临时读取授权）和 Sentinel Hub L2A；AOI 跨度超过 8°或跨 180° 经线请分区，UTM 区域导出支持 80°S～84°N。
+- 多对象只列为可选资产，不会猜测整包。原始 ZIP 大小以实际响应为准。区域裁剪支持公开 Sentinel‑2 L2A、官方 S3 L2A、公开 DEM、Sentinel‑1 RTC（临时读取授权）和 Sentinel Hub L2A；AOI 跨度超过 8°或跨 180° 经线请分区，UTM 区域导出支持 80°S～84°N。
 
 ## Sentinel‑3 原始产品
 
@@ -146,7 +155,7 @@ Windows 10/11 x64 桌面工具。按研究区和 UTC 日期检索影像与 NASA 
 
 ## 源码、构建和复测
 
-用 PowerShell 7 执行。公开发布请按[发布步骤](docs/RELEASING.md)在构建时传入 GitHub 仓库；不传 `-UpdateRepository` 会构建无更新渠道的测试包。第三方来源见[声明](THIRD_PARTY_NOTICES.md)。
+用 Windows PowerShell 5.1 或 PowerShell 7 执行。公开发布请按[发布步骤](docs/RELEASING.md)在构建时传入 GitHub 仓库；不传 `-UpdateRepository` 会构建无更新渠道的测试包。第三方来源见[声明](THIRD_PARTY_NOTICES.md)。
 
 ```powershell
 python -m venv .venv
@@ -159,27 +168,27 @@ python -m venv .venv
 # 同一 SHP 和 UTC 日期检索 Sentinel-2、GEDI、DEM，并实传公开 Sentinel-2 + DEM。
 .\.venv\Scripts\python.exe -X utf8 scripts\live_batch.py --exe .\dist\StarmapDownloader\StarmapDownloader.exe --output .\verification\batch\packaged-live
 # 安装后复测联合下载；需在干净测试用户中运行。
-.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.4.3-win-x64.exe -Batch
+.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.5.0-win-x64.exe -Batch
 # 可选：在干净测试用户中验证从上版升级、保留输出设置以及卸载。
 # -Slc 实传 VV 样本；同时加 -SlcDual 会再实传 VV+VH 样本（共约 2.50 GB）。
-.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.4.3-win-x64.exe -Slc -SlcDual -ModisSmoke
+.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.5.0-win-x64.exe -Slc -SlcDual -ModisSmoke
 # 若有旧的本地预览版 1.12.0，复测编号重置下的覆盖安装时加 -ReplacePreview -UpgradeFrom 'C:\备份\StarmapDownloader-Setup-1.12.0-win-x64.exe'。
 # 独立 MODIS 参考需要可选 pyhdf；--fetch 下载缺失的已锁定的源对象。
 .\.venv\Scripts\python.exe -X utf8 scripts\check_modis_reference.py .\verification\modis-next-source --fetch
-.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.4.3-win-x64.exe -Modis
+.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.5.0-win-x64.exe -Modis
 # 安装后复测 ESA WorldCover 三类数据、独立源文件、真实缺层、损坏重下与界面。
-.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.4.3-win-x64.exe -WorldCover
+.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.5.0-win-x64.exe -WorldCover
 # 安装后复测 L2A 整瓦片和 L3 季度镶嵌，再验证卸载保留。
-.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.4.3-win-x64.exe -S2Tiles
+.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.5.0-win-x64.exe -S2Tiles
 # 安装、复测 RTC 的 IW 两组极化 + 覆盖边缘；-RtcEw 还要求一份指定 EW 样本。
-.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.4.3-win-x64.exe -RtcEw
+.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.5.0-win-x64.exe -RtcEw
 # 雷达测量 TIFF、Landsat 红波段是可选大样本；-Live 也运行新增光学路线、RTC IW 和整 DEM
-.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.4.3-win-x64.exe -Live -RadarMeasurement -LandsatMeasurement -S5pAllNrti
+.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.5.0-win-x64.exe -Live -RadarMeasurement -LandsatMeasurement -S5pAllNrti
 # 复测 9 类 Sentinel-3 样本、3 条 Sentinel-5P 处理流和卸载保留
-.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.4.3-win-x64.exe -Sen3 -S5p
+.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.5.0-win-x64.exe -Sen3 -S5p
 # -Sen3LargeFiles 也实传 WST（约 647 MB）与 SRAL（约 2.52 GB）。
 # -Sen3FullRbt 覆盖所有 11 类样本，并另外验证 RBT 的全部 98 个文件。两种模式都需要较长时间。
-.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.4.3-win-x64.exe -Sen3FullRbt
+.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.5.0-win-x64.exe -Sen3FullRbt
 ```
 
 本机已保存账号的 Sentinel-2 完整性可用以下脚本验证。它使用北京 2024-06-10 的同一 50TMK 产品，保存并恢复输出设置；运行时请关闭其他软件会话。`--source-zip` 可复用已下载的同一官方完整 SAFE，`--regional-only` 只测试两条区域路线、完整包对照和真实云区，不重新测试 S3 / GEDI。缺省不加这两个参数时，还会使用保存账号实传完整 SAFE、S3 与 GEDI。各平台的失败分别记录，凭据不会写入报告。
@@ -192,6 +201,14 @@ python -m venv .venv
 
 ```powershell
 .\.venv\Scripts\python.exe -X utf8 scripts\live_s3.py --exe 'C:\实际安装路径\StarmapDownloader.exe' --source-zip 'D:\已保存的同一完整产品.zip' --extended --require-transfer --require-cache-evidence --output-dir .\verification\s3-completeness-new
+```
+
+十个官方 SAFE ZIP 的选块与跨日期拼接验收可复用以下脚本；默认依次验证官方 S3 与公开区域路线，使用保存账号并恢复原输出设置。不要同时打开其他使用真实保存账号的软件会话。`--native-assets` 可另实传指定原件并与 SAFE 成员作字节对照；`--download-timeout` 设置每次下载的最长秒数。
+
+```powershell
+.\.venv\Scripts\python.exe -X utf8 scripts\check_safe_reference.py 'D:\Datasets\2604' --deep --output .\verification\safe-reference.json
+.\.venv\Scripts\python.exe -X utf8 scripts\check_mosaic_reference.py 'D:\Datasets\2604' --output .\verification\native-pixels
+.\.venv\Scripts\python.exe -X utf8 scripts\live_mosaic.py 'D:\Datasets\2604' --exe 'D:\apps\StarmapDownloader\StarmapDownloader.exe' --output .\verification\installed-mosaic --browser --download-timeout 3600
 ```
 
 本地 `verification/` 保存安装和实传测试产物，不随源码提交。目录检索或模拟测试通过不代表实下载链路已验收。Playwright 页面测试需要 Edge，Evalscript 测试需要 Node.js。已安装二进制的认证链路可用独立的本机交互脚本复测。传入**安装后的程序**（或同版打包目录中的程序），不是安装器。每个模式使用新输出目录，不要把凭据放进命令行、脚本或聊天：

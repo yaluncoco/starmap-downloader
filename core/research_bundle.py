@@ -240,7 +240,7 @@ class ResearchBundle:
                        "native_resolution_m": NATIVE_RESOLUTION, "output_resolution_m": self.plan["resolution"],
                        "resampling": "nearest", "source_index_nodata": 0, "scl_nodata": SCL_NODATA,
                        "cloud_mask_kept_scl": list(CLEAR_CLASSES),
-                       "selection": "first data-valid allowlisted product in catalogue-ID order; cloud mask applied after selection",
+                       "selection": provenance.get("selection", "first data-valid allowlisted product in catalogue-ID order; cloud mask applied after selection"),
                        "metadata_note": "Regional derived data. Full product XML, angle grids, AOT/WVP and other original layers require the complete SAFE mode."}
         self.partials["sources"].write_text(json.dumps(source_data, ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
         try:

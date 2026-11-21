@@ -40,6 +40,9 @@ def keys_for(options):
 
 
 def public_plan(geometry, scenes, options):
+    if options.get("layout") == "mosaic":
+        from .mosaic import build_mosaic_plan
+        return build_mosaic_plan(geometry, scenes, options)
     for scene in scenes:
         missing = set(keys_for(options)) - scene["public"]["assets"].keys()
         if missing:
@@ -162,6 +165,10 @@ def _output(inputs, valid, options):
 
 
 def download_public(geometry, scenes, options, output_dir, *, cancel=None, progress=None, planned=None):
+    if options.get("layout") == "mosaic":
+        from .mosaic import download_mosaic
+        return download_mosaic(geometry, scenes, options, output_dir,
+                               cancel=cancel, progress=progress, planned=planned)
     check_cancel(cancel)
     base = io_path(output_dir)
     if not base.is_absolute():

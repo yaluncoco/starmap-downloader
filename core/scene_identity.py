@@ -36,7 +36,7 @@ def expected_products(scene):
             acquired = utc_time(product["acquisition_utc"])
         except (KeyError, TypeError, ValueError, AttributeError):
             raise UserError("影像目录未提供有效的瓦片采集时间，请重新检索。") from None
-        if platform + "_" + datatake != scene["key"]:
+        if platform + "_" + datatake != scene.get("overpass_key", scene["key"]):
             raise UserError("所选过境与目录产品不一致，请重新检索。")
         result.append({"id": identifier.removesuffix(".SAFE"), "tile": tile, "utc": utc_text(acquired)})
     if not result or len({p["tile"] for p in result}) != len(result):

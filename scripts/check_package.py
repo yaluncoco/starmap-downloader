@@ -114,6 +114,10 @@ def check_executable(executable, *, set_output=None, require_output=None, requir
                                     "s1-aws-original", "s1-slc-seasia", "s1-rtc-pc", "sen3-aws-original", "s5p-aws-l2",
                                     "worldcover-s2", "worldcover-s1", "worldcover-map", "dem-30", "dem-90", "gedi-earthdata", "cdse-original",
                                     "modis-13Q1-061", "modis-09Q1-061", "modis-11A2-061", "modis-15A2H-061", "modis-43A4-061"}
+                if tuple(map(int, bootstrap["version"].split("."))) >= (1, 5, 0):
+                    expected_sources.add("s2-cdse-s3")
+                    session.get(origin + "/spatial.js", timeout=3).raise_for_status()
+                    assert 'value="s2-cdse-s3"' in home.text
                 assert isinstance(sources, list) and {s["id"] for s in sources} == expected_sources
                 assert bootstrap.get("batch") is None
                 assert 'id="manageAccounts"' in home.text and 'id="companionSources"' in home.text

@@ -81,7 +81,7 @@ def _earth_item(feature, geometry, area, start, stop, max_cloud):
         return None
     return {"key": key, "title": safe, "platform": item_match[1], "datetime": utc_text(acquired), "date": acquired.date().isoformat(),
             "time": acquired.strftime("%H:%M:%S"), "tiles": [item_match[2]], "tile_count": 1,
-            "cloud_min": round(cloud, 1), "cloud_max": round(cloud, 1), "coverage_percent": _coverage(area, overlap),
+            "cloud_min": cloud, "cloud_max": cloud, "coverage_percent": _coverage(area, overlap),
             "products": [{"id": safe, "footprint": mapping(region)}], "public": {"id": key, "source_id": safe, "assets": assets}}
 
 

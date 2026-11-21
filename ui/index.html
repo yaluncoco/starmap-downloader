@@ -13,6 +13,7 @@
   <script src="vendor/leaflet-draw/leaflet.draw.js" defer></script>
   <script src="accounts.js" defer></script>
   <script src="batch.js" defer></script>
+  <script src="spatial.js" defer></script>
   <script src="app.js" defer></script>
 </head>
 <body>
@@ -54,6 +55,7 @@
           <select id="sourceProfile" data-lock>
             <option value="s2-process">Sentinel-2 L2A · Sentinel Hub 区域裁剪</option>
             <option value="s2-earth-search">Sentinel-2 L2A · 公开区域裁剪（免密钥）</option>
+            <option value="s2-cdse-s3">Sentinel-2 L2A · 官方 S3 区域拼接（原始像元）</option>
             <option value="s2-l2a-cog">Sentinel-2 L2A · 整瓦片 COG（免密钥）</option>
             <option value="s2-l3-quarterly">Sentinel-2 L3 · 季度镶嵌 COG（公开镜像）</option>
             <option value="s2-l1c-aws">Sentinel-2 L1C · 原始 JP2（免密钥）</option>
@@ -121,6 +123,10 @@
           <p id="modeDescription" class="field-note">B02 / B03 / B04 / B08 / B05 / B06 / B07 / B8A / B11 / B12；配套保存 SCL、未掩膜反射率和逐像元来源。20 米波段最近邻对齐到所选网格。</p>
           <div class="two-columns output-options"><div><label for="resolution">输出像元大小</label><select id="resolution" data-lock><option value="10">10 米</option><option value="20">20 米</option><option value="60">60 米</option></select></div><div class="format-field"><label>文件格式</label><div class="format-value"><svg class="icon"><use href="#i-layers"/></svg>GeoTIFF <span>.tif</span></div></div></div>
           <label class="checkbox-label"><input type="checkbox" id="maskClouds" checked data-lock><span>去除云、薄云和云阴影像元</span></label>
+          <label for="imageLayout">区域输出方式</label>
+          <select id="imageLayout" data-lock><option value="mosaic">跨日期拼接 · 一份研究区影像（推荐）</option><option value="series">时间序列 · 每个选中产品分别导出</option></select>
+          <label class="checkbox-label" id="mosaicFallbackField"><input type="checkbox" id="mosaicFallback" checked data-lock><span>用已选影像补齐云和无数据位置</span></label>
+          <p id="mosaicDescription" class="field-note">在地图上选择影像块。交叠处默认云量较低优先；像元来源图保留实际产品和日期。未被选中影像覆盖的位置为 NoData。</p>
           <p class="field-note compact">日期与采集时间按 UTC。云掩膜保留 SCL 2、4、5、6、7、11，雪类 11 保留；研究包备份可重新筛选。</p>
           <p class="field-note">需要 B01、B09、云概率、AOT、水汽和完整角度/元数据时，<button id="s2SafeShortcut" class="inline-link" type="button" data-lock>下载完整 Sentinel-2 SAFE</button>。整包保留原始覆盖范围。</p>
           </div>
@@ -221,7 +227,8 @@
         <div id="map" aria-label="研究区域地图"></div>
         <div id="mapOffline" class="map-offline" hidden><svg class="icon"><use href="#i-info"/></svg><span>底图暂时无法加载，坐标和边界下载功能仍可使用。</span></div>
         <form id="placeSearchForm" class="place-search"><svg class="icon"><use href="#i-search"/></svg><input id="placeQuery" placeholder="搜索城市、县区或地点，例如：平原县" autocomplete="off" aria-label="搜索地点"><button type="submit" id="placeSearchButton">搜索</button><div id="placeResults" class="place-results" hidden></div></form>
-        <div class="map-tools"><button id="mapDrawRectangle" class="icon-button" title="画矩形" aria-label="在地图上画矩形"><svg class="icon"><use href="#i-rect"/></svg></button><button id="mapDrawPolygon" class="icon-button" title="画多边形" aria-label="在地图上画多边形"><svg class="icon"><use href="#i-poly"/></svg></button><span class="tool-divider"></span><button id="editBoundary" class="icon-button" title="编辑边界，完成后再点击一次" aria-label="编辑边界"><svg class="icon"><use href="#i-edit"/></svg></button><button id="mapFitAoi" class="icon-button" title="定位研究区" aria-label="定位研究区"><svg class="icon"><use href="#i-target"/></svg></button></div>
+        <div class="map-tools"><button id="mapDrawRectangle" class="icon-button" title="画矩形" aria-label="在地图上画矩形"><svg class="icon"><use href="#i-rect"/></svg></button><button id="mapDrawPolygon" class="icon-button" title="画多边形" aria-label="在地图上画多边形"><svg class="icon"><use href="#i-poly"/></svg></button><span class="tool-divider"></span><button id="editBoundary" class="icon-button" title="编辑边界，完成后再点击一次" aria-label="编辑边界"><svg class="icon"><use href="#i-edit"/></svg></button><button id="mapDeleteAoi" class="icon-button danger" title="删除研究区并清空影像选择" aria-label="在地图上删除研究区" disabled><svg class="icon"><use href="#i-trash"/></svg></button><button id="mapFitAoi" class="icon-button" title="定位研究区" aria-label="定位研究区"><svg class="icon"><use href="#i-target"/></svg></button></div>
+        <div id="mapFootprintLegend" class="footprint-legend" hidden><strong>影像区块 · 点击虚线框选择</strong><span>填色为优先分配范围；橙色为交叠，红色为未覆盖。</span><div id="mapFootprintDates"></div></div>
         <div class="map-top-right"><button id="exportBoundary" class="button map-white-button" disabled data-lock><svg class="icon"><use href="#i-download"/></svg>导出边界</button></div>
         <div class="map-bottom-left"><span id="mapAoiBadge" class="map-badge"><i></i><span>绘制你的研究区</span></span><span class="map-badge muted-badge">底图用于定位 · 卫星影像与 GEDI 数据</span></div>
         <div class="basemap-switch" id="basemapSwitch"><button class="active" data-basemap="standard">标准地图</button><button data-basemap="satellite">卫星底图</button></div>
@@ -232,6 +239,12 @@
       <section class="scenes-panel">
         <div class="scenes-heading"><div><h2>可下载影像 <span id="sceneCount" class="count-badge">0</span></h2><p id="scenesSubtitle">按实际过境时间整理，跨瓦片自动拼接。</p></div><div class="scene-selection-actions"><button id="selectAll" class="inline-link" disabled>全选</button><span>·</span><button id="selectNone" class="inline-link" disabled>清空选择</button></div></div>
         <div id="batchResultTabs" class="batch-result-tabs" role="tablist" aria-label="主数据与附带数据结果" hidden></div>
+        <div id="coveragePanel" class="coverage-panel" hidden>
+          <div class="coverage-heading"><strong id="coverageSummary" aria-live="polite"></strong><div class="coverage-actions"><label class="sr-only" for="spatialPriority">交叠区域优先级</label><select id="spatialPriority" aria-label="交叠区域优先级" data-lock><option value="cloud">云量较低优先</option><option value="newest">日期较新优先</option><option value="selection">手动排列优先</option></select><button id="recommendCoverage" class="inline-link" type="button">推荐覆盖</button><button id="fitFootprints" class="inline-link" type="button">定位区块</button></div></div>
+          <div id="coverageDates" class="coverage-dates"></div>
+          <details id="coverageDetails"><summary>查看日期与分配范围，调整区块优先级</summary><div id="coverageBlockList" class="coverage-block-list"></div></details>
+          <p id="coverageNote" class="field-note compact">覆盖率按产品边界计算，不代表无云。补齐后以像元来源图为准。</p>
+        </div>
         <div id="companionResults" class="companion-results" hidden></div>
         <div id="scenesEmpty" class="scenes-empty"><div class="empty-illustration"><span class="empty-orbit"></span><svg class="icon"><use href="#i-satellite"/></svg><i></i><i></i></div><strong>让影像覆盖你的研究区</strong><span>设置区域和时间，点击「查找可下载影像」。</span></div>
         <div id="scenesLoading" class="scenes-loading" hidden><span class="spinner"></span><strong>正在检索官方影像目录</strong><span id="searchMessage" aria-live="polite">准备检索…</span><button type="button" id="cancelSearch" class="inline-link danger" disabled>取消检索</button></div>
@@ -310,7 +323,7 @@
     <div class="modal-footer"><button id="clearSavedAccounts" type="button" class="inline-link danger" data-lock>清除全部登录信息</button><button id="accountComplete" type="button" class="button button-primary" data-close="accountsDialog">暂不登录，选择数据</button></div>
   </dialog>
 
-  <dialog id="helpDialog" class="modal help-modal"><div class="modal-heading"><div><span class="eyebrow">QUICK START</span><h2>四步，下载你的研究区影像</h2></div><button class="icon-button" data-close="helpDialog" aria-label="关闭帮助"><svg class="icon"><use href="#i-close"/></svg></button></div><div class="help-steps"><div><span>1</span><p><strong>选择数据来源与认证方式</strong>开放数据无需登录；Sentinel Hub 使用同一客户端的 Client ID 和 Secret；官方原始产品按计划使用 OData 账号/令牌或 S3 密钥。</p></div><div><span>2</span><p><strong>选择日期与影像内容</strong>反射率和 NDVI 输出 Float32；自然色输出 8 位浏览图。L2A 没有 B10；20/60 米原生波段可重采样到所选网格。</p></div><div><span>3</span><p><strong>在地图上圈出研究区</strong>支持地点搜索、矩形、多边形、SHP 和 GeoJSON。坐标顺序为经度、纬度；无 .prj 的 SHP 需要手动指定源坐标系。</p></div><div><span>4</span><p><strong>选择过境日期和保存位置</strong>检索后勾选结果，确认下载计划。区域裁剪导出 GeoTIFF，原始产品保留原始范围和文件形式。两者都生成研究区与下载记录。</p></div></div><div class="help-note"><svg class="icon"><use href="#i-info"/></svg><p>Process API 提供按区域处理的影像。云量为原始瓦片估计，覆盖率是边界交叠，不代表无云。输出记录标明处理服务返回的匹配瓦片。在顶部「登录账号」填写各平台信息；登录成功后本机加密保存，下次启动自动恢复。可在同一窗口退出并删除保存的信息。</p></div><div class="modal-footer"><button class="button button-outline" id="openAuthDocs">官方认证文档 ↗</button><button class="button button-outline" id="openQuotaDocs">免费额度说明 ↗</button><button class="button button-primary" data-close="helpDialog">开始使用</button></div></dialog>
+  <dialog id="helpDialog" class="modal help-modal"><div class="modal-heading"><div><span class="eyebrow">QUICK START</span><h2>四步，下载你的研究区影像</h2></div><button class="icon-button" data-close="helpDialog" aria-label="关闭帮助"><svg class="icon"><use href="#i-close"/></svg></button></div><div class="help-steps"><div><span>1</span><p><strong>选择数据来源与认证方式</strong>开放数据无需登录；Sentinel Hub 使用同一客户端的 Client ID 和 Secret；官方 S3 区域拼接的检索和下载均需 S3 密钥，完整原始产品按计划使用 OData 或 S3。</p></div><div><span>2</span><p><strong>选择日期与影像内容</strong>反射率和 NDVI 输出 Float32；自然色输出 8 位浏览图。L2A 没有 B10；20/60 米原生波段可重采样到所选网格。</p></div><div><span>3</span><p><strong>在地图上圈出研究区</strong>支持地点搜索、矩形、多边形、SHP 和 GeoJSON。坐标顺序为经度、纬度；无 .prj 的 SHP 需要手动指定源坐标系。</p></div><div><span>4</span><p><strong>选择影像区块和保存位置</strong>检索后在虚线地图与列表勾选区块，查看日期、交叠与覆盖。可跨日期拼成一份研究区影像，或逐产品导出时间序列；云量优先可手动调整。原始产品保留原范围。</p></div></div><div class="help-note"><svg class="icon"><use href="#i-info"/></svg><p>Process API 提供按区域处理的影像。云量为原始瓦片估计，覆盖率是边界交叠，不代表无云。输出记录标明处理服务返回的匹配瓦片。在顶部「登录账号」填写各平台信息；登录成功后本机加密保存，下次启动自动恢复。可在同一窗口退出并删除保存的信息。</p></div><div class="modal-footer"><button class="button button-outline" id="openAuthDocs">官方认证文档 ↗</button><button class="button button-outline" id="openQuotaDocs">免费额度说明 ↗</button><button class="button button-primary" data-close="helpDialog">开始使用</button></div></dialog>
 
   <dialog id="updateDialog" class="modal update-modal" aria-labelledby="updateTitle">
     <div class="modal-heading"><h2 id="updateTitle">软件更新</h2><button type="button" class="icon-button" data-close="updateDialog" aria-label="关闭软件更新"><svg class="icon"><use href="#i-close"/></svg></button></div>

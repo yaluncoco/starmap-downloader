@@ -93,3 +93,18 @@
 .accounts-modal .modal-footer{justify-content:space-between;margin-top:16px;padding-top:14px;border-top:1px solid var(--line)}
 .account-status{padding:8px 10px;background:var(--green-light);color:var(--green);font-size:12px;border-radius:7px;margin-bottom:12px}
 .account-status-error{background:#fff5f2;color:var(--red)}
+
+/* Product footprints remain selectable while AOI and allocation fills pass map clicks through. */
+.scenes-panel{height:374px;min-height:300px;max-height:48vh}
+.coverage-panel{padding:8px 17px;border-bottom:1px solid var(--line);background:#f8fbfa;flex-shrink:0}
+.coverage-heading{display:flex;align-items:center;justify-content:space-between;gap:10px}.coverage-heading>strong{font-size:11px;font-weight:600}
+.coverage-actions{display:flex;align-items:center;gap:9px;flex-shrink:0}.coverage-actions select{width:129px;height:28px;font-size:11px;padding:3px 7px}
+.coverage-dates{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:10px;color:var(--muted);margin-top:5px}
+.coverage-date{display:inline-flex;align-items:center;gap:5px;white-space:nowrap;font-size:10px}.coverage-date i{width:7px;height:7px;border-radius:2px;flex:none}.coverage-date b{font-weight:400;color:var(--muted)}
+.coverage-panel details{margin-top:5px;font-size:10px;color:#56726b}.coverage-panel summary{cursor:pointer}.coverage-panel .field-note{font-size:10px;line-height:1.5;margin:5px 0 0}
+.coverage-block-list{max-height:126px;overflow-y:auto;scrollbar-width:thin;padding-top:4px}.coverage-block{display:flex;gap:9px;align-items:center;padding:4px 0;border-top:1px solid var(--line)}.coverage-block>span{flex:1;min-width:0}.coverage-block strong,.coverage-block small{display:block;font-size:10px}.coverage-block small{font-weight:400;color:var(--muted)}
+.footprint-legend{position:absolute;z-index:490;right:16px;top:70px;width:240px;max-width:36%;padding:9px 11px;background:#fffffff0;border:1px solid #dce5e4;border-radius:7px;box-shadow:0 2px 8px #29494c0e;pointer-events:none}.footprint-legend>strong,.footprint-legend>span{display:block;font-size:10px}.footprint-legend>span{font-size:9px;color:var(--muted);margin:4px 0}.footprint-legend>div{display:flex;flex-wrap:wrap;gap:4px 9px;max-height:70px;overflow:hidden}
+.footprint-popup{font:11px/1.5 var(--font);max-height:250px;overflow-y:auto}.footprint-popup>strong{font-size:12px}.footprint-popup>p{margin:5px 0!important;color:var(--muted)}.footprint-popup label{display:flex;align-items:flex-start;gap:8px;padding:7px 0;border-top:1px solid var(--line);cursor:pointer}.footprint-popup input{margin:3px 0 0;flex:none;width:14px;height:14px}.footprint-popup b,.footprint-popup small{display:block}.footprint-popup small{font-size:10px;color:var(--muted)}
+.map-tools .danger{color:var(--red)}.map-tools .danger:disabled{color:#b4bfc1}.map-bottom-left{max-width:calc(100% - 210px)}
+@media(max-width:1200px){.coverage-heading{align-items:flex-start;flex-wrap:wrap;gap:4px}.coverage-panel{padding:7px 12px}.coverage-actions select{width:125px}.footprint-legend{right:12px;width:210px}.scenes-panel{height:374px}}
+@media(max-height:820px){.scenes-panel{height:332px;min-height:278px;max-height:50vh}.coverage-panel{padding-top:5px;padding-bottom:5px}.coverage-panel .field-note{font-size:9px}.map-panel{min-height:235px}}

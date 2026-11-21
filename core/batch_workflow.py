@@ -23,11 +23,12 @@ from .gedi_download import build_gedi_plan, normalize_options as gedi_options
 from .geometry import describe_aoi, load_aoi, normalize_aoi, save_aoi
 from .http import check_cancel
 from .local_paths import io_path
+from .spatial_selection import coverage_summary, priority_option
 
 MAX_SCENES = 500
 OPTION_KEYS = frozenset({"mode", "collection", "transport", "asset", "assets", "fields", "beams", "bands", "quality",
                          "nondegraded", "min_sensitivity", "resolution", "reference_path", "sample_reference",
-                         "max_cloud", "radar_mode", "mask_clouds"})
+                         "max_cloud", "radar_mode", "mask_clouds", "layout", "priority", "fill_gaps"})
 
 
 def _fingerprint(value):
@@ -77,6 +78,28 @@ class BatchWorkflow:
 
     def snapshot(self):
         return copy.deepcopy(self.state)
+
+    def coverage(self, value):
+        from .service import _criteria
+
+        geometry = normalize_aoi(value.get("geometry"))
+        if not self.state or value.get("batch_id") != self.state["id"] or not geometry.equals(self.geometry):
+            raise UserError("联合检索或研究区已变化，请重新检索。")
+        group = next((g for g in self.state["groups"] if g["id"] == value.get("group_id")), None)
+        if not isinstance(value.get("criteria"), dict):
+            raise UserError("附带影像的检索条件无效。")
+        if (not group or value.get("profile") != group["profile"] or value.get("query_id") != group["query"]["id"]
+                or _criteria(value.get("criteria", {}), group["profile"], shared_dates=True) != group["criteria"]):
+            raise UserError("附带影像的来源或日期已变化，请重新检索。")
+        keys = value.get("scene_keys")
+        known = {s["key"] for s in group["scenes"]}
+        if (not isinstance(keys, list) or len(keys) > MAX_SCENES or any(not isinstance(k, str) or k not in known for k in keys)
+                or len(keys) != len(set(keys))):
+            raise UserError("附带影像的区块选择无效。")
+        supplied = value.get("options", {})
+        if not isinstance(supplied, dict):
+            raise UserError("拼接选项无效。")
+        return coverage_summary(geometry, group["scenes"], keys, priority_option(supplied))
 
     def search(self, value):
         # Imported lazily to keep the existing individual-source entry points reusable.
@@ -241,7 +264,7 @@ class BatchWorkflow:
                                        "name": "gedi_metrics.tif" if plan["data_kind"] == "footprint" else None,
                                        "scene_key": None, "grid": plan["grid"]})
             else:
-                for scene in unit["scenes"]:
+                for scene in ([{"key": "mosaic", "title": "所选区块的跨日期拼接"}] if plan.get("kind") == "mosaic" else unit["scenes"]):
                     candidates.append({"id": _fingerprint({"scene": scene["key"], "plan": plan["fingerprint"]}),
                                    "title": (scene.get("title") or scene["key"]) + " · 主 GeoTIFF", "unit": index,
                                    "name": None, "scene_key": scene["key"],
@@ -294,8 +317,10 @@ class BatchWorkflow:
             for group in selected:
                 public = {k: v for k, v in group.items() if k != "units"}
                 public["plans"] = [u["plan"] for u in group["units"]]
-                public["estimated_bytes"] = sum(p.get("estimated_bytes") or p.get("bytes_per_scene", 0) * p["scene_count"] for p in public["plans"])
-                public["unknown_size"] = any(p.get("kind") in ("original", "gedi") and not p.get("estimated_bytes") for p in public["plans"])
+                public["estimated_bytes"] = sum((p.get("estimated_bytes") or p.get("bytes_per_scene", 0) * p["scene_count"])
+                                                + p.get("native_source_bytes", 0) for p in public["plans"])
+                public["unknown_size"] = any(p.get("native_size_unknown") or p.get("kind") in ("original", "gedi")
+                                             and not p.get("estimated_bytes") for p in public["plans"])
                 if group["align_to_primary"] and group["units"]:
                     public["reference_source"] = reference["title"]
                     public["reference_grid_pending"] = reference["grid"] is None

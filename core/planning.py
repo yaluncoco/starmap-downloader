@@ -10,6 +10,7 @@ from shapely import normalize, transform
 from shapely.geometry import box, mapping
 
 from .errors import UserError
+from .spatial_selection import priority_option
 
 ALL_BANDS = ["B01", "B02", "B03", "B04", "B05", "B06", "B07", "B08", "B8A", "B09", "B11", "B12"]
 RESEARCH_BANDS = ["B02", "B03", "B04", "B08", "B05", "B06", "B07", "B8A", "B11", "B12"]
@@ -43,7 +44,15 @@ def normalize_options(value):
         spec = MODES[mode].copy()
     else:
         raise UserError("未知的影像输出类型。")
-    return {**spec, "mode": mode, "resolution": resolution, "max_cloud": max_cloud, "mask_clouds": bool(value.get("mask_clouds", True)), "count": len(spec["output_bands"])}
+    layout = value.get("layout", "series")
+    if not isinstance(layout, str) or layout not in ("series", "mosaic"):
+        raise UserError("请选择跨日期拼接或逐产品时间序列。")
+    fill_gaps = value.get("fill_gaps", True)
+    if not isinstance(fill_gaps, bool):
+        raise UserError("拼接补齐选项无效。")
+    return {**spec, "mode": mode, "resolution": resolution, "max_cloud": max_cloud,
+            "mask_clouds": bool(value.get("mask_clouds", True)), "count": len(spec["output_bands"]),
+            "layout": layout, "priority": priority_option(value), "fill_gaps": fill_gaps}
 
 
 @dataclass(frozen=True)

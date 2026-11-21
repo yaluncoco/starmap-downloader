@@ -67,7 +67,7 @@ def test_desktop_ui_search_download_and_reuse(server, provider, tmp_path):
         pw.expect(page.locator("#planPreviewFolder")).to_contain_text("校验结果")
         page.locator("#confirmDownload").click()
         pw.expect(page.locator("#jobStatus")).to_have_text("下载完成", timeout=12000)
-        pw.expect(page.locator("#jobMessage")).to_contain_text("新保存 1 景")
+        pw.expect(page.locator("#jobMessage")).to_contain_text("新保存 1 份")
         assert len(list((tmp_path / "校验结果").rglob("*.tif"))) == 4
         assert len(list((tmp_path / "校验结果").rglob("*.sources.json"))) == 1
         assert len(provider.process_calls) == 1
@@ -84,7 +84,7 @@ def test_desktop_ui_search_download_and_reuse(server, provider, tmp_path):
         page.locator("#downloadSelected").click()
         page.locator("#confirmDownload").click()
         pw.expect(page.locator("#jobStatus")).to_have_text("下载完成", timeout=12000)
-        pw.expect(page.locator("#jobMessage")).to_contain_text("已有 1 景")
+        pw.expect(page.locator("#jobMessage")).to_contain_text("已有 1 份")
         assert len(provider.process_calls) == 1
         assert not failures
         screenshot = os.environ.get("STARMAP_TEST_SCREENSHOT")

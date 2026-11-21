@@ -9,7 +9,7 @@ from shapely.geometry import box, mapping
 
 import core.service as service
 from core.planning import build_plan
-from conftest import TRIANGLE
+from conftest import P1, TRIANGLE
 
 
 def test_http_session_is_local_and_credentials_are_not_persisted(client, server):
@@ -27,7 +27,7 @@ def test_http_session_is_local_and_credentials_are_not_persisted(client, server)
 def test_full_workflow_multiblock_selection_and_resume(client, provider, tmp_path, monkeypatch):
     monkeypatch.setattr(service, "build_plan", lambda *args: build_plan(*args, tile_size=16))
     request = client.search(TRIANGLE, cloud=20)
-    assert request["scene_keys"] == ["S2A_20240610T030531"]
+    assert request["scene_keys"] == [P1]
     options = request["options"]
     client.post("plan", {**request, "options": {**options, "max_cloud": 21}}, status=400)
     client.post("plan", {**request, "geometry": mapping(box(116, 39, 116.2, 39.2))}, status=400)

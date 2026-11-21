@@ -2,7 +2,7 @@
 
 发布前确认 GitHub `owner/repo` 和可见性。仅**公开 Release** 可由安装版匿名检查；私有仓库分发请走 GitHub 自身的登录下载，不要在程序或构建配置中嵌入凭据。已打包的更新渠道绑定到指定的仓库，换仓库后需要重新打包。
 
-在干净的 PowerShell 7 环境使用可信的 Python、Inno Setup 编译器和本项目的 `.venv`。将示例中的 `OWNER/REPO`、编译器和基线安装包路径换成实际值。
+在干净的 Windows PowerShell 5.1 或 PowerShell 7 环境使用可信的 Python、Inno Setup 编译器和本项目的 `.venv`。将示例中的 `OWNER/REPO`、编译器和基线安装包路径换成实际值。
 
 ```powershell
 $repo = 'OWNER/REPO'
@@ -14,12 +14,14 @@ $asset = ".\dist\StarmapDownloader-Setup-$version-win-x64.exe"
 .\scripts\check_installer.ps1 -Installer $asset -UpgradeFrom 'C:\备份\上一版完整安装包.exe' -UpdateRepository $repo
 ```
 
-1.4.2 的构建脚本会强制检查 GEDI、联合下载、统一账号界面、研究包说明与图标资源（`--require-gedi --require-batch --require-accounts`）。打包后还应验证同一区域与共同日期的真实联网流程：
+当前构建脚本会强制检查 GEDI、联合下载、统一账号界面、研究包说明与图标资源（`--require-gedi --require-batch --require-accounts`）。1.5.0 起还检查空间选择脚本与官方 S3 拼接入口。打包后还应验证同一区域与共同日期的真实联网流程：
 
 ```powershell
 .\.venv\Scripts\python.exe -X utf8 scripts\check_package.py .\dist\StarmapDownloader\StarmapDownloader.exe --require-version $version --require-gedi --require-batch --require-accounts --require-update-repository $repo
 .\.venv\Scripts\python.exe -X utf8 scripts\live_batch.py --exe .\dist\StarmapDownloader\StarmapDownloader.exe --output .\verification\batch\packaged-live
 ```
+
+`live_mosaic.py` 可按 README 的命令，以十个官方 SAFE ZIP 的真实范围检验选块、采集日期及两日期接缝。`--browser` 另外验证真实 Edge 的地图选择与边界删除。原件与区域结果分别核验；缺少实际 SHP 时仅声称以官方范围构造 AOI。
 
 `live_batch.py` 使用同一 SHP 和 UTC 日期检索 Sentinel-2、GEDI 与 DEM，检查缺少 Earthdata 连接时整批下载会被阻止，再实际下载公开 Sentinel-2 和 DEM 并核对像元、网格及校验记录。它不执行受保护的 NASA 下载；该部分需用户在本机界面完成 Earthdata 认证后另行验证。安装回归也可加 `-Batch` 运行同一联网检查；已安装正式版时继续使用独立测试用户，避免影响正式安装。
 

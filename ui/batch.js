@@ -16,7 +16,7 @@ const Batch = {
     return this.configurations.get(profile);
   },
   primaryMayHaveRaster() {
-    return ["s2-process", "s2-earth-search", "s2-l2a-cog", "s2-l3-quarterly", "landsat-pc-l2", "s1-rtc-pc", "s1-aws-original", "dem-30", "dem-90", "worldcover-s2", "worldcover-s1", "worldcover-map"].includes(state.profile) || state.profile.startsWith("modis-") || isGedi();
+    return ["s2-process", "s2-earth-search", "s2-cdse-s3", "s2-l2a-cog", "s2-l3-quarterly", "landsat-pc-l2", "s1-rtc-pc", "s1-aws-original", "dem-30", "dem-90", "worldcover-s2", "worldcover-s1", "worldcover-map"].includes(state.profile) || state.profile.startsWith("modis-") || isGedi();
   },
   initialize(sources) {
     this.sources = sources;
@@ -70,19 +70,19 @@ const Batch = {
     return value;
   },
   searchReady() {
-    return !this.checked.has("s2-process") || state.connected;
+    return (!this.checked.has("s2-process") || state.connected) && (!this.checked.has("s2-cdse-s3") || state.s3Connected);
   },
   recommendedAccount() {
     if ((isGedi() || this.checked.has("gedi-earthdata")) && !state.earthdataConnected) return "earthdata";
     if ((isProcess() || this.checked.has("s2-process")) && !state.connected) return "oauth";
-    if (isOfficial() || this.checked.has("cdse-original")) return "cdse";
+    if (isOfficial() || isNativeS3() || this.checked.has("cdse-original") || this.checked.has("s2-cdse-s3")) return "cdse";
     return isProcess() ? "oauth" : "earthdata";
   },
   renderChoices() {
     const term = $("companionFilter").value.trim().toLocaleLowerCase();
     $("companionSources").innerHTML = this.sources.filter(source => !term || `${source.title} ${source.group} ${source.id}`.toLocaleLowerCase().includes(term) || this.checked.has(source.id)).map(source => {
       const primary = source.id === state.profile;
-      return `<label class="asset-entry"><input type="checkbox" data-companion="${escapeHtml(source.id)}" aria-label="附带 ${escapeHtml(source.title)}" ${this.checked.has(source.id) ? "checked" : ""} ${primary || state.busy || state.connecting ? "disabled" : ""} ${primary ? 'data-primary="1"' : ""} data-lock><span><strong>${escapeHtml(source.title)}</strong><small>${primary ? "当前主来源" : source.auth === "earthdata" ? "需要 NASA Earthdata" : source.auth === "sentinel-hub" ? "需要 Sentinel Hub OAuth" : source.auth === "cdse" ? "按下载通道使用 CDSE 凭据" : "无需个人登录"}</small></span></label>`;
+      return `<label class="asset-entry"><input type="checkbox" data-companion="${escapeHtml(source.id)}" aria-label="附带 ${escapeHtml(source.title)}" ${this.checked.has(source.id) ? "checked" : ""} ${primary || state.busy || state.connecting ? "disabled" : ""} ${primary ? 'data-primary="1"' : ""} data-lock><span><strong>${escapeHtml(source.title)}</strong><small>${primary ? "当前主来源" : source.auth === "earthdata" ? "需要 NASA Earthdata" : source.auth === "sentinel-hub" ? "需要 Sentinel Hub OAuth" : source.auth === "cdse-s3" ? "需要 CDSE S3 密钥" : source.auth === "cdse" ? "按下载通道使用 CDSE 凭据" : "无需个人登录"}</small></span></label>`;
     }).join("");
     $("companionCount").textContent = this.checked.size ? `${this.checked.size} 个来源` : "可选";
     $("companionDateNote").hidden = !this.enabled();
@@ -134,6 +134,9 @@ const Batch = {
         if (o.mode === "custom") { if (!o.bands) o.bands = ["B04", "B03", "B02", "B08"]; fields += arrays("bands", allBands.map(b => [b, b]), o.bands); }
         fields += select("resolution", "输出像元大小", [10, 20, 60].map(n => [n, n + " 米"]), o.resolution);
         fields += check("mask_clouds", "去除云、薄云和云阴影", o.mask_clouds);
+        if (profile === "s2-cdse-s3") fields += '<p class="field-note">官方原件完整校验后拼接；首次会保存较大的原始波段与 XML 缓存。</p>';
+        else fields += select("layout", "区域输出方式", [["mosaic", "跨日期拼接 · 一份研究区影像"], ["series", "时间序列 · 每个产品分别导出"]], o.layout || "mosaic");
+        if ((o.layout || "mosaic") === "mosaic") fields += check("fill_gaps", "用已选影像补齐云和无数据位置", o.fill_gaps !== false);
       } else if (source.kind === "rtc") {
         fields += arrays("bands", ["VV", "VH", "HH", "HV"].map(b => [b, b]), o.bands);
         fields += select("resolution", "输出像元大小", [10, 20, 40, 60].map(n => [n, n + " 米"]), o.resolution);
@@ -152,6 +155,7 @@ const Batch = {
     if (this.checked.has("gedi-earthdata")) needs.push(state.earthdataConnected ? "Earthdata 已载入" : "GEDI 需要 Earthdata");
     if (this.checked.has("s2-process")) needs.push(state.connected ? "Sentinel Hub 已连接" : "Sentinel Hub 需要 OAuth");
     if (this.checked.has("cdse-original")) needs.push(state.rawConnected || state.s3Connected ? "CDSE 凭据已载入" : "CDSE 需按通道登录");
+    if (this.checked.has("s2-cdse-s3")) needs.push(state.s3Connected ? "S3 密钥已载入" : "官方像元读取需要 S3 密钥");
     $("companionAuthNote").hidden = !needs.length; $("companionAuthNote").textContent = needs.join(" · ");
     Accounts.visibility();
   },
@@ -177,13 +181,14 @@ const Batch = {
       newQuery = ["collection", "max_cloud", "radar_mode"].includes(key);
     }
     if (newQuery) clearScenes();
-    if (["collection", "mode"].includes(field.dataset.option) || field.hasAttribute("data-alignment")) this.renderSettings();
+    if (["collection", "mode", "layout"].includes(field.dataset.option) || field.hasAttribute("data-alignment")) this.renderSettings();
     if (profile === "cdse-original" && !state.collections.length) loadCollections().then(() => this.renderSettings());
-    if (!newQuery) { this.renderResults(); schedulePlan(); }
+    if (!newQuery) { this.renderResults(); schedulePlan(); Spatial.refresh(); }
     updateAvailability();
   },
   optionsFor(profile) {
     const config = this.settings(profile), result = structuredClone(config.options);
+    if (profile === "s2-cdse-s3") result.layout = "mosaic";
     if (profile === "gedi-earthdata") {
       result.reference_path = config.alignment === "reference" && result.mode !== "original" ? result.reference_path || "" : "";
       result.sample_reference = config.alignment === "reference" && config.sample && result.mode !== "original";
@@ -217,7 +222,7 @@ const Batch = {
     this.results.clear();
     for (const group of batch.groups.slice(1)) {
       const source = this.source(group.profile);
-      const selected = new Set(group.scenes.filter(scene => scene.gedi ? scene.gedi.available : scene.raw ? scene.raw.available : true).map(scene => scene.key));
+      const selected = new Set(group.scenes.filter(scene => Spatial.available(scene)).map(scene => scene.key));
       const assets = new Map(group.scenes.map(scene => {
         const available = this.assetsFor(scene);
         const defaults = source.default_assets.length ? available.filter(asset => source.default_assets.includes(asset.id)) : available.filter(asset => !/\.(xml|json|txt|safe)$/i.test(asset.name));
@@ -240,12 +245,13 @@ const Batch = {
     $("scenesTableWrap").hidden = !primary || !state.scenes.length;
     $("scenesEmpty").hidden = !primary || !!state.scenes.length;
     $("companionResults").hidden = primary;
+    Spatial.refresh();
     if (primary) return;
     const group = this.results.get(this.active);
     if (!group) { this.active = "primary"; this.renderResults(); return; }
     const source = this.source(group.profile), config = this.settings(group.profile);
     $("companionResults").innerHTML = `<p class="companion-result-note">${escapeHtml(source.title)} · ${escapeHtml(this.query.shared_dates.start)} — ${escapeHtml(this.query.shared_dates.end)} UTC · 已选 ${group.selected.size} 个。${escapeHtml(group.time_note || source.time_note)}</p>` + (group.error ? `<p class="companion-error">检索失败：${escapeHtml(group.error)}</p>` : !group.scenes.length ? '<p class="companion-result-note">相同研究区和日期没有匹配数据；计划会记录该结果。</p>' : "") + group.scenes.map(scene => {
-      const available = scene.gedi ? scene.gedi.available : scene.raw ? scene.raw.available : true;
+      const available = Spatial.available(scene);
       const selected = group.selected.has(scene.key), assets = this.assetsFor(scene);
       const assetList = config.options.mode === "assets" && selected ? `<details><summary>原始文件 · 已选 ${(group.assets.get(scene.key) || new Set()).size} / ${assets.length}</summary><div class="asset-checklist">${assets.map(asset => `<label class="asset-entry"><input type="checkbox" data-companion-asset="${escapeHtml(asset.id)}" data-scene="${escapeHtml(scene.key)}" ${group.assets.get(scene.key)?.has(asset.id) ? "checked" : ""} ${state.busy ? "disabled" : ""}><span><strong>${escapeHtml(asset.title || asset.id)}</strong><small>${escapeHtml(asset.name)}${asset.bytes ? " · " + sizeLabel(asset.bytes) : ""}</small></span></label>`).join("")}</div></details>` : "";
       return `<div class="companion-scene"><label class="companion-scene-label"><input type="checkbox" data-companion-scene="${escapeHtml(scene.key)}" ${selected ? "checked" : ""} ${!available || state.busy ? "disabled" : ""} ${!available ? 'data-unavailable="1"' : ""}><span><strong>${escapeHtml(scene.title || scene.key)}</strong><small>${escapeHtml(scene.date)} ${escapeHtml(scene.time)} UTC · ${escapeHtml(scene.tiles?.join(" / "))}${scene.gedi?.estimated_bytes ? " · " + sizeLabel(scene.gedi.estimated_bytes) : ""}${!available ? " · " + escapeHtml(scene.gedi?.unavailable_reason || scene.raw?.unavailable_reason || "无可用入口") : ""}</small></span></label>${assetList}</div>`;
@@ -254,6 +260,7 @@ const Batch = {
   changeResult(event) {
     const group = this.results.get(this.active), input = event.target;
     if (!group || state.busy) return;
+    Spatial.touched.add(group.id);
     if (input.hasAttribute("data-companion-scene")) {
       const key = input.dataset.companionScene;
       if (input.checked) group.selected.add(key); else group.selected.delete(key);
@@ -261,13 +268,13 @@ const Batch = {
       const picked = group.assets.get(input.dataset.scene);
       if (input.checked) picked.add(input.dataset.companionAsset); else picked.delete(input.dataset.companionAsset);
     }
-    this.renderResults(); schedulePlan();
+    this.renderResults(); schedulePlan(); Spatial.refresh();
   },
   selectAll(clear = false) {
     const group = this.results.get(this.active);
     if (!group) return false;
-    group.selected = clear ? new Set() : new Set(group.scenes.filter(scene => scene.gedi ? scene.gedi.available : scene.raw ? scene.raw.available : true).map(scene => scene.key));
-    this.renderResults(); schedulePlan(); return true;
+    group.selected = clear ? new Set() : new Set(group.scenes.filter(scene => Spatial.available(scene)).map(scene => scene.key));
+    this.renderResults(); schedulePlan(); Spatial.refresh(); return true;
   },
   updateReferences(plan) {
     if (plan?.kind !== "batch") return;
@@ -289,6 +296,10 @@ const Batch = {
       html += `<div class="plan-source-summary">${group.selected_count} / ${group.matched_count} 个结果 · 约 ${sizeLabel(group.estimated_bytes)}<br>${h(group.time_note)}</div>`;
       for (const p of group.plans.slice(0, 3)) {
         const detail = p.kind === "gedi" ? gediPlanItems(p) : p.kind === "original" ? [["下载内容", p.options.mode === "metadata" ? "元数据" : `${p.requests} 个原始文件`], ["文件", p.targets.slice(0, 6).map(t => t.name).join(" / ")]] : [["输出网格", `${p.width} × ${p.height} · ${p.resolution} 米`], ["输出内容", p.options.label], ["坐标系", p.crs_label]];
+        if (p.kind === "mosaic") detail.unshift(["拼接产品", `${p.source_count} 个区块 / 1 份区域输出`],
+          ["选中采集日期（UTC）", p.dates.join(" / ")], ["产品边界覆盖", `${p.coverage.coverage_percent.toFixed(2)}% · 未覆盖 ${p.coverage.uncovered_percent.toFixed(2)}%`],
+          ["交叠优先级", p.coverage.priority_label]);
+        if (p.transport === "cdse-s3" && p.kind === "mosaic") detail.push(["官方原件缓存", `${p.source_objects} 个原件 · 约 ${sizeLabel(p.native_source_bytes)}`]);
         for (const [label, value] of detail) html += `<div class="plan-item"><span>${h(label)}</span><strong class="plan-path">${h(value)}</strong></div>`;
       }
       if (group.plans.length > 3) html += `<div class="plan-source-summary">另 ${group.plans.length - 3} 个产品的文件选择已计入计划。</div>`;

@@ -24,6 +24,9 @@ from .geometry import describe_aoi, load_aoi, normalize_aoi, parse_coordinates, 
 from .http import AuthManager, HttpClient, check_cancel
 from .local_paths import display_path, io_path
 from .planning import build_plan, normalize_options
+from .mosaic import build_mosaic_plan
+from .native_mosaic import PROFILE as S2_NATIVE, download_native_mosaic, search_native
+from .spatial_selection import coverage_summary, priority_option, split_process_scenes
 from .native_catalogue import collection_id, list_collections, search_original
 from .open_l2a import ES_COLLECTION, S2_L2A_COG, search_l2a
 from .open_l3 import COLLECTION as L3_COLLECTION, S2_L3_PUBLIC, search_l3
@@ -52,7 +55,7 @@ NATIVE_OPEN = {S1_PUBLIC: (S1_CATALOGUE, "public"), S2_L1C_OPEN: (L1C_COLLECTION
                S5P_PUBLIC: (None, "public"), SEN3_PUBLIC: (None, "public"), S1_SLC: (SLC_COLLECTION, "public"),
                **{profile: (profile, "public") for profile in WORLD_COVER},
                **{profile: (profile, "pc-public") for profile in MODIS}}
-PROFILE_IDS = (S2_PROCESS, S2_PUBLIC, *NATIVE_OPEN, S1_RTC, DEM_30, DEM_90, GEDI, ORIGINAL)
+PROFILE_IDS = (S2_PROCESS, S2_PUBLIC, S2_NATIVE, *NATIVE_OPEN, S1_RTC, DEM_30, DEM_90, GEDI, ORIGINAL)
 RADAR_MODES = ("", "IW", "EW", "SM", "WV")
 
 
@@ -352,7 +355,7 @@ class Service:
                         groups = result["batch"]["groups"]
                         job.data["message"] = f"联合检索完成 · {len(groups)} 个来源 · {sum(len(g['scenes']) for g in groups)} 个结果"
                     elif kind == "search":
-                        unit = "次过境" if result["query"]["profile"] == S2_PROCESS else " 个匹配项"
+                        unit = " 个影像区块" if result["query"]["profile"] == S2_PROCESS else " 个匹配项"
                         job.data["message"] = f"找到 {len(result['scenes'])}{unit}"
                     elif kind == "batch-download":
                         groups = result["sources"]
@@ -373,6 +376,10 @@ class Service:
                                 job.data["message"] = f"GEDI 下载完成 · 新保存 {saved} 个文件 · 已有 {skipped} 个"
                         elif result["plan"].get("kind") == "original":
                             job.data["message"] = f"新保存 {saved} 个原始文件 · 完整性验证后跳过 {skipped} 个"
+                        elif result["plan"].get("kind") == "mosaic":
+                            dates = " / ".join(result.get("used_dates", []))
+                            job.data["message"] = (f"区域拼接 · 新保存 {saved} 份 · 已有 {skipped} 份 · 实际来源日期 {dates} UTC"
+                                                   if dates else "所选区块在研究区没有有效输出像元")
                         else:
                             job.data["message"] = f"新保存 {saved} 景 · 已有 {skipped} 景 · 无有效像元 {len(result['empty_scenes'])} 景"
             except Cancelled:
@@ -428,8 +435,12 @@ class Service:
         elif profile == S2_PUBLIC:
             scenes = search_earth(geometry, dt.date.fromisoformat(start), dt.date.fromisoformat(end) + dt.timedelta(days=1),
                                   criteria["max_cloud"], **kwargs)
+        elif profile == S2_NATIVE:
+            scenes = search_native(geometry, start, end, criteria["max_cloud"], self.s3_auth,
+                                   self.config_dir / "native-catalogue", **kwargs)
         else:
             scenes = find_scenes(geometry, start, end, criteria["max_cloud"], self.auth, **kwargs)
+            scenes = split_process_scenes(geometry, scenes)
         return scenes
 
     def batch_search(self, value):
@@ -516,18 +527,23 @@ class Service:
             options = normalize_options(supplied)
             if options["max_cloud"] != query["max_cloud"]:
                 raise UserError("云量上限已变化，请重新检索。")
-            if profile == S2_PUBLIC:
+            if profile in (S2_PUBLIC, S2_NATIVE):
                 options["profile"] = profile
+            if profile == S2_NATIVE:
+                if options["layout"] != "mosaic":
+                    raise UserError("官方 S3 区域读取采用单份拼接；逐产品时间序列请使用现有区域通道。")
+                if any(not scene["native"]["available"] for scene in scenes):
+                    raise UserError("所选产品缺少官方 S3 研究原件，无法完整拼接。")
         return options
 
-    def _selection(self, value):
+    def _selection(self, value, *, coverage=False):
         geometry = normalize_aoi(value.get("geometry"))
         profile = _profile(value)
         supplied = value.get("options", {})
         if not isinstance(supplied, dict):
             raise UserError("导出选项无效。")
         keys = value.get("scene_keys")
-        if not isinstance(keys, list) or not 1 <= len(keys) <= 500 or any(not isinstance(key, str) for key in keys):
+        if not isinstance(keys, list) or not (0 if coverage else 1) <= len(keys) <= 500 or any(not isinstance(key, str) for key in keys):
             raise UserError("每批请选择 1～500 个结果。")
         if len(keys) != len(set(keys)):
             raise UserError("影像选择中有重复项。")
@@ -542,19 +558,30 @@ class Service:
                 if not isinstance(criteria, dict) or any(query.get(k) != v for k, v in _criteria(criteria, profile).items()):
                     raise UserError("类别、日期或筛选条件已变化，请重新检索。")
             scenes = [self.scenes[key] for key in keys]
-            options = self._selection_options(profile, query, supplied, scenes)
+            options = {"priority": priority_option(supplied)} if coverage else self._selection_options(profile, query, supplied, scenes)
             return profile, geometry, options, [self.scenes[key] for key in keys]
+
+    def coverage(self, value):
+        with self.lock:
+            if value.get("batch_id") and value.get("group_id", "primary") != "primary":
+                return self.batch.coverage(value)
+            _, geometry, options, scenes = self._selection(value, coverage=True)
+            return coverage_summary(geometry, list(self.scenes.values()), [s["key"] for s in scenes], options["priority"])
 
     def _plan_source(self, profile, geometry, options, scenes, criteria):
         if profile == GEDI:
             return build_gedi_plan(geometry, scenes, options, criteria)
         if "transport" in options:
             return raw_plan(geometry, scenes, options)
+        if options.get("layout") == "mosaic":
+            return build_mosaic_plan(geometry, scenes, options)[0]
         if profile != S2_PROCESS:
             return public_plan(geometry, scenes, options)[0]
         return build_plan(geometry, options, len(scenes))[0]
 
     def _run_source(self, profile, geometry, options, scenes, plan, output_dir, *, cancel=None, progress=None):
+        if profile == S2_NATIVE:
+            return download_native_mosaic(geometry, scenes, options, output_dir, self.s3_auth, cancel=cancel, progress=progress)
         if profile == GEDI:
             return download_gedi(geometry, plan, output_dir, self.earthdata_auth, cancel=cancel, progress=progress)
         if "transport" in options:
@@ -599,14 +626,29 @@ class Service:
                     if profile == SEN3_PUBLIC:
                         return download_sen3(geometry, plan, output_dir, cancel=cancel, progress=progress)
                     return download_original(geometry, plan, output_dir, self.raw_auth, s3_auth=self.s3_auth, cancel=cancel, progress=progress)
+            elif profile == S2_NATIVE:
+                if not self.s3_auth.connected:
+                    raise UserError("请先连接 CDSE S3 Access Key 和 Secret Key，以读取官方原始像元。")
+                plan = build_mosaic_plan(geometry, scenes, options)
+                if value.get("plan_fingerprint", plan[0]["fingerprint"]) != plan[0]["fingerprint"]:
+                    raise UserError("拼接区块或优先级已变化，请重新确认下载计划。")
+                def run(cancel, progress):
+                    return download_native_mosaic(geometry, scenes, options, output_dir, self.s3_auth,
+                                                  cancel=cancel, progress=progress, planned=plan)
             elif profile == S2_PROCESS:
                 if not self.auth.connected:
                     raise UserError("请先连接 Sentinel Hub OAuth 客户端凭据。")
-                plan = build_plan(geometry, options, len(scenes))
+                plan = (build_mosaic_plan(geometry, scenes, options) if options.get("layout") == "mosaic"
+                        else build_plan(geometry, options, len(scenes)))
+                if options.get("layout") == "mosaic" and value.get("plan_fingerprint", plan[0]["fingerprint"]) != plan[0]["fingerprint"]:
+                    raise UserError("拼接区块或优先级已变化，请重新确认下载计划。")
                 def run(cancel, progress):
                     return download_scenes(geometry, scenes, options, output_dir, self.auth, cancel=cancel, progress=progress, planned=plan)
             else:
-                plan = public_plan(geometry, scenes, options)
+                plan = (build_mosaic_plan(geometry, scenes, options) if options.get("layout") == "mosaic"
+                        else public_plan(geometry, scenes, options))
+                if options.get("layout") == "mosaic" and value.get("plan_fingerprint", plan[0]["fingerprint"]) != plan[0]["fingerprint"]:
+                    raise UserError("拼接区块或优先级已变化，请重新确认下载计划。")
                 def run(cancel, progress):
                     return download_public(geometry, scenes, options, output_dir, cancel=cancel, progress=progress, planned=plan)
             self.save_preferences({"output_dir": output_dir})
