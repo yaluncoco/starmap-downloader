@@ -120,6 +120,47 @@ def test_coverage_uses_union_gaps_holes_and_adjustable_priority():
     assert coverage_summary(geometry, scenes, [], "cloud")["uncovered_percent"] == 100
 
 
+def test_recommendation_prunes_early_fringe_only_when_later_products_cover_it_completely():
+    geometry = box(116, 39, 117, 40)
+    east = P2.replace("T50TMK", "T50TML")
+    scenes = [row(P1, D1, box(116, 39, 116.001, 40), cloud=0),
+              row(P2, "2024-06-05T03:16:50.631Z", box(116, 39, 116.6, 40), cloud=1),
+              row(east, "2024-06-05T03:16:35Z", box(116.5, 39, 117, 40), cloud=2)]
+    result = coverage_summary(geometry, scenes, [], "cloud")
+    assert result["recommended_keys"] == [P2, east]
+    assert result["recommended_omitted_keys"] == [P1]
+    chosen = coverage_summary(geometry, scenes, result["recommended_keys"], "cloud")
+    assert chosen["coverage_percent"] == 100 and chosen["uncovered_percent"] == 0
+    assert shape(chosen["covered"]).equals(geometry)
+    # A small but real uncovered extension must not be sacrificed to reduce the count.
+    scenes[0]["products"][0]["footprint"] = mapping(box(115.99999, 39, 116.001, 40))
+    geometry = unary_union([footprint(scene) for scene in scenes])
+    with_fringe = coverage_summary(geometry, scenes, [], "cloud")
+    assert P1 in with_fringe["recommended_keys"]
+    assert coverage_summary(geometry, scenes, with_fringe["recommended_keys"], "cloud")["uncovered_percent"] == 0
+
+
+def test_overpass_display_unions_only_true_members_and_keeps_selected_extent_exact():
+    left = box(116, 39, 116.6, 40).difference(box(116.1, 39.1, 116.2, 39.2))
+    east = P1.replace("T50TMK", "T50TML")
+    scenes = [row(P1, D1, left), row(east, D1, box(116.5, 39, 117, 40)),
+              row(P2, D1, box(117.1, 39, 118, 40))]
+    # Even a bad caller-supplied overpass label cannot combine another satellite.
+    scenes[2]["overpass_key"] = scenes[0]["overpass_key"]
+    result = coverage_summary(box(116.3, 39.3, 116.4, 39.4), scenes, [P1, P2], "cloud")
+    assert result["acquisition_count"] == 2 and len(result["footprint_groups"]) == 2
+    group = next(g for g in result["footprint_groups"] if P1 in g["scene_keys"])
+    assert group["scene_keys"] == [P1, east] and group["selected_keys"] == [P1]
+    assert shape(group["selected_footprint"]).equals(left)
+    assert shape(group["footprint"]).equals(unary_union([left, footprint(scenes[1])]))
+    assert not shape(group["selected_footprint"]).intersects(box(116.12, 39.12, 116.18, 39.18))
+    # Full footprint display is independent of the small AOI intersection.
+    assert shape(group["selected_footprint"]).area > shape(result["covered"]).area * 10
+    scenes[1]["date"] = "2024-06-11"
+    split_day = coverage_summary(box(116, 39, 118, 40), scenes, [P1], "cloud")
+    assert len(split_day["footprint_groups"]) == 3
+
+
 def test_mosaic_fills_cloud_and_nodata_with_selected_products_on_one_grid(tmp_path):
     geometry = AOI.difference(box(116.351, 39.901, 116.352, 39.902))
     scenes, opts = two_rows(), options()

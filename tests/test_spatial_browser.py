@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import os
+import json
 import re
 import threading
+from pathlib import Path
 
 import pytest
 from shapely.geometry import box
@@ -41,14 +43,33 @@ def test_persistent_leaf_footprints_select_overlapping_dates_and_download_one_mo
         browser, page = browser_page(driver, server)
         page.on("pageerror", lambda error: failures.append(str(error)))
         pw.expect(page.locator("#scenesBody tr")).to_have_count(3)
-        pw.expect(page.locator("#coverageSummary")).to_contain_text("已选 2 块")
+        pw.expect(page.locator("#coverageSummary")).to_contain_text("已选 2 个产品")
         pw.expect(page.locator("#coverageSummary")).to_contain_text("100.00%")
         pw.expect(page.locator("#coverageDates")).to_contain_text("2 个日期")
-        assert page.evaluate("footprintLayer.getLayers().length") == 3
+        pw.expect(page.locator("#mapFootprintScope")).to_have_value("selected")
+        page.wait_for_function("()=>Spatial.summary?.selected_count===2 && footprintLayer.getLayers().length===2")
+        assert page.evaluate("Spatial.allocation.getLayers().length") == 0
         assert page.evaluate("[...Spatial.layers.values()].every(g=>g.getLayers().every(l=>l.getLayers().every(p=>p.options.dashArray==='6,5')))")
         page.locator("#scenesBody tr").first.hover()
         page.locator("#sceneCount").hover()
+        assert page.evaluate("footprintLayer.getLayers().length") == 2
+        selected_before = page.evaluate("[...state.selected]")
+        plan_version = page.evaluate("state.planVersion")
+        page.locator("#mapFootprintScope").select_option("candidates")
+        page.locator("#mapFootprintDetail").select_option("products")
         assert page.evaluate("footprintLayer.getLayers().length") == 3
+        page.locator("#mapFootprintDate").select_option("2024-06-05")
+        assert page.evaluate("footprintLayer.getLayers().length") == 2
+        pw.expect(page.locator("#mapFootprintDates")).not_to_contain_text("2024-06-10")
+        pw.expect(page.locator("#coverageDates")).to_contain_text("2 个日期")
+        map_click(page, 116.351, 39.903)
+        pw.expect(page.locator(".footprint-popup")).to_contain_text("此处覆盖 1 个产品")
+        page.locator(".leaflet-popup-close-button").click()
+        pw.expect(page.locator(".footprint-popup")).to_have_count(0)
+        assert page.evaluate("[...state.selected]") == selected_before
+        assert page.evaluate("state.planVersion") == plan_version
+        page.locator("#mapFootprintScope").select_option("selected")
+        page.locator("#mapFootprintDetail").select_option("overpass")
         # An overlapping point exposes both dates instead of selecting an arbitrary top polygon.
         map_click(page, 116.351, 39.903)
         pw.expect(page.locator(".footprint-popup")).to_contain_text("此处覆盖 2 个产品")
@@ -62,6 +83,11 @@ def test_persistent_leaf_footprints_select_overlapping_dates_and_download_one_mo
         assert not page.locator(f'tr[data-key="{P1}"] input').is_checked()
         pw.expect(page.locator("#coverageDates")).to_contain_text("1 个日期")
         page.locator(".leaflet-popup-close-button").click()
+        page.wait_for_function("()=>Spatial.summary?.selected_count===2 && footprintLayer.getLayers().length===1")
+        pw.expect(page.locator("#mapFootprintCount")).to_contain_text("1 组 · 2 个产品")
+        page.locator("#mapAllocation").check()
+        assert page.evaluate("Spatial.allocation.getLayers().length") == 2
+        page.locator("#mapAllocation").uncheck()
         page.locator("#coverageDetails summary").click()
         page.locator("#coverageBlockList [data-move='1']").first.click()
         pw.expect(page.locator("#spatialPriority")).to_have_value("selection")
@@ -76,6 +102,62 @@ def test_persistent_leaf_footprints_select_overlapping_dates_and_download_one_mo
         pw.expect(page.locator("#jobFiles .job-file")).to_have_count(1)
         assert {p["id"] for call in provider.process_calls for p in __import__("json").loads(
             re.search(r"^var allowed = (.*);$", call["json"]["evalscript"], re.M)[1])} == {P2.removesuffix(".SAFE"), east.removesuffix(".SAFE")}
+        assert failures == []
+        browser.close()
+
+
+@pytest.mark.browser
+def test_ten_official_products_show_four_true_overpasses_and_fit_full_extents(server, client, provider, tmp_path):
+    pw = pytest.importorskip("playwright.sync_api")
+    fixture = json.loads((Path(__file__).parent / "fixtures/optical/s2-2604-reference.json").read_text(encoding="utf-8"))
+    from shapely.geometry import shape, mapping
+    provider.catalogue = [feature(p["product_id"], p["acquisition_utc"], p["cloud"], shape(p["footprint"]))
+                          for p in fixture["products"]]
+    geometry = unary_union([shape(p["footprint"]) for p in fixture["products"]])
+    client.post("connect", {"client_id": "mock-client", "client_secret": "mock-secret"})
+    client.post("aoi", {"geometry": mapping(geometry)})
+    found = client.post("search", {"geometry": mapping(geometry), "start": "2026-04-08", "end": "2026-04-20", "max_cloud": 100})
+    client.wait(found["job_id"])
+    with pw.sync_playwright() as driver:
+        browser, page = browser_page(driver, server)
+        failures = []
+        page.on("pageerror", lambda error: failures.append(str(error)))
+        page.wait_for_function("()=>Spatial.summary?.selected_count===10 && footprintLayer.getLayers().length===4")
+        page.wait_for_function("()=>!Spatial.zooming && !Spatial.fitPending")
+        pw.expect(page.locator("#coverageSummary")).to_contain_text("4 次过境 · 9 个瓦片 · 覆盖 100.00%")
+        pw.expect(page.locator("#mapFootprintCount")).to_contain_text("4 组 · 10 个产品")
+        assert page.evaluate("map.getBounds().contains(footprintLayer.getBounds())")
+        pw.expect(page.locator(".leaflet-control-scale")).to_be_visible()
+        page.screenshot(path=str(tmp_path / "ten-safe-overpass.png"), full_page=True)
+        old_height = page.locator("#map").bounding_box()["height"]
+        page.locator("#mapExpand").click()
+        pw.expect(page.locator("#mapExpand")).to_have_attribute("aria-pressed", "true")
+        pw.expect(page.locator(".scenes-panel")).to_be_hidden()
+        assert page.locator("#map").bounding_box()["height"] > old_height + 100
+        assert page.evaluate("map.getBounds().contains(footprintLayer.getBounds()) && state.selected.size===10")
+        page.screenshot(path=str(tmp_path / "ten-safe-overpass-expanded.png"), full_page=True)
+        page.locator("#mapExpand").click()
+        pw.expect(page.locator("#mapExpand")).to_have_attribute("aria-pressed", "false")
+        pw.expect(page.locator(".scenes-panel")).to_be_visible()
+        page.locator("#mapFootprintDetail").select_option("products")
+        assert page.evaluate("footprintLayer.getLayers().length") == 10
+        page.locator("#mapFootprintDate").select_option("2026-04-11")
+        assert page.evaluate("footprintLayer.getLayers().length") == 6
+        assert page.evaluate("state.selected.size") == 10
+        page.locator("#mapFootprintDetail").select_option("overpass")
+        assert page.evaluate("footprintLayer.getLayers().length") == 1
+        page.locator("#selectNone").click()
+        page.wait_for_function("()=>state.selected.size===0 && footprintLayer.getLayers().length===0")
+        pw.expect(page.locator("#mapFootprintCount")).to_contain_text("尚未选片")
+        page.locator("#mapFootprintScope").select_option("candidates")
+        page.wait_for_function("()=>Spatial.summary?.selected_count===0 && footprintLayer.getLayers().length===4")
+        page.locator("#mapFootprintDate").select_option("2026-04-18")
+        assert page.evaluate("footprintLayer.getLayers().length") == 1
+        pw.expect(page.locator("#mapFootprintCount")).to_contain_text("1 组 · 1 个产品")
+        page.locator("#recommendCoverage").click()
+        page.wait_for_function("()=>Spatial.summary?.selected_count===10 && footprintLayer.getLayers().length===4")
+        pw.expect(page.locator("#mapFootprintScope")).to_have_value("selected")
+        pw.expect(page.locator("#mapFootprintDate")).to_have_value("all")
         assert failures == []
         browser.close()
 

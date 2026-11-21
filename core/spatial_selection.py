@@ -105,6 +105,65 @@ def ordered_scenes(scenes, priority="cloud"):
     return sorted(scenes, key=rank)
 
 
+def acquisition_identity(scene):
+    """Only combine products belonging to the same satellite and exact datatake."""
+    identities = set()
+    for product in scene.get("products", []):
+        identifier = product.get("id")
+        parsed = SAFE_ID.fullmatch(identifier) if isinstance(identifier, str) else None
+        if not parsed:
+            return scene["key"]
+        identities.add(parsed[1] + "_" + parsed[2])
+    return identities.pop() if len(identities) == 1 else scene["key"]
+
+
+def footprint_groups(scenes, full_regions, selected_keys):
+    """Union real full footprints; never draw an enclosing rectangle or unselected extent."""
+    groups = {}
+    selected = set(selected_keys)
+    for scene in scenes:
+        if scene["key"] not in full_regions:
+            continue
+        identity = acquisition_identity(scene)
+        # A datatake may cross UTC midnight. Date filters must still show the actual day.
+        key = identity + "|" + str(scene.get("date") or "")
+        groups.setdefault(key, {"key": key, "acquisition": identity, "date": scene.get("date"),
+                                "scenes": []})["scenes"].append(scene)
+    result = []
+    for group in groups.values():
+        members = group.pop("scenes")
+        chosen = [scene for scene in members if scene["key"] in selected]
+        group.update(scene_keys=[scene["key"] for scene in members],
+                     selected_keys=[scene["key"] for scene in chosen],
+                     footprint=mapping(polygonal(unary_union([full_regions[scene["key"]] for scene in members]))),
+                     selected_footprint=(mapping(polygonal(unary_union([full_regions[scene["key"]] for scene in chosen])))
+                                         if chosen else None))
+        result.append(group)
+    return result
+
+
+def recommended_coverage(scenes, regions, priority):
+    """Prefer the requested priority, then remove fully replaceable coverage sources."""
+    initial, accumulated = [], GeometryCollection()
+    for scene in ordered_scenes([s for s in scenes if available(s) and s["key"] in regions], priority):
+        region = regions[scene["key"]]
+        extra = polygonal(region.difference(accumulated))
+        # Sub-square-metre coordinate noise is not another useful image block.
+        if polygon_area(extra) > 1e-6:
+            initial.append(scene["key"])
+            accumulated = polygonal(unary_union([accumulated, region]))
+    retained = list(initial)
+    for key in reversed(initial):
+        # Dissolve the original remaining regions together, rather than previously
+        # dissolved prefix/suffix shapes whose extra vertices can leave round-off seams.
+        others = polygonal(unary_union([regions[other] for other in retained if other != key]))
+        # No area threshold here: a genuinely unique fringe must survive pruning.
+        if polygonal(regions[key].difference(others)).is_empty:
+            retained.remove(key)
+    retained_keys = set(retained)
+    return retained, [key for key in initial if key not in retained_keys]
+
+
 def coverage_summary(geometry, scenes, selected_keys, priority="cloud"):
     """All decisions use actual footprint/AOI intersections, never the basemap grid."""
     priority_option({"priority": priority})
@@ -112,10 +171,11 @@ def coverage_summary(geometry, scenes, selected_keys, priority="cloud"):
     if len(selected_keys) != len(set(selected_keys)) or any(key not in known for key in selected_keys):
         raise UserError("影像区块选择已经变化，请重新选择。")
     area = polygon_area(geometry)
-    regions, missing = {}, []
+    regions, full_regions, missing = {}, {}, []
     for scene in scenes:
         try:
-            regions[scene["key"]] = polygonal(geometry.intersection(footprint(scene)))
+            full_regions[scene["key"]] = footprint(scene)
+            regions[scene["key"]] = polygonal(geometry.intersection(full_regions[scene["key"]]))
         except UserError:
             missing.append(scene["key"])
     if any(key in missing for key in selected_keys):
@@ -130,14 +190,7 @@ def coverage_summary(geometry, scenes, selected_keys, priority="cloud"):
         assigned[key] = polygonal(region.difference(covered))
         covered = polygonal(unary_union([covered, region]))
         ranks[key] = rank
-    recommendation, accumulated = [], GeometryCollection()
-    for scene in ordered_scenes([s for s in scenes if available(s) and s["key"] in regions], priority):
-        region = regions[scene["key"]]
-        extra = polygonal(region.difference(accumulated))
-        # Sub-square-metre coordinate noise is not another useful image block.
-        if polygon_area(extra) > 1e-6:
-            recommendation.append(scene["key"])
-            accumulated = polygonal(unary_union([accumulated, region]))
+    recommendation, omitted = recommended_coverage(scenes, regions, priority)
     uncovered = polygonal(geometry.difference(covered))
 
     def percent(region):
@@ -156,13 +209,17 @@ def coverage_summary(geometry, scenes, selected_keys, priority="cloud"):
                        "cloud": scene.get("cloud_max"), "intersection": geojson(region),
                        "assigned": geojson(allocated), "coverage_percent": percent(region),
                        "contribution_percent": percent(allocated), "contribution_km2": polygon_area(allocated)})
+    groups = footprint_groups(scenes, full_regions, selected_keys)
     return {"priority": priority, "priority_label": PRIORITIES[priority], "candidate_count": len(scenes),
             "selected_count": len(chosen), "tile_count": len({tile for s in chosen for tile in s.get("tiles", [])}),
+            "acquisition_count": len({acquisition_identity(s) for s in chosen}), "footprint_groups": groups,
             "dates": sorted({s["date"] for s in chosen if s.get("datetime") and s.get("date")}),
             "coverage_percent": percent(covered), "overlap_percent": percent(overlap),
             "uncovered_percent": percent(uncovered), "aoi_area_km2": area,
             "covered": geojson(covered), "overlap": geojson(overlap), "uncovered": geojson(uncovered),
             "blocks": blocks, "ordered_keys": [s["key"] for s in chosen], "recommended_keys": recommendation,
+            "recommended_omitted_keys": omitted,
+            "recommendation_note": "清理被其他推荐产品完整覆盖的重复产品，保留独有边缘；已选产品按指定优先级拼接。几何覆盖不保证无云。",
             "redundant_keys": [s["key"] for s in chosen if polygon_area(assigned[s["key"]]) <= 1e-6],
             "missing_footprint_keys": missing,
             "coverage_note": "产品边界的几何覆盖率；不代表无云或有有效光谱。拼接时保留实际像元来源。"}

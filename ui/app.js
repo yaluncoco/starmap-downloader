@@ -445,7 +445,8 @@ function configureMap() {
   L.drawLocal.draw.handlers.polygon.tooltip={start:"点击地图放置第一个点",cont:"继续点击，添加顶点",end:"点击第一个点完成多边形"};
   L.drawLocal.draw.handlers.rectangle.tooltip={start:"按住鼠标拖动，画出矩形研究区"};
   L.drawLocal.edit.handlers.edit.tooltip={text:"拖动顶点修改边界",subtext:"再次点击编辑按钮以保存"};
-  map=L.map("map",{center:[35.3,108.5],zoom:4,zoomControl:true,attributionControl:true});
+  map=L.map("map",{center:[35.3,108.5],zoom:4,zoomSnap:.25,zoomDelta:.5,zoomControl:true,attributionControl:true});
+  L.control.scale({imperial:false,maxWidth:100}).addTo(map);
   aoiLayer=L.featureGroup().addTo(map);footprintLayer=L.featureGroup().addTo(map);
   Spatial.initializeMap();
   changeBasemap("standard");
@@ -457,6 +458,15 @@ function configureMap() {
   map.on("draw:drawstop",()=>{$("drawHint").hidden=true;updateAvailability();});
   setTimeout(()=>map.invalidateSize(),150);
   new ResizeObserver(()=>map.invalidateSize()).observe($("map"));
+}
+async function toggleMapSize() {
+  if(!map)return;
+  const expanded=document.querySelector(".workspace").classList.toggle("map-expanded");
+  await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+  map.invalidateSize({pan:false});
+  if(footprintLayer?.getBounds().isValid())Spatial.fit();
+  else if(aoiLayer?.getBounds().isValid())map.fitBounds(aoiLayer.getBounds(),{padding:[65,65],maxZoom:16,animate:false});
+  $("mapExpand").textContent=expanded?"显示列表":"放大地图";$("mapExpand").setAttribute("aria-pressed",String(expanded));
 }
 function changeBasemap(kind) {
   if(!map)return;
@@ -517,8 +527,8 @@ function renderAoiLayer(fit) {
   aoiLayer.clearLayers();
   if(!state.aoi)return;
   const polygons=state.aoi.geometry.type==="MultiPolygon"?state.aoi.geometry.coordinates.map(coordinates=>({type:"Polygon",coordinates})):[state.aoi.geometry];
-  for(const geometry of polygons)L.geoJSON(geometry,{pane:"aoiPane",interactive:state.editing,style:{color:"#08785d",weight:2,fillColor:"#239878",fillOpacity:.08}}).eachLayer(layer=>aoiLayer.addLayer(layer));
-  if(fit&&aoiLayer.getBounds().isValid())map.fitBounds(aoiLayer.getBounds(),{padding:[75,75],maxZoom:16});
+  for(const geometry of polygons)L.geoJSON(geometry,{pane:"aoiPane",interactive:state.editing,style:{color:"#d3a02c",weight:2,fillColor:"#f1c55e",fillOpacity:.035}}).eachLayer(layer=>aoiLayer.addLayer(layer));
+  if(fit&&aoiLayer.getBounds().isValid())map.fitBounds(aoiLayer.getBounds(),{padding:[75,75],maxZoom:16,animate:false});
 }
 function setAoi(aoi,fit=true,keepScenes=false) {
   state.aoi=aoi;
@@ -616,7 +626,7 @@ function renderScenes() {
     const q=state.query, dates=q.start?`${q.start} — ${q.end}`:isDem()?"静态 DSM":"不限日期";
     $("scenesSubtitle").textContent=isGedi()?`${gediProduct()?.title||q.collection} · ${dates} · ${isGediRaster()?"按完整汇总期重叠匹配":"导出时精确筛选足迹日期与边界"}`:isRaw()?`${isOfficial()||isS5p()||isSen3()?q.collection:profiles[state.profile][0]} · ${dates}${q.radar_mode?" · "+q.radar_mode:""}${isOpenOptical()?" · 云量 ≤ "+q.max_cloud+"%":isL3()?" · 日期与季度重叠":isWorldCover()?" · 日期与年度重叠":isModis()?" · 按标称日筛选":""} · 不裁剪`:
       isDem()?`${dates} · 可裁剪或下载整瓦片`:isRtc()?`${dates}${q.radar_mode?" · "+q.radar_mode:""} · 每景单独裁剪 · 线性 γ⁰`:
-      `${dates} · 云量 ≤ ${q.max_cloud}% · ${$("imageLayout").value==="mosaic"?"逐区块选择，跨日期拼接":"逐产品时间序列"}`;
+      `${dates} · 云量 ≤ ${q.max_cloud}% · ${$("imageLayout").value==="mosaic"?"候选为源产品，区域拼接输出一份影像":"逐产品时间序列"}`;
   }
   Batch.renderResults();renderAssetPicker();updateAvailability();schedulePlan();Spatial.refresh();
 }
@@ -641,7 +651,7 @@ function renderEstimate() {
     const missing=missingAccess();
     body.textContent=`${p.transports.map(transportLabel).join(" + ")} · ${p.estimated_bytes?sizeLabel(p.estimated_bytes):"体积由服务确定"}${missing.length?" · 请先载入 "+missing.map(transportLabel).join(" + ")+" 凭据":""}`;
   }else if(p.kind==="mosaic"){
-    headline.textContent=`${p.source_count} 块 · ${p.dates.length} 个日期 · 1 份拼接影像`;
+    headline.textContent=`${p.source_count} 个源产品 · ${p.dates.length} 个日期 · 1 份拼接影像`;
     body.textContent=`${p.resolution} 米 · 覆盖 ${p.coverage.coverage_percent.toFixed(2)}% · 未压缩约 ${sizeLabel(p.bytes_per_scene)} · ${p.transport==="cdse-s3"?`官方原件缓存约 ${sizeLabel(p.native_source_bytes)}${missingAccess().length?" · 需 S3 密钥":""}`:p.transport==="public"?"无需处理额度":`最多 ${p.requests} 次请求 / ${p.estimated_pu} PU`}`;
   }else{
     headline.textContent=`${count} 景 · ${p.resolution} 米 · ${p.options.output_bands.length} 波段`;
@@ -919,7 +929,8 @@ function bindEvents() {
   for(const id of ["drawRectangle","mapDrawRectangle"])$(id).addEventListener("click",()=>startDrawing("rectangle"));
   for(const id of ["drawPolygon","mapDrawPolygon"])$(id).addEventListener("click",()=>startDrawing("polygon"));
   $("editBoundary").addEventListener("click",toggleEditing);
-  for(const id of ["fitAoi","mapFitAoi"])$(id).addEventListener("click",()=>{if(aoiLayer?.getBounds().isValid())map.fitBounds(aoiLayer.getBounds(),{padding:[60,60],maxZoom:16});});
+  for(const id of ["fitAoi","mapFitAoi"])$(id).addEventListener("click",()=>{if(aoiLayer?.getBounds().isValid())map.fitBounds(aoiLayer.getBounds(),{padding:[60,60],maxZoom:16,animate:false});});
+  $("mapExpand").addEventListener("click",()=>toggleMapSize());
   for(const id of ["clearAoi","mapDeleteAoi"])$(id).addEventListener("click",deleteBoundary);
   $("applyCoordinates").addEventListener("click",applyCoordinates);$("importBoundary").addEventListener("click",importBoundary);$("chooseFolder").addEventListener("click",chooseFolder);
   $("outputDirectory").addEventListener("change",()=>api("preferences",{output_dir:$("outputDirectory").value}).catch(()=>{}));

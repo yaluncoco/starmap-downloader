@@ -14,7 +14,7 @@ from .batch_sources import public_sources as batch_sources
 from .batch_workflow import BatchWorkflow
 from .catalogue import date_range
 from .download import download_scenes
-from .errors import Cancelled, UserError
+from .errors import Cancelled, UserError, io_diagnostic
 from .accounts import Accounts
 from .earthdata_auth import EarthdataAuth
 from .gedi_catalogue import GEDI, COLLECTIONS as GEDI_COLLECTIONS, DEFAULT_COLLECTION as GEDI_DEFAULT, search_gedi
@@ -389,9 +389,13 @@ class Service:
             except UserError as error:
                 with job.lock:
                     job.data.update(status="failed", error=str(error), message=str(error))
-            except OSError:
+            except OSError as error:
                 with job.lock:
-                    job.data.update(status="failed", error="文件读写失败，请检查磁盘空间、文件夹权限和文件占用。", message="文件读写失败")
+                    diagnostic = io_diagnostic(error)
+                    code = diagnostic.get("winerror", diagnostic.get("errno"))
+                    suffix = f"（系统代码 {code}）" if code is not None else ""
+                    job.data.update(status="failed", error=f"文件读写失败{suffix}，请检查磁盘空间、文件夹权限和文件占用。",
+                                    message="文件读写失败", io_diagnostic=diagnostic)
             except Exception as error:
                 # Exception bodies can include network payloads; expose only type.
                 with job.lock:

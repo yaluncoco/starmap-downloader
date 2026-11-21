@@ -63,6 +63,9 @@ def test_upfront_login_draw_shp_and_download_aligned_batch(server, batch_setup, 
         page.evaluate("bounds => map.fitBounds([[bounds[1],bounds[0]],[bounds[3],bounds[2]]], {padding:[70,60],maxZoom:18,animate:false})", list(bounds))
         page.locator("#drawRectangle").click()
         points = page.evaluate("bounds => [[bounds[3],bounds[0]],[bounds[1],bounds[2]]].map(ll => { const p=map.latLngToContainerPoint(ll); const box=$('map').getBoundingClientRect(); return [p.x+box.left,p.y+box.top]; })", list(bounds))
+        screenshot(page, "before-draw")
+        hits = page.evaluate("points=>points.map(([x,y])=>{const node=document.elementFromPoint(x,y);return {inside_map:$('map').contains(node),id:node?.id,className:node?.getAttribute('class')};})", points)
+        assert all(hit["inside_map"] for hit in hits), {"points": points, "hits": hits}
         page.mouse.move(*points[0])
         page.mouse.down()
         page.mouse.move(*points[1], steps=12)

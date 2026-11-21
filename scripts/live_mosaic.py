@@ -40,10 +40,12 @@ def map_acceptance(origin, profile, scenes, geometry, output):
             page.on("pageerror", lambda error: failures.append(str(error)))
             open_data_page(page, origin)
             expect(page.locator("#sourceProfile")).to_have_value(profile)
-            page.wait_for_function("Spatial.layers.size === state.scenes.length && state.scenes.length > 0")
+            page.wait_for_function("()=>Spatial.layers.size === state.scenes.length && state.scenes.length > 0")
             assert page.evaluate("[...Spatial.layers.values()].every(g=>g.getLayers().every(l=>l.getLayers().every(p=>p.options.dashArray==='6,5')))")
             if page.locator("#selectNone").is_enabled():
                 page.locator("#selectNone").click()
+            page.locator("#mapFootprintScope").select_option("candidates")
+            page.locator("#mapFitAoi").click()
             overlap = geometry.intersection(shape(scenes[0]["products"][0]["footprint"])).intersection(
                 shape(scenes[1]["products"][0]["footprint"]))
             assert overlap.area > 0
@@ -69,12 +71,85 @@ def map_acceptance(origin, profile, scenes, geometry, output):
             expect(page.locator("#spatialPriority")).to_have_value("cloud")
             page.locator("#coverageDetails summary").click()
             expect(page.locator("#downloadSelected")).to_be_enabled()
+            page.locator("#mapFootprintScope").select_option("selected")
+            page.wait_for_function("()=>Spatial.summary?.selected_count===2 && footprintLayer.getLayers().length===2")
+            before = page.evaluate("[...state.selected]")
+            page.locator("#mapFootprintDate").select_option(scenes[0]["date"])
+            assert page.evaluate("footprintLayer.getLayers().length") == 1
+            assert page.evaluate("[...state.selected]") == before
+            page.locator("#mapFootprintDate").select_option("all")
+            page.locator("#fitFootprints").click()
+            page.wait_for_function("()=>!Spatial.zooming && !Spatial.fitPending && map.getBounds().contains(footprintLayer.getBounds())")
             page.screenshot(path=str(output / (profile + "-map-selection.png")), full_page=True)
             assert not failures, failures
             return {"status": "passed", "profile": profile, "scene_keys": keys,
                     "persistent_dashed_footprints": True, "actual_overlap_map_click": True,
                     "map_list_synchronized": True, "two_acquisition_dates": True,
-                    "manual_priority_adjustment": True, "download_button_enabled": True}
+                    "manual_priority_adjustment": True, "download_button_enabled": True,
+                    "selected_full_footprint_overview": True, "date_filter_preserves_selection": True}
+        finally:
+            browser.close()
+
+
+def overview_acceptance(origin, profile, scenes, summary, output):
+    """Validate the real default recommendation and large grouped extents, with no injected selection."""
+    from playwright.sync_api import expect, sync_playwright
+    from browser_flow import open_data_page
+
+    failures = []
+    with sync_playwright() as driver:
+        browser = driver.chromium.launch(channel="msedge", headless=True)
+        try:
+            page = browser.new_page(viewport={"width": 1440, "height": 940})
+            page.route(re.compile(r"^https://"), lambda route: route.abort())
+            page.on("pageerror", lambda error: failures.append(str(error)))
+            open_data_page(page, origin)
+            expect(page.locator("#sourceProfile")).to_have_value(profile)
+            expected = set(summary["recommended_keys"])
+            page.wait_for_function("n=>Spatial.summary?.selected_count===n", arg=len(expected))
+            page.wait_for_function("()=>Spatial.summary?.footprint_groups && !Spatial.zooming && !Spatial.fitPending && map.getBounds().contains(footprintLayer.getBounds())")
+            chosen = set(page.evaluate("[...state.selected]"))
+            assert chosen == expected
+            expect(page.locator("#mapFootprintScope")).to_have_value("selected")
+            expect(page.locator("#mapFootprintDetail")).to_have_value("overpass")
+            groups = page.evaluate("footprintLayer.getLayers().length")
+            expected_groups = sum(bool(g["selected_keys"]) for g in page.evaluate("Spatial.summary.footprint_groups"))
+            assert groups == expected_groups and groups <= len(chosen)
+            selected_coverage = page.evaluate("Spatial.summary.coverage_percent")
+            all_available = unary_union([shape(b["intersection"]) for b in summary["blocks"] if b["intersection"]])
+            selected_union = unary_union([shape(b["intersection"]) for b in summary["blocks"]
+                                         if b["key"] in chosen and b["intersection"]])
+            lost_km2 = polygon_area(all_available.difference(selected_union))
+            assert lost_km2 < 1e-6
+            page.screenshot(path=str(output / (profile + "-overview.png")), full_page=True)
+            old_height = page.locator("#map").bounding_box()["height"]
+            page.locator("#mapExpand").click()
+            expect(page.locator("#mapExpand")).to_have_attribute("aria-pressed", "true")
+            assert page.locator("#map").bounding_box()["height"] > old_height + 100
+            assert set(page.evaluate("[...state.selected]")) == chosen
+            assert page.evaluate("map.getBounds().contains(footprintLayer.getBounds())")
+            page.screenshot(path=str(output / (profile + "-overview-expanded.png")), full_page=True)
+            page.locator("#mapExpand").click()
+            expect(page.locator("#mapExpand")).to_have_attribute("aria-pressed", "false")
+            page.locator("#mapFootprintDetail").select_option("products")
+            assert page.evaluate("footprintLayer.getLayers().length") == len(chosen)
+            date = next(s["date"] for s in scenes if s["key"] in chosen)
+            page.locator("#mapFootprintDate").select_option(date)
+            assert page.evaluate("footprintLayer.getLayers().length") == sum(s["key"] in chosen and s["date"] == date for s in scenes)
+            assert set(page.evaluate("[...state.selected]")) == chosen
+            assert page.evaluate("Spatial.summary.coverage_percent") == selected_coverage
+            page.locator("#mapFootprintScope").select_option("candidates")
+            assert page.evaluate("footprintLayer.getLayers().length") == len(scenes)
+            assert set(page.evaluate("[...state.selected]")) == chosen
+            expect(page.locator(".leaflet-control-scale")).to_be_visible()
+            assert not failures, failures
+            return {"status": "passed", "profile": profile, "candidate_count": len(scenes),
+                    "default_selected_count": len(chosen), "default_overpass_groups": groups,
+                    "coverage_percent": selected_coverage, "recommendation_lost_km2": lost_km2,
+                    "selected_keys": sorted(chosen), "full_extent_fitted": True,
+                    "product_expansion_and_date_filter_preserve_selection": True,
+                    "all_candidates_accessible": True, "scale_bar_visible": True,
+                    "expanded_map_preserves_selection_and_full_extent": True}
         finally:
             browser.close()
 
@@ -161,6 +236,9 @@ def check(directory, output, executable=None, *, route="both", native_assets=(),
                     if state["status"] == "completed":
                         return state["result"]
                     if state["status"] not in ("running", "cancelling"):
+                        report["failed_job"] = {"operation": action, **{key: state.get(key) for key in
+                                               ("status", "message", "error", "io_diagnostic")}}
+                        save()
                         raise RuntimeError(state.get("error") or state.get("message") or state["status"])
                     if time.monotonic() - last >= 15:
                         print(f"{action}: {state.get('message', 'running')}", flush=True)
@@ -214,6 +292,9 @@ def check(directory, output, executable=None, *, route="both", native_assets=(),
                     report["catalogues"].append(catalogue)
                     save()
                     print(f"Exact current catalogue identities checked: {profile}, 10 products", flush=True)
+                    if browser:
+                        report["browser_checks"].append(overview_acceptance(origin, profile, found["scenes"], summary, output))
+                        save()
 
                     geometry = post("aoi", {"geometry": mapping(SEAM), "name": "两日期接缝核验区"})["geometry"]
                     found = run("search", {"profile": profile, "geometry": geometry, **criteria}, 600)
