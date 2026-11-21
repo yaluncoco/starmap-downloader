@@ -12,7 +12,9 @@ from shapely.geometry import box, mapping
 from .errors import UserError
 
 ALL_BANDS = ["B01", "B02", "B03", "B04", "B05", "B06", "B07", "B08", "B8A", "B09", "B11", "B12"]
+RESEARCH_BANDS = ["B02", "B03", "B04", "B08", "B05", "B06", "B07", "B8A", "B11", "B12"]
 MODES = {
+    "research": {"label": "研究分析包 · 10 波段 + SCL + 未掩膜备份 + 像元来源", "bands": RESEARCH_BANDS, "output_bands": RESEARCH_BANDS, "dtype": "float32", "nodata": -9999.0},
     "rgb": {"label": "自然色浏览图", "bands": ["B04", "B03", "B02"], "output_bands": ["Red", "Green", "Blue", "Alpha"], "dtype": "uint8", "nodata": None},
     "rgbnir": {"label": "RGB + 近红外反射率", "bands": ["B04", "B03", "B02", "B08"], "output_bands": ["B04", "B03", "B02", "B08"], "dtype": "float32", "nodata": -9999.0},
     "all": {"label": "12 波段反射率", "bands": ALL_BANDS, "output_bands": ALL_BANDS, "dtype": "float32", "nodata": -9999.0},
@@ -21,7 +23,7 @@ MODES = {
 
 
 def normalize_options(value):
-    mode = str(value.get("mode", "rgbnir"))
+    mode = str(value.get("mode", "research"))
     try:
         resolution = float(value.get("resolution", 10))
         max_cloud = float(value.get("max_cloud", 20))
@@ -56,6 +58,8 @@ class Tile:
 
 
 def build_plan(geometry, options, scene_count=1, tile_size=2048):
+    if options.get("mode") == "research":
+        tile_size = min(tile_size, 1024)  # Bound memory for two 10-band rasters and quality/provenance.
     if not 1 <= int(scene_count) <= 500:
         raise UserError("每批请选择 1～500 次过境，较长时间序列请分批下载。")
     west, south, east, north = geometry.bounds
@@ -91,11 +95,14 @@ def build_plan(geometry, options, scene_count=1, tile_size=2048):
             if intersects:
                 requested_pixels += w * h
     count = sum(tile.intersects for tile in tiles)
-    estimated_pu = requested_pixels / (512 * 512) * (len(options["bands"]) + int(options["mask_clouds"])) / 3 * scene_count
+    research = options.get("mode") == "research"
+    estimated_pu = requested_pixels / (512 * 512) * (len(options["bands"]) + int(options["mask_clouds"] or research)) / 3 * scene_count
     bytes_per_sample = 1 if options["dtype"] == "uint8" else 4
     bytes_per_pixel = bytes_per_sample * options["count"]
+    if research:
+        bytes_per_pixel = bytes_per_pixel * 2 + 1 + 2  # Main + unmasked + uint8 SCL + uint16 source.
     # Do not reuse files produced under an older grid, mask or source-selection contract.
-    fingerprint = hashlib.sha256(json.dumps({"grid_version": 4, "geometry": mapping(normalize(geometry)), "options": options}, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:12]
+    fingerprint = hashlib.sha256(json.dumps({"grid_version": 5, "geometry": mapping(normalize(geometry)), "options": options}, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:12]
     public = {
         "epsg": epsg, "crs_label": crs_label, "width": width, "height": height,
         "bounds": [minx, miny, maxx, maxy], "resolution": resolution, "scene_count": scene_count,
@@ -103,6 +110,7 @@ def build_plan(geometry, options, scene_count=1, tile_size=2048):
         "estimated_pu": round(max(0.005 * count * scene_count, estimated_pu), 2),
         "uncompressed_mb": round(width * height * bytes_per_pixel * scene_count / (1024 * 1024), 2),
         "bytes_per_scene": width * height * bytes_per_pixel,
+        "transfer_bands": options["count"] + 2 if research else options["count"],
         "fingerprint": fingerprint, "options": options,
     }
     return public, tiles, projected

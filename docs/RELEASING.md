@@ -14,7 +14,7 @@ $asset = ".\dist\StarmapDownloader-Setup-$version-win-x64.exe"
 .\scripts\check_installer.ps1 -Installer $asset -UpgradeFrom 'C:\备份\上一版完整安装包.exe' -UpdateRepository $repo
 ```
 
-1.4.1 的构建脚本会强制检查 GEDI、联合下载、统一账号界面与图标资源（`--require-gedi --require-batch --require-accounts`）。打包后还应验证同一区域与共同日期的真实联网流程：
+1.4.2 的构建脚本会强制检查 GEDI、联合下载、统一账号界面、研究包说明与图标资源（`--require-gedi --require-batch --require-accounts`）。打包后还应验证同一区域与共同日期的真实联网流程：
 
 ```powershell
 .\.venv\Scripts\python.exe -X utf8 scripts\check_package.py .\dist\StarmapDownloader\StarmapDownloader.exe --require-version $version --require-gedi --require-batch --require-accounts --require-update-repository $repo

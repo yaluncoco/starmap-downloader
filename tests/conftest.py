@@ -69,6 +69,7 @@ class StubProvider:
         self.empty = False
         self.unmatched = False
         self.wrong_grid = False
+        self.research_scl = 4
 
     def request(self, method, url, *, cancel=None, **kwargs):
         self.requests.append((method, url, kwargs))
@@ -98,6 +99,10 @@ class StubProvider:
         fill = -9999 if sample_type == "FLOAT32" else 0
         dtype = sample_type.lower()
         values = np.full((bands, height, width), fill if self.empty else .25, dtype=dtype)
+        research = "var researchPackage = true;" in script
+        if research:
+            values[-2] = 255 if self.empty else self.research_scl
+            values[-1] = 0 if self.empty else 1
         if sample_type == "UINT8" and not self.empty:
             values[:] = np.asarray([30, 60, 90, 255]).reshape(4, 1, 1)
         with MemoryFile() as mem:
@@ -107,6 +112,9 @@ class StubProvider:
             tiff = mem.read()
         sources = [{"catalogue_id": p["id"], "match": "safe_id", "date": p["utc"],
                     "data_path": f"s3://example/2024/{p['id']}.SAFE"} for p in products]
+        if research:
+            for index, source in enumerate(sources, 1):
+                source["source_index"] = index
         metadata = json.dumps({"candidates": len(sources), "sources": [] if self.unmatched else sources}).encode()
         return StubResponse(content=archive_bytes(("default.tif", tiff), ("userdata.json", metadata)),
                             headers={"X-ProcessingUnits-Spent": "0.01"})

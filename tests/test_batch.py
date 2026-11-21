@@ -40,6 +40,12 @@ class BatchProvider:
         self.raw_assets = {}
         self.public.features[0]["assets"].update(green=asset("B03"), blue=asset("B02"))
         self.public.content.update({"B03.tif": raster(2100), "B02.tif": raster(2200)})
+        from core.planning import RESEARCH_BANDS
+        from core.public_catalogue import BAND_ASSET
+        for band in RESEARCH_BANDS:
+            if BAND_ASSET[band] not in self.public.features[0]["assets"]:
+                self.public.features[0]["assets"][BAND_ASSET[band]] = asset(band)
+                self.public.content[band + ".tif"] = raster(2400)
         self.cmr_empty = False
         self.cmr_failure = False
         self.catalogue_criteria = []

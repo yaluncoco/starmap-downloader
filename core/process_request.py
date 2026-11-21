@@ -12,19 +12,26 @@ import requests
 from .errors import UserError
 from .http import PROCESS_URL, check_cancel
 from .scene_identity import SAFE_ID, expected_products, utc_text, utc_time
+from .research_bundle import is_research, transfer_options
 
 MGRS_PATH = re.compile(r"(?:^|/)tiles/(\d{1,2})/([A-Z])/([A-Z]{2})(?:/|$)", re.I | re.ASCII)
 
 
 def resampling(options):
     # A categorical SCL mask must not be interpolated across class boundaries.
-    return "NEAREST" if options["mask_clouds"] else "BILINEAR"
+    return "NEAREST" if options["mask_clouds"] or is_research(options) else "BILINEAR"
 
 
 def evalscript(options, products):
-    bands = list(dict.fromkeys(options["bands"] + (["SCL"] if options["mask_clouds"] else []) + ["dataMask"]))
+    research = is_research(options)
+    bands = list(dict.fromkeys(options["bands"] + (["SCL"] if options["mask_clouds"] or research else []) + ["dataMask"]))
     invalid = "s.dataMask === 0" + (" || [0,1,3,8,9,10].includes(s.SCL)" if options["mask_clouds"] else "")
-    if options["mode"] == "rgb":
+    if research:
+        expression = "[" + ",".join("s." + band for band in options["bands"]) + ",s.SCL,match.index]"
+        invalid = "s.dataMask === 0 || ![" + ",".join("s." + band for band in options["bands"]) + "].every(function(v) { return isFinite(v); }) || !isFinite(s.SCL) || s.SCL !== Math.floor(s.SCL) || s.SCL < 0 || s.SCL > 11"
+        invalid_value = "[" + ",".join(["-9999"] * options["count"] + ["fallbackSCL", "0"]) + "]"
+        sample_type, nodata = "FLOAT32", ", nodataValue: -9999"
+    elif options["mode"] == "rgb":
         expression = "[Math.min(255,Math.max(0,s.B04*2.5*255)),Math.min(255,Math.max(0,s.B03*2.5*255)),Math.min(255,Math.max(0,s.B02*2.5*255)),255]"
         invalid_value, sample_type, nodata = "[0,0,0,0]", "UINT8", ""
     elif options["mode"] == "ndvi":
@@ -37,9 +44,10 @@ def evalscript(options, products):
     return f'''//VERSION=3
 var allowed = {json.dumps(products, separators=(",", ":"))};
 var candidates = 0;
+var researchPackage = {str(research).lower()};
 function setup() {{
   return {{input: {json.dumps(bands)}, mosaicking: "TILE",
-           output: {{id: "default", bands: {options['count']}, sampleType: "{sample_type}"{nodata}}}}};
+           output: {{id: "default", bands: {transfer_options(options)['count']}, sampleType: "{sample_type}"{nodata}}}}};
 }}
 ''' + r'''
 function identify(tile) {
@@ -51,12 +59,12 @@ function identify(tile) {
   for (var i = 0; i < allowed.length; i++) {
     var product = allowed[i];
     if (safe) {
-      if (safe[1].toUpperCase() === product.id) return {id: product.id, method: "safe_id"};
+      if (safe[1].toUpperCase() === product.id) return {id: product.id, index: i + 1, method: "safe_id"};
     } else if (mgrs) {
       var code = "T" + ("0" + mgrs[1]).slice(-2) + (mgrs[2] + mgrs[3]).toUpperCase();
       // Some results represent the same granule time without fractional seconds.
       if (code === product.tile && Math.floor(utc / 1000) === Math.floor(Date.parse(product.utc) / 1000)) {
-        return {id: product.id, method: "mgrs_and_utc"};
+        return {id: product.id, index: i + 1, method: "mgrs_and_utc"};
       }
     }
   }
@@ -77,19 +85,27 @@ function preProcessScenes(collections) {
     var match = matches[i];
     return match && (match.method === "safe_id" || (!exact[match.id] && approximate[match.id] === 1));
   });
+  if (researchPackage) collections.scenes.tiles.sort(function(a, b) {
+    return identify(a).index - identify(b).index || String(a.dataPath).localeCompare(String(b.dataPath));
+  });
   return collections;
 }
 function updateOutputMetadata(scenes, inputMetadata, outputMetadata) {
   var sources = (scenes.tiles || []).map(function(tile) {
     var match = identify(tile);
-    return match && {catalogue_id: match.id, match: match.method, date: tile.date, data_path: tile.dataPath};
+    if (!match) return null;
+    var source = {catalogue_id: match.id, match: match.method, date: tile.date, data_path: tile.dataPath};
+    if (researchPackage) source.source_index = match.index;
+    return source;
   }).filter(function(source) { return source !== null; });
   outputMetadata.userData = {candidates: candidates, sources: sources};
 }
 ''' + f'''
-function evaluatePixel(samples) {{
+function evaluatePixel(samples, scenes) {{
+  {"var fallbackSCL = 255;" if research else ""}
   for (var i = 0; i < samples.length; i++) {{
     var s = samples[i];
+    {"var match = scenes && identify(scenes.tiles[i]); if (!match) continue; if (fallbackSCL === 255 && isFinite(s.SCL) && s.SCL === Math.floor(s.SCL) && s.SCL >= 0 && s.SCL <= 11) fallbackSCL = s.SCL;" if research else ""}
     if ({invalid}) continue;
     return {expression};
   }}
@@ -105,12 +121,15 @@ def process_payload(tile, plan, scene, options, *, products=None):
     begin = min(times) - dt.timedelta(seconds=30)
     end = max(times) + dt.timedelta(seconds=30)
     method = resampling(options)
+    processing = {"upsampling": method, "downsampling": method}
+    if is_research(options):
+        processing["harmonizeValues"] = False  # Preserve negative BOA reflectance, not only positive values.
     return {
         "input": {
             "bounds": {"bbox": list(tile.bounds), "properties": {"crs": f"http://www.opengis.net/def/crs/EPSG/0/{plan['epsg']}"}},
             # Cloud selection was applied to the catalogue allowlist. Avoid an independent cloud cutoff here.
             "data": [{"type": "sentinel-2-l2a", "dataFilter": {"timeRange": {"from": utc_text(begin), "to": utc_text(end)},
-                      "maxCloudCoverage": 100, "mosaickingOrder": "mostRecent"}, "processing": {"upsampling": method, "downsampling": method}}],
+                      "maxCloudCoverage": 100, "mosaickingOrder": "mostRecent"}, "processing": processing}],
         },
         "output": {"width": tile.width, "height": tile.height, "responses": [
             {"identifier": "default", "format": {"type": "image/tiff"}},
@@ -146,12 +165,15 @@ def _read_archive(archive, target, max_bytes, products):
         sources = metadata["sources"]
         if type(candidates) is not int or not 0 <= len(sources) <= candidates:
             raise ValueError("Invalid candidate count")
+        indices = {product["id"]: index for index, product in enumerate(products, 1)}
         for source in sources:
             if (not isinstance(source, dict) or source.get("catalogue_id") not in allowed
                     or source.get("match") not in ("safe_id", "mgrs_and_utc")
                     or not isinstance(source.get("data_path"), str) or not source["data_path"]
                     or not isinstance(source.get("date"), str)):
                 raise ValueError("Source identity not requested")
+            if "source_index" in source and (type(source["source_index"]) is not int or source["source_index"] != indices[source["catalogue_id"]]):
+                raise ValueError("Invalid pixel source index")
             product = allowed[source["catalogue_id"]]
             acquired = utc_time(source["date"])
             identifiers = {match[0].removesuffix(".SAFE") for match in SAFE_ID.finditer(source["data_path"].upper())}
@@ -170,7 +192,7 @@ def _read_archive(archive, target, max_bytes, products):
 
 def fetch_tile(http, auth, payload, target, *, options, products, cancel=None, status=None):
     archive = target.with_suffix(".part")
-    raw_bytes = payload["output"]["width"] * payload["output"]["height"] * options["count"] * (1 if options["dtype"] == "uint8" else 4)
+    raw_bytes = payload["output"]["width"] * payload["output"]["height"] * transfer_options(options)["count"] * (1 if options["dtype"] == "uint8" else 4)
     max_bytes = raw_bytes * 2 + 4 * 1024 ** 2
     refreshed = False
     transfer_failures = 0

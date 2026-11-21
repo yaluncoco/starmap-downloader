@@ -102,17 +102,18 @@ def _payload(options=None):
 
 
 def test_process_uses_granule_instead_of_datatake_and_preserves_categorical_mask():
-    payload, _, _ = _payload()
+    payload, _, _ = _payload({"mode": "rgbnir"})
     data = payload["input"]["data"][0]
     assert data["dataFilter"]["timeRange"] == {"from": "2024-06-10T03:16:20.553000Z", "to": "2024-06-10T03:17:20.553000Z"}
     assert data["processing"] == {"upsampling": "NEAREST", "downsampling": "NEAREST"}
-    payload, _, _ = _payload({"mask_clouds": False})
+    payload, _, _ = _payload({"mode": "rgbnir", "mask_clouds": False})
     assert payload["input"]["data"][0]["processing"]["upsampling"] == "BILINEAR"
     assert [entry["identifier"] for entry in payload["output"]["responses"]] == ["default", "userdata"]
 
 
 def test_evalscript_rejects_other_granules_and_ambiguous_source_paths():
-    node = shutil.which("node")
+    from test_research_bundle import node_runtime
+    node = node_runtime()
     if not node:
         pytest.skip("Node.js is required to execute the actual Process evalscript")
     payload, _, _ = _payload({"mode": "ndvi", "mask_clouds": True})

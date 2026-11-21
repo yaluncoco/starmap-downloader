@@ -31,10 +31,12 @@ from .public_rtc import RTC_COLLECTION, RTC_PROVIDER, S1_RTC
 from .public_token import PlanetaryAccess
 from .range_file import RangeFile
 from .scene_identity import source_fingerprint
+from .research_bundle import (ResearchBundle, checked_bundle, has_bundle_files, is_research,
+                              make_block, public_block)
 
 
 def keys_for(options):
-    return options["bands"] + (["SCL"] if options["mask_clouds"] else [])
+    return options["bands"] + (["SCL"] if options["mask_clouds"] or is_research(options) else [])
 
 
 def public_plan(geometry, scenes, options):
@@ -93,7 +95,7 @@ def _open_source(stack, http, asset, cancel, rtc_access=None):
     return source, stream, asset
 
 
-def read_on_grid(source_info, bounds, target_transform, crs, height, width, cancel=None):
+def read_on_grid(source_info, bounds, target_transform, crs, height, width, cancel=None, *, preserve_nodata=False):
     source, stream, asset = source_info
     check_cancel(cancel)
     dest = np.full((height, width), np.nan, dtype=np.float32)
@@ -110,7 +112,8 @@ def read_on_grid(source_info, bounds, target_transform, crs, height, width, canc
         if (end_y-row)*(end_x-col) > 30_000_000:
             raise UserError("此研究区的单块读取过大；请提高源与输出的分辨率匹配度或分批下载。")
         win = Window(col, row, end_x-col, end_y-row)
-        values = source.read(1, window=win, masked=True).astype(np.float32).filled(np.nan)
+        loaded = source.read(1, window=win, masked=not preserve_nodata).astype(np.float32)
+        values = loaded.filled(np.nan) if np.ma.isMaskedArray(loaded) else loaded
         if stream.failure:
             raise stream.failure
         if asset["scale"] != 1 or asset["offset"] != 0:
@@ -126,6 +129,7 @@ def read_on_grid(source_info, bounds, target_transform, crs, height, width, canc
 
 
 def _output(inputs, valid, options):
+    valid = valid.copy()
     selected = [inputs[band] for band in options["bands"]]
     if options["mode"] == "rtc":
         out = np.stack(selected)
@@ -210,13 +214,17 @@ def download_public(geometry, scenes, options, output_dir, *, cancel=None, progr
             records.append(record)
             receipt = target.with_suffix(".starmap.json")
             expected = {"file": target.name, "request_fingerprint": plan["fingerprint"], "source_fingerprint": identity}
-            partial = folder / f".{target.stem}.{uid}.partial.tif"
+            bundle = ResearchBundle(target, plan, grid, identity) if is_research(options) else None
+            partial = bundle.partials["analysis"] if bundle else folder / f".{target.stem}.{uid}.partial.tif"
             try:
-                if target.exists() or receipt.exists():
+                existing = has_bundle_files(target) if bundle else target.exists() or receipt.exists()
+                if existing:
                     report("检查已下载内容")
                     meta = checked_local_receipt(target, receipt, expected, cancel)
                     if not _existing_matches(target, plan, grid, identity):
                         raise UserError("已有 GeoTIFF 参数不匹配，请移动该文件后重试。")
+                    if bundle:
+                        checked_bundle(target, meta, plan, grid, identity, cancel)
                     record.update(status="skipped", path=str(target), **meta)
                 else:
                     report("核对公开源波段及版本")
@@ -225,10 +233,11 @@ def download_public(geometry, scenes, options, output_dir, *, cancel=None, progr
                     with rasterio.Env(GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR", GDAL_PAM_ENABLED="NO"):
                         with ExitStack() as stack:
                             sources = {band: _open_source(stack, http, asset, cancel, rtc_access) for band, asset in assets.items()}
-                            with rasterio.open(partial, "w", driver="GTiff", width=plan["width"], height=plan["height"], count=options["count"],
-                                               dtype=options["dtype"], crs=crs, transform=grid, nodata=options["nodata"], compress="DEFLATE",
-                                               predictor=3 if options["dtype"] == "float32" else 2, tiled=True, blockxsize=512, blockysize=512,
-                                               BIGTIFF="IF_SAFER") as out:
+                            with ExitStack() as outputs:
+                                out = bundle.open(outputs) if bundle else outputs.enter_context(rasterio.open(
+                                    partial, "w", driver="GTiff", width=plan["width"], height=plan["height"], count=options["count"],
+                                    dtype=options["dtype"], crs=crs, transform=grid, nodata=options["nodata"], compress="DEFLATE",
+                                    predictor=3 if options["dtype"] == "float32" else 2, tiled=True, blockxsize=512, blockysize=512, BIGTIFF="IF_SAFER"))
                                 if options["mode"] == "rgb":
                                     out.colorinterp = (ColorInterp.red, ColorInterp.green, ColorInterp.blue, ColorInterp.alpha)
                                 for b, band in enumerate(options["output_bands"], 1):
@@ -244,12 +253,25 @@ def download_public(geometry, scenes, options, output_dir, *, cancel=None, progr
                                     block_grid = out.window_transform(window)
                                     inside = geometry_mask([aoi_shape], out_shape=(tile.height, tile.width), transform=block_grid, invert=True) if tile.intersects else None
                                     if inside is None or not inside.any():
-                                        values = np.full((options["count"], tile.height, tile.width), fill, dtype=options["dtype"])
+                                        if bundle:
+                                            shape = (tile.height, tile.width)
+                                            blocks, counts = make_block(np.full((options["count"], *shape), fill, dtype=np.float32),
+                                                                        np.full(shape, 255), np.zeros(shape), np.zeros(shape, dtype=bool), options)
+                                        else:
+                                            values = np.full((options["count"], tile.height, tile.width), fill, dtype=options["dtype"])
                                     else:
-                                        inputs = {band: read_on_grid(src, tile.bounds, block_grid, crs, tile.height, tile.width, cancel) for band, src in sources.items()}
-                                        values, valid = _output(inputs, inside, options)
+                                        inputs = {band: read_on_grid(src, tile.bounds, block_grid, crs, tile.height, tile.width, cancel,
+                                                                    preserve_nodata=bool(bundle and band == "SCL")) for band, src in sources.items()}
+                                        if bundle:
+                                            blocks, counts = public_block(inputs, inside, options)
+                                            valid = counts["analysis"]
+                                        else:
+                                            values, valid = _output(inputs, inside, options)
                                         valid_count += valid
-                                    out.write(values, window=window)
+                                    if bundle:
+                                        bundle.write(blocks, counts, window)
+                                    else:
+                                        out.write(values, window=window)
                                     report(f"裁剪区块 {j+1}/{len(tiles)}", .85*(j+1)/len(tiles))
                                 out.update_tags(request_fingerprint=plan["fingerprint"], source_fingerprint=identity, catalogue_product_id=source_id,
                                                 acquisition_utc=row["datetime"] or "static", source=manifest["source"], cloud_mask=str(options["mask_clouds"]),
@@ -257,13 +279,15 @@ def download_public(geometry, scenes, options, output_dir, *, cancel=None, progr
                                                 vertical_reference="EGM2008 orthometric height (DSM)" if options["mode"] == "dem" else "")
                                 if rtc_access is not None:
                                     out.update_tags(radar_backscatter="linear_gamma0", per_band_nodata="true")
+                                if bundle:
+                                    bundle.tag({**out.tags(), "reflectance_units": "unitless", "mode": options["mode"]})
                             record["transport"] = {band: {"etag": src[1].etag, "object_bytes": src[1].size, "bytes_received": src[1].bytes_received,
                                                           "range_requests": src[1].requests} for band, src in sources.items()}
                             if rtc_access is not None:
                                 for band, src in sources.items():
                                     record["transport"][band]["azure_md5_verified_ranges"] = src[1].verified_range_md5
                     check_cancel(cancel)
-                    if not valid_count:
+                    if not valid_count and (bundle is None or not bundle.counts["unmasked"]):
                         record.update(status="empty", note="研究区没有有效像元；未保存空白影像。")
                         empty.append(row["key"])
                         _save_json(manifest_path, manifest)
@@ -272,16 +296,27 @@ def download_public(geometry, scenes, options, output_dir, *, cancel=None, progr
                     report("校验最终 GeoTIFF", .92)
                     if not _existing_matches(partial, plan, grid, identity):
                         raise UserError("最终 GeoTIFF 网格或来源记录不一致，未保存。")
-                    metadata = audit_raster(partial, options, valid_count, cancel)
-                    check_cancel(cancel)
-                    publish_file(partial, target)
-                    try:
-                        _save_json(receipt, {**expected, **metadata})
-                    except Exception:
-                        target.unlink(missing_ok=True)
-                        raise
+                    if bundle:
+                        provenance = {"sources": [{"index": 1, "catalogue_id": source_id, "acquisition_utc": row["datetime"],
+                                                    "observed_matches": ["safe_id"], "assets": assets}],
+                                      "provider": manifest["source"],
+                                      "reflectance_conversion": "BOA reflectance = source DN * STAC scale + STAC offset; negative values retained",
+                                      "identity_note": "Each output is cropped from the exact official Collection-1 source product, with no replacement or mosaicking."}
+                        metadata = bundle.publish(expected, provenance, cancel)
+                        if not valid_count:
+                            record["note"] = "分析影像已全部掩膜；保留未掩膜光谱、SCL 和来源图，可重新筛选。"
+                    else:
+                        metadata = audit_raster(partial, options, valid_count, cancel)
+                        check_cancel(cancel)
+                        publish_file(partial, target)
+                        try:
+                            _save_json(receipt, {**expected, **metadata})
+                        except Exception:
+                            target.unlink(missing_ok=True)
+                            raise
                     record.update(status="completed", path=str(target), **metadata)
-                files.append({"path": str(target), "scene": row["key"], "status": record["status"]})
+                files.append({"path": str(target), "scene": row["key"], "status": record["status"],
+                              **({"bundle": bundle.result_paths()} if bundle else {})})
                 _save_json(manifest_path, manifest)
                 report("校验通过", 1.0)
             except Cancelled:
@@ -292,6 +327,8 @@ def download_public(geometry, scenes, options, output_dir, *, cancel=None, progr
                 raise
             finally:
                 partial.unlink(missing_ok=True)
+                if bundle:
+                    bundle.cleanup()
         manifest["status"] = "completed" if files else "empty"
         return {"files": files, "folder": str(folder), "manifest": str(manifest_path), "plan": plan, "empty_scenes": empty}
     except Cancelled as error:

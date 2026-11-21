@@ -116,12 +116,13 @@
           </div>
           <div id="opticalOptions">
           <label for="imageMode">导出内容</label>
-          <select id="imageMode" data-lock><option value="rgbnir">RGB + 近红外 · 4 波段反射率</option><option value="rgb">自然色 · 8 位浏览图</option><option value="all">全部 12 波段 · 反射率</option><option value="ndvi">NDVI · 植被指数</option><option value="custom">自选波段 · 反射率</option></select>
+          <select id="imageMode" data-lock><option value="research">研究分析包 · 10 波段＋SCL＋备份＋来源（推荐）</option><option value="rgbnir">RGB + 近红外 · 4 波段反射率</option><option value="rgb">自然色 · 8 位浏览图</option><option value="all">全部 12 波段 · 反射率</option><option value="ndvi">NDVI · 植被指数</option><option value="custom">自选波段 · 反射率</option></select>
           <div id="customBands" class="band-grid" hidden></div>
-          <p id="modeDescription" class="field-note">B04 / B03 / B02 / B08，Float32，适合定量分析。</p>
+          <p id="modeDescription" class="field-note">B02 / B03 / B04 / B08 / B05 / B06 / B07 / B8A / B11 / B12；配套保存 SCL、未掩膜反射率和逐像元来源。20 米波段最近邻对齐到所选网格。</p>
           <div class="two-columns output-options"><div><label for="resolution">输出像元大小</label><select id="resolution" data-lock><option value="10">10 米</option><option value="20">20 米</option><option value="60">60 米</option></select></div><div class="format-field"><label>文件格式</label><div class="format-value"><svg class="icon"><use href="#i-layers"/></svg>GeoTIFF <span>.tif</span></div></div></div>
           <label class="checkbox-label"><input type="checkbox" id="maskClouds" checked data-lock><span>去除云、薄云和云阴影像元</span></label>
-          <p class="field-note compact">日期边界和采集时间均按 UTC；云量为原始瓦片估计。</p>
+          <p class="field-note compact">日期与采集时间按 UTC。云掩膜保留 SCL 2、4、5、6、7、11，雪类 11 保留；研究包备份可重新筛选。</p>
+          <p class="field-note">需要 B01、B09、云概率、AOT、水汽和完整角度/元数据时，<button id="s2SafeShortcut" class="inline-link" type="button" data-lock>下载完整 Sentinel-2 SAFE</button>。整包保留原始覆盖范围。</p>
           </div>
           <div id="rtcOptions" hidden>
             <label>导出的雷达极化</label>

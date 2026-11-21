@@ -37,7 +37,7 @@ if ($UpdateRepository) {
 }
 & $python -X utf8 scripts\check_package.py @packageArgs
 if ($LASTEXITCODE -ne 0) { throw 'Packaged startup check failed' }
-foreach ($notice in @('installer\快速开始.txt', 'installer\ChineseSimplified.LICENSE.txt', 'THIRD_PARTY_NOTICES.md', 'docs\GEDI.md', 'docs\BATCH.md', 'docs\ACCOUNTS.md')) {
+foreach ($notice in @('installer\快速开始.txt', 'installer\ChineseSimplified.LICENSE.txt', 'THIRD_PARTY_NOTICES.md', 'docs\GEDI.md', 'docs\BATCH.md', 'docs\ACCOUNTS.md', 'docs\S2_RESEARCH.md')) {
     Copy-Item -LiteralPath (Join-Path $project $notice) -Destination $package
 }
 $compilerArgs=@("/DAppRoot=$package","/DOutputRoot=$dist","/DAppVersion=$version")

@@ -6,9 +6,10 @@ const state = {profile:"s2-process",collection:"",collections:[],gediCollections
 const updates = {configured:false, checking:false, working:false, release:null};
 let map, aoiLayer, footprintLayer, baseLayer, drawHandler, editHandler, planTimer;
 const modes = {
-  rgbnir:"B04 / B03 / B02 / B08，Float32，适合定量分析。",
+  research:"B02 / B03 / B04 / B08 / B05 / B06 / B07 / B8A / B11 / B12；配套保存 SCL、未掩膜反射率和逐像元来源。20 米波段最近邻对齐到所选网格。",
+  rgbnir:"B04 / B03 / B02 / B08，Float32 派生反射率；仅保存这 4 个波段。",
   rgb:"B04 / B03 / B02，8 位 RGBA 浏览图，亮度增强 2.5 倍。",
-  all:"L2A 的 12 个反射率波段；20/60 米原生波段会重采样。",
+  all:"L2A 的 12 个反射率波段；20/60 米原生波段会重采样。此模式只保存光谱 TIFF。",
   ndvi:"(B08 − B04) / (B08 + B04)，Float32，保留真实指数值。",
   custom:"勾选需要的波段；原生分辨率不同的波段会重采样。"
 };
@@ -200,7 +201,7 @@ function renderOpenCollections(select, items, selected, includeStream = false) {
 function renderProfile() {
   $("allDates").closest("label").hidden=Batch.enabled();
   const [dataset,source,description]=profiles[state.profile];
-  $("headerDataset").textContent=dataset;$("headerSource").textContent=source;$("sourceDescription").textContent=description;
+  $("headerDataset").textContent=dataset;$("headerSource").textContent=source;$("sourceDescription").textContent=isOfficial()&&state.collection==="sentinel-2-l2a"?"下载官方完整 Sentinel-2 L2A SAFE ZIP，保留全部波段、质量与大气图层、角度网格和产品元数据。研究区只筛选产品，整包不裁剪。":description;
   for(const id of ["rawCollectionFields","rawTransportField"])$(id).hidden=!isOfficial();
   $("s5pCollectionFields").hidden=!isS5p();
   $("sen3CollectionFields").hidden=!isSen3();
@@ -216,7 +217,7 @@ function renderProfile() {
   $("rtcOptions").hidden=!isRtc();
   const whole = $("rawWholeProduct");
   whole.hidden=whole.disabled=!(isOfficial()||isSen3()||isModis());
-  whole.textContent=isModis()?"每个产品的原始 HDF4（全部层）":isSen3()?"完整 SEN3（清单 + 全部成员）":"整包或官方单主文件（不裁剪）";
+  whole.textContent=isOfficial()&&state.collection==="sentinel-2-l2a"?"完整 Sentinel-2 SAFE ZIP（全部文件，不裁剪）":isModis()?"每个产品的原始 HDF4（全部层）":isSen3()?"完整 SEN3（清单 + 全部成员）":"整包或官方单主文件（不裁剪）";
   const noMetadata = isL3()||isWorldCover();
   $("rawMetadataOnly").hidden=$("rawMetadataOnly").disabled=noMetadata;
   $("rawMetadataOnly").textContent=isModis()?"每个产品的 NASA 配套 XML（如已列出）":"每个产品的一份元数据";
@@ -681,6 +682,7 @@ function showDownloadPlan() {
       isOpenOptical()&&state.profile==="s2-l2a-cog"?"保留源 COG 的像元、缩放和偏移，不裁剪、不重建 SAFE。发布前核对瓦片索引，并逐文件验证目录 SHA‑256。":
       raw?"原始产品不裁剪。通过版本、格式和完整性检查才保存。下载记录区分目录校验值与本地 SHA‑256。":
       isRtc()?"导出线性 γ⁰（不转 dB）。各极化保留自己的 NoData；仅读取所需字节区间，校验每段后再裁剪。":
+      p.options.mode==="research"?"保存分析影像、未掩膜 10 波段备份、SCL 和像元来源图及来源表。全云时仍保留备份；各文件必须网格一致并通过完整性校验才完成。20 米源波段的细节不会因输出 10 米而增加。完整角度与大气辅助层请使用 SAFE 整包。":
       "区域外及无效像元以 NoData 或透明显示。全空影像不保存；已有文件通过本地 SHA‑256 校验才跳过。";
     renderPlanFolder();$("downloadDialog").showModal();
   }catch(error){toast(error.message,true);}
@@ -775,6 +777,14 @@ function bindEvents() {
     for(const id of ["clientSecret","rawPassword","rawToken","rawTotp","s3AccessKey","s3SecretKey","earthdataToken","earthdataPassword"])$(id).value="";
     $("radarMode").value="";$("rawMode").value=isRadar()?"metadata":isOpenOptical()||isL3()||isWorldCoverS2()||isModis()?"assets":"original";$("rawTransport").value="auto";
     clearScenes();renderProfile();if(isOfficial())loadCollections();
+  });
+  $("s2SafeShortcut").addEventListener("click",async()=>{
+    if(state.busy||state.connecting||state.editing)return;
+    state.profile="cdse-original";state.collection="sentinel-2-l2a";$("sourceProfile").value=state.profile;
+    $("collectionFilter").value="";$("allDates").checked=false;$("radarMode").value="";
+    $("rawMode").value="original";$("rawTransport").value="odata";
+    Batch.primaryChanged();clearScenes();renderProfile();
+    await loadCollections();renderCollectionPicker();renderProfile();
   });
   for(const id of ["s5pCollection","sen3Collection"])$(id).addEventListener("change",clearScenes);
   $("gediCollection").addEventListener("change",()=>{clearScenes();renderProfile();});

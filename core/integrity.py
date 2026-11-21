@@ -45,10 +45,10 @@ def checked_local_receipt(path, receipt, expected, cancel):
         raise UserError("已有文件缺少匹配的完整性记录或内容已变化；请移走文件和同名 .starmap.json 后重试。") from None
 
 
-def audit_raster(path, options, valid_pixels, cancel):
-    """Force every output block to decode before publishing a nonempty raster."""
+def audit_raster(path, options, valid_pixels, cancel, *, allow_empty=False):
+    """Decode every output block; an empty analysis is allowed only with a valid raw backup."""
     total = 0
-    per_band = [0] * options["count"] if options["mode"] == "rtc" else None
+    per_band = [0] * options["count"] if options["mode"] in ("rtc", "research_unmasked") else None
     try:
         with rasterio.open(path) as raster:
             for _, window in raster.block_windows(1):
@@ -69,7 +69,7 @@ def audit_raster(path, options, valid_pixels, cancel):
                 total += int(np.count_nonzero(valid))
     except (ValueError, OSError, rasterio.errors.RasterioError):
         raise UserError("最终 GeoTIFF 存在无法解码的区块或不一致的掩膜，未保存。") from None
-    if not total or total != valid_pixels:
+    if (not total and not allow_empty) or total != valid_pixels:
         raise UserError("最终 GeoTIFF 有效像元计数不一致，未保存。")
     result = {"size": path.stat().st_size, "sha256": sha256_file(path, cancel), "valid_pixels": total}
     if per_band is not None:

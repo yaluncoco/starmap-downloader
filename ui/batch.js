@@ -130,7 +130,7 @@ const Batch = {
           fields += `<p class="field-note">${config.alignment === "primary" ? "先下载主影像，再完整读取其实际网格；可以在检索结果下方选择参考文件。" : "无足迹处保留 NoData，不在轨道空隙插值。"}</p>`;
         }
       } else if (source.kind === "optical") {
-        fields += select("mode", "导出内容", [["rgbnir", "RGB + 近红外反射率"], ["ndvi", "NDVI"], ["rgb", "自然色浏览图"], ["all", "全部 12 波段"], ["custom", "自选波段"]], o.mode);
+        fields += select("mode", "导出内容", [["research", "研究分析包：10 波段 + SCL + 备份 + 来源"], ["rgbnir", "RGB + 近红外反射率"], ["ndvi", "NDVI"], ["rgb", "自然色浏览图"], ["all", "全部 12 波段"], ["custom", "自选波段"]], o.mode);
         if (o.mode === "custom") { if (!o.bands) o.bands = ["B04", "B03", "B02", "B08"]; fields += arrays("bands", allBands.map(b => [b, b]), o.bands); }
         fields += select("resolution", "输出像元大小", [10, 20, 60].map(n => [n, n + " 米"]), o.resolution);
         fields += check("mask_clouds", "去除云、薄云和云阴影", o.mask_clouds);

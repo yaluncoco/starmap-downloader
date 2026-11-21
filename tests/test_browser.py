@@ -30,6 +30,7 @@ def test_desktop_ui_search_download_and_reuse(server, provider, tmp_path):
         page.locator('[data-account="oauth"]').click()
         pw.expect(page.locator("#clientId")).to_be_editable()
         pw.expect(page.locator("#outputDirectory")).not_to_have_value("")
+        pw.expect(page.locator("#imageMode")).to_have_value("research")
         pw.expect(page.locator("#searchScenes")).to_be_disabled()
         assert page.locator("#map .leaflet-pane").count() > 0
         page.locator("#clientId").fill("mock-client")
@@ -67,7 +68,8 @@ def test_desktop_ui_search_download_and_reuse(server, provider, tmp_path):
         page.locator("#confirmDownload").click()
         pw.expect(page.locator("#jobStatus")).to_have_text("下载完成", timeout=12000)
         pw.expect(page.locator("#jobMessage")).to_contain_text("新保存 1 景")
-        assert len(list((tmp_path / "校验结果").rglob("*.tif"))) == 1
+        assert len(list((tmp_path / "校验结果").rglob("*.tif"))) == 4
+        assert len(list((tmp_path / "校验结果").rglob("*.sources.json"))) == 1
         assert len(provider.process_calls) == 1
 
         # A completed queue stays visible without intercepting the next download button click.
@@ -146,5 +148,40 @@ def test_category_switch_and_raw_asset_workflow(server, raw_provider, tmp_path):
         assert next((tmp_path / "验证原始资产").rglob("*.safe")).read_bytes() == XML
         page.locator("#sourceProfile").select_option("dem-30")
         pw.expect(page.locator("#scenesTableWrap")).to_be_hidden()
+        assert not errors
+        browser.close()
+
+
+@pytest.mark.browser
+def test_complete_safe_shortcut_preserves_region_dates_and_output(server, raw_provider, tmp_path):
+    from test_raw_workflow import COLL
+    pw = pytest.importorskip("playwright.sync_api")
+    errors = []
+    with pw.sync_playwright() as driver:
+        browser = driver.chromium.launch(channel=os.environ.get("STARMAP_TEST_BROWSER", "msedge"), headless=True)
+        page = browser.new_page(viewport={"width": 1360, "height": 900})
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        page.route(re.compile(r"^https://"), lambda route: route.abort())
+        open_data_page(page, server.origin)
+        page.locator("#sourceProfile").select_option("s2-earth-search")
+        pw.expect(page.locator("#imageMode")).to_have_value("research")
+        page.locator('[data-tab="coordinates"]').click()
+        page.locator("#coordinates").fill(TRIANGLE)
+        page.locator("#applyCoordinates").click()
+        pw.expect(page.locator("#aoiName")).to_have_text("坐标研究区")
+        geometry = page.evaluate("state.aoi.geometry")
+        page.locator("#startDate").fill("2024-06-01")
+        page.locator("#endDate").fill("2024-06-10")
+        output = str(tmp_path / "原始产品对照")
+        page.locator("#outputDirectory").fill(output)
+        page.locator("#s2SafeShortcut").click()
+        pw.expect(page.locator("#rawCollection")).to_have_value(COLL)
+        pw.expect(page.locator("#rawMode")).to_have_value("original")
+        pw.expect(page.locator("#rawTransport")).to_have_value("odata")
+        pw.expect(page.locator("#rawWholeProduct")).to_contain_text("完整 Sentinel-2 SAFE")
+        pw.expect(page.locator("#startDate")).to_have_value("2024-06-01")
+        pw.expect(page.locator("#endDate")).to_have_value("2024-06-10")
+        pw.expect(page.locator("#outputDirectory")).to_have_value(output)
+        assert page.evaluate("state.aoi.geometry") == geometry
         assert not errors
         browser.close()

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 import threading
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 from requests.auth import AuthBase
 
@@ -13,6 +13,9 @@ from .http import HttpClient, check_cancel
 EDL_TOKEN_URL = "https://urs.earthdata.nasa.gov/api/users/find_or_create_token"
 DATA_HOSTS = frozenset({"data.lpdaac.earthdatacloud.nasa.gov", "data.ornldaac.earthdata.nasa.gov"})
 DATA_BUCKETS = frozenset({"lp-prod-protected", "lp-prod-public", "ornl-cumulus-prod-protected", "ornl-cumulus-prod-public"})
+ORNL_CDN_HOST = "d3o6w55j8uz1ro.cloudfront.net"
+ORNL_CDN_BUCKETS = frozenset({"ornl-cumulus-prod-protected.s3.us-west-2.amazonaws.com",
+                              "ornl-cumulus-prod-public.s3.us-west-2.amazonaws.com"})
 _TOKEN = re.compile(r"[A-Za-z0-9._-]{16,16000}\Z")
 
 
@@ -25,8 +28,23 @@ class _ExplicitHeaders(AuthBase):
         return request
 
 
+def _ornl_cdn(parsed):
+    """ORNL's signed CDN route is trusted only after a verified NASA data-host redirect."""
+    if parsed.hostname != ORNL_CDN_HOST or len(parsed.geturl()) > 16000:
+        return False
+    parts = unquote(parsed.path).split("/")
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    required = {"Expires", "Signature", "Key-Pair-Id"}
+    return (len(parts) >= 5 and parts[0] == "" and re.fullmatch(r"s3-[0-9a-f]{32}", parts[1])
+            and parts[2] in ORNL_CDN_BUCKETS and all(part not in ("", ".", "..") and "\\" not in part for part in parts[3:])
+            and required <= query.keys() <= required | {"A-userid"} and all(len(value) == 1 for value in query.values())
+            and re.fullmatch(r"[0-9]{1,12}", query["Expires"][0])
+            and re.fullmatch(r"[A-Za-z0-9_~=-]{16,8192}", query["Signature"][0])
+            and re.fullmatch(r"[A-Za-z0-9]{8,80}", query["Key-Pair-Id"][0]))
+
+
 def data_url(url, *, redirect=False):
-    """Allow NASA data hosts, and exact NASA S3 buckets only after a redirect."""
+    """Allow NASA origins, and exact signed NASA storage/CDN routes after a redirect."""
     if not isinstance(url, str):
         raise UserError("NASA 数据目录中的下载地址无效。")
     try:
@@ -41,6 +59,8 @@ def data_url(url, *, redirect=False):
     if host in DATA_HOSTS and (redirect or not parsed.query):
         return url
     if redirect:
+        if _ornl_cdn(parsed):
+            return url
         match = re.fullmatch(r"([a-z0-9-]+)\.s3(?:[.-][a-z0-9-]+)?\.amazonaws\.com", host)
         if match and match[1] in DATA_BUCKETS:
             return url
@@ -111,7 +131,7 @@ class EarthdataAuth:
 
 
 def request_data(http, auth, url, *, cancel=None, headers=None, **kwargs):
-    """Follow signed S3 redirects without ever forwarding the Earthdata token to S3."""
+    """Follow signed storage/CDN redirects without forwarding the Earthdata token."""
     url = data_url(url)
     base_headers = {"Accept-Encoding": "identity", **(headers or {})}
     if any(key.lower() in ("authorization", "cookie") for key in base_headers):

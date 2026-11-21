@@ -225,6 +225,52 @@ def test_earthdata_redirect_never_sends_token_to_s3(monkeypatch):
     assert len(calls) == 1
 
 
+ORNL_CDN = ("https://d3o6w55j8uz1ro.cloudfront.net/s3-" + "a" * 32 +
+            "/ornl-cumulus-prod-protected.s3.us-west-2.amazonaws.com/gedi/file.h5"
+            "?Expires=2000000000&Signature=" + "s" * 64 + "&Key-Pair-Id=KEXAMPLE12&A-userid=synthetic")
+
+
+def test_ornl_signed_cdn_redirect_downloads_without_earthdata_token(monkeypatch):
+    auth = EarthdataAuth()
+    auth.connect({"token": TOKEN})
+    calls = []
+    redirect = StubResponse(status=303, headers={"Location": ORNL_CDN})
+    final = StubResponse(content=b"data")
+
+    def request(_, method, url, **kwargs):
+        calls.append((url, kwargs["headers"]))
+        return redirect if len(calls) == 1 else final
+
+    monkeypatch.setattr(HttpClient, "request", request)
+    http = HttpClient()
+    try:
+        assert request_data(http, auth, "https://data.ornldaac.earthdata.nasa.gov/object") is final
+        assert calls[0][1]["Authorization"] == "Bearer " + TOKEN
+        assert calls[1][0] == ORNL_CDN and "Authorization" not in calls[1][1] and redirect.closed
+    finally:
+        http.close()
+
+
+@pytest.mark.parametrize("url", [
+    ORNL_CDN.replace("d3o6w55j8uz1ro", "other"),
+    ORNL_CDN.replace("ornl-cumulus-prod-protected", "other-bucket"),
+    ORNL_CDN.replace("/gedi/file", "/%2e%2e/file"),
+    ORNL_CDN.replace("Expires=2000000000", "Expires=invalid"),
+    ORNL_CDN + "&Expires=2000000001",
+    ORNL_CDN + "&unknown=parameter",
+    ORNL_CDN.split("?")[0],
+])
+def test_ornl_cdn_rejects_other_hosts_buckets_unsigned_and_ambiguous_routes(url):
+    with pytest.raises(UserError):
+        data_url(url, redirect=True)
+
+
+def test_ornl_cdn_cannot_be_used_as_an_initial_authenticated_origin():
+    assert data_url(ORNL_CDN, redirect=True) == ORNL_CDN
+    with pytest.raises(UserError):
+        data_url(ORNL_CDN)
+
+
 def test_full_api_download_exact_reference_grid_and_sparse_values(client, gedi_setup, tmp_path):
     upstream, reference, geometry = gedi_setup
     request = search_request(client, geometry)

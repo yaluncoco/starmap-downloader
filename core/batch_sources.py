@@ -14,7 +14,7 @@ def _source(profile, title, group, kind, time_note, *, auth=None, modes=None, as
 
 
 _ACQUISITION = "按相同 UTC 日期范围检索采集数据；不保证各卫星同一时刻过境。"
-_OPTICAL = {"mode": "rgbnir", "resolution": 10, "max_cloud": 20, "mask_clouds": True}
+_OPTICAL = {"mode": "research", "resolution": 10, "max_cloud": 20, "mask_clouds": True}
 SOURCES = [
     _source("gedi-earthdata", "NASA GEDI · 高度 / 森林结构 / 生物量", "激光与森林参数", "gedi",
             "足迹按相同 UTC 日期范围筛选；L3/L4B 按整个汇总期重叠匹配。", auth="earthdata",
