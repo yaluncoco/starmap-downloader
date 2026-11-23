@@ -68,7 +68,7 @@ class DownloadTasks:
                     continue
 
     def create(self, identifier, kind, definition, *, previous=None):
-        if not isinstance(identifier, str) or not _ID.fullmatch(identifier) or kind not in ("download", "batch-download"):
+        if not isinstance(identifier, str) or not _ID.fullmatch(identifier) or kind not in ("download", "batch-download", "monthly-download"):
             raise UserError("下载任务标识无效，未保存任务。")
         digest = _definition(definition)
         title = definition["title"]
@@ -90,11 +90,21 @@ class DownloadTasks:
                 self.states[previous].update(status="replaced", retry_id=identifier)
                 _save_json(self.root / (previous + ".state.json"), self.states[previous])
 
+    def revise(self, identifier, definition):
+        """Freeze a just-prepared grid before the first source bytes are written."""
+        digest = _definition(definition)
+        with self.lock:
+            state = self.states.get(identifier)
+            if state is None or state.get("status") not in ("running", "cancelling"):
+                raise UserError("下载任务已结束，无法更新原计划。")
+            _save_json(self.root / (identifier + ".task.json"), {"schema": 1, "id": identifier, "kind": state["kind"],
+                                                                "definition": definition, "sha256": digest})
+
     def update(self, snapshot, *, force=False):
         identifier = snapshot["id"]
         with self.lock:
             state = self.states.get(identifier)
-            if state is None or state.get("status") == "replaced":
+            if state is None or state.get("status") in ("replaced", "abandoned"):
                 return
             state.update(status=snapshot["status"], message=snapshot["message"], progress=snapshot["progress"],
                          updated_at=time.time(), error=snapshot.get("error"),
@@ -118,7 +128,7 @@ class DownloadTasks:
                     raise ValueError
                 record = json.loads(path.read_text(encoding="utf-8"))
                 if (record["schema"] != 1 or record["id"] != identifier
-                        or record["kind"] not in ("download", "batch-download")
+                        or record["kind"] not in ("download", "batch-download", "monthly-download")
                         or _definition(record["definition"]) != record["sha256"]):
                     raise ValueError
                 return record["kind"], record["definition"]
@@ -129,3 +139,15 @@ class DownloadTasks:
         with self.lock:
             return copy.deepcopy(sorted((state for state in self.states.values() if state.get("status") in INCOMPLETE),
                                         key=lambda state: state.get("updated_at", 0), reverse=True))
+
+    def abandon(self, identifier):
+        """Remove an unfinished queue entry, preserving products and verified caches."""
+        if not isinstance(identifier, str) or not _ID.fullmatch(identifier):
+            raise UserError("请选择一个尚未完成的下载任务。")
+        with self.lock:
+            state = self.states.get(identifier)
+            if state is None or state.get("status") not in INCOMPLETE:
+                raise UserError("该任务已结束或正在运行；运行中的任务请先取消。")
+            state.update(status="abandoned", updated_at=time.time(), message="任务已取消；已下载文件和有效缓存已保留。")
+            _save_json(self.root / (identifier + ".state.json"), state)
+            return {"cancelled": True, "job_id": identifier, "files_preserved": True}

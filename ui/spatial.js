@@ -2,7 +2,7 @@
 
 const Spatial = {
   generation:0, version:0, timer:null, signature:"", layers:new Map(), groupLayers:new Map(), views:new Map(), fitted:new Set(), priorities:new Map(), touched:new Set(), hovered:null,
-  summary:null, allocation:null, overlap:null, uncovered:null, point:null, popup:null, zooming:false, fitPending:false,
+  summary:null, summaryKey:"", allocation:null, overlap:null, uncovered:null, point:null, popup:null, zooming:false, fitPending:false,
   colors:["#177d72","#477ab5","#a46c28","#8465ad","#ae5375","#577f44"], colorSignature:"", colorMap:new Map(),
   current(id=Batch.active) {
     const group=Batch.results.get(id);
@@ -18,12 +18,14 @@ const Spatial = {
     const group=Batch.results.get(id);
     if(group)Batch.settings(group.profile).options.priority=priority;
     else this.priorities.set("primary",priority);
+    if(Monthly.enabled()&&Monthly.current())Monthly.current().priority=priority;
     this.touched.add(group?group.id:"primary");
     if(group)Batch.renderSettings();
     this.refresh();schedulePlan();
   },
   request(current) {
-    return {geometry:state.aoi.geometry,profile:current.profile,query_id:current.query.id,criteria:current.criteria,
+    if(Monthly.enabled()&&Monthly.query)return Monthly.spatialRequest(current);
+    return {...Cities.request(),profile:current.profile,query_id:current.query.id,criteria:current.criteria,
       scene_keys:[...current.selected],options:{priority:this.priorityFor(current.id)},
       ...(Batch.query?{batch_id:Batch.query.id,group_id:current.id}:{})};
   },
@@ -33,7 +35,7 @@ const Spatial = {
     return this.views.get(id);
   },
   reset() {
-    this.generation++;this.version++;clearTimeout(this.timer);this.touched.clear();this.summary=null;this.signature="";
+    this.generation++;this.version++;clearTimeout(this.timer);this.touched.clear();this.summary=null;this.summaryKey="";this.signature="";
     this.layers.clear();this.groupLayers.clear();this.views.clear();this.fitted.clear();this.hovered=null;this.fitPending=false;this.colorSignature="";this.colorMap.clear();
     footprintLayer?.clearLayers();this.allocation?.clearLayers();this.overlap?.clearLayers();this.uncovered?.clearLayers();
     if(this.popup&&map)map.closePopup(this.popup);this.popup=null;this.point=null;
@@ -69,19 +71,21 @@ const Spatial = {
     });
   },
   refresh() {
-    this.version++;clearTimeout(this.timer);this.summary=null;
+    this.version++;clearTimeout(this.timer);
     const current=this.current();
+    const summaryKey=JSON.stringify([this.generation,current.id,current.query?.id,[...current.selected],this.priorityFor(current.id)]);
+    if(summaryKey!==this.summaryKey)this.summary=null;
     if(!state.aoi||!current.query||!current.scenes.some(s=>s.products?.some(p=>p.footprint))) {
       this.renderFootprints(current);$("coveragePanel").hidden=true;$("mapFootprintLegend").hidden=true;return;
     }
-    this.renderFootprints(current);this.renderAllocation(null);this.renderSummary(current,null);
-    if(state.busy||state.aoiPending)return;
+    this.renderFootprints(current);this.renderAllocation(this.summary);this.renderSummary(current,this.summary);
+    if(this.summary||state.busy||state.aoiPending)return;
     const version=this.version, generation=this.generation;
     this.timer=setTimeout(async()=>{
       try {
         const result=await api("coverage",this.request(current));
         if(version!==this.version||generation!==this.generation)return;
-        this.summary=result;this.renderFootprints(this.current());this.renderSummary(this.current(),result);this.renderAllocation(result);
+        this.summary=result;this.summaryKey=summaryKey;this.renderFootprints(this.current());this.renderSummary(this.current(),result);this.renderAllocation(result);
         const fitKey=current.id+":"+current.query.id;
         if(result.selected_count&&!this.fitted.has(fitKey)){this.fitted.add(fitKey);this.fit();}
       } catch(error) {
@@ -247,6 +251,7 @@ const Spatial = {
     const generation=this.generation, query=current.query.id, version=this.version;
     try {
       const summary=await api("coverage",this.request(current));
+      if(state.busy)return;
       if(generation!==this.generation||this.current(id).query?.id!==query||(automatic?this.touched.has(current.id):version!==this.version))return;
       if(summary.recommended_keys.length>500){if(!automatic)toast("推荐结果超过 500 个区块，请缩小日期或研究区后分批下载。",true);return;}
       this.assign(this.current(id),summary.recommended_keys);

@@ -9,9 +9,13 @@
   <link rel="stylesheet" href="vendor/leaflet-draw/leaflet.draw.css">
   <link rel="icon" type="image/svg+xml" href="assets/globe-orbit.svg">
   <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="workflow.css">
   <script src="vendor/leaflet/leaflet.js" defer></script>
   <script src="vendor/leaflet-draw/leaflet.draw.js" defer></script>
   <script src="accounts.js" defer></script>
+  <script src="cities.js" defer></script>
+  <script src="monthly.js" defer></script>
+  <script src="map.js" defer></script>
   <script src="batch.js" defer></script>
   <script src="spatial.js" defer></script>
   <script src="app.js" defer></script>
@@ -110,7 +114,9 @@
             <p class="field-note">轨道足迹主要覆盖约 51.6°S–51.6°N。2023 年 3 月至 2024 年 4 月暂停观测；数据发布有延迟。<button id="gediDocs" class="inline-link" type="button">所选 NASA 产品说明 ↗</button></p>
           </div>
           <div id="radarModeField" hidden><label for="radarMode">雷达成像模式</label><select id="radarMode" data-lock><option value="">全部模式</option><option value="IW">IW · 干涉宽幅</option><option value="EW">EW · 超宽幅</option><option value="SM">SM · 条带</option><option value="WV">WV · 波模式</option></select></div>
+          <div id="timeModeField"><label for="timeMode">时间与输出方式</label><select id="timeMode" data-lock><option value="dates">按日期范围选择</option><option value="monthly">按月下载 · 每月一份拼接影像</option></select></div>
           <div id="dateFields" class="two-columns date-fields"><div><label for="startDate">开始日期</label><input id="startDate" type="date" data-lock></div><div><label for="endDate">结束日期</label><input id="endDate" type="date" data-lock></div></div>
+          <div id="monthlyFields" hidden><div class="two-columns date-fields"><div><label for="startMonth">开始月份</label><input id="startMonth" type="month" data-lock></div><div><label for="endMonth">结束月份</label><input id="endMonth" type="month" data-lock></div></div><p class="field-note">支持跨年；每个月独立选择来源，下载一份拼接影像。无匹配月份不生成文件，不用相邻月份补缺。当前 UTC 月份尚未结束。</p></div>
           <div id="cloudOptions">
           <div class="label-row"><label for="maxCloud">整景云量上限</label><span id="cloudValue" class="value-pill">20%</span></div>
           <input id="maxCloud" type="range" min="0" max="100" value="20" step="1" data-lock>
@@ -206,8 +212,9 @@
 
         <section class="step-section aoi-section">
           <div class="section-heading"><span class="step-number">02</span><h2>研究区域</h2><button id="fitAoi" class="inline-link" disabled>定位边界</button></div>
-          <div class="segmented" id="aoiTabs"><button class="active" data-tab="map" data-lock>地图绘制</button><button data-tab="import" data-lock>导入边界</button><button data-tab="coordinates" data-lock>输入坐标</button></div>
-          <div id="tab-map" class="aoi-tab"><p class="field-note">搜索地点后，在地图上画矩形或多边形。</p><div class="drawing-actions"><button id="drawRectangle" class="button button-outline" data-lock><svg class="icon"><use href="#i-rect"/></svg>画矩形</button><button id="drawPolygon" class="button button-outline" data-lock><svg class="icon"><use href="#i-poly"/></svg>画多边形</button></div></div>
+          <div class="segmented" id="aoiTabs"><button class="active" data-tab="city" type="button">按城市</button><button data-tab="map" type="button">地图绘制</button><button data-tab="import" type="button">导入边界</button><button data-tab="coordinates" type="button">输入坐标</button></div>
+          <div id="tab-city" class="aoi-tab"><label for="cityProvince">省级行政区</label><select id="cityProvince" data-lock><option value="">正在载入…</option></select><label for="cityFilter">城市名称筛选</label><input id="cityFilter" type="search" placeholder="例如：北京、重庆、济南" data-lock><label for="cityChoice">城市 / 州盟 / 其他行政区</label><select id="cityChoice" data-lock><option value="">正在载入…</option></select><p id="cityStatus" class="field-note" aria-live="polite"></p><button id="reloadCities" class="inline-link" type="button" hidden>重新读取城市列表</button><button id="applyCity" class="button button-outline full-width" type="button" data-lock>使用完整行政边界</button><p class="field-note compact">包含下辖县区，下载使用完整边界，可导出整个区域 SHP。内置边界来自 2024 年公开数据；需要其他版本时可导入自己的 SHP。</p></div>
+          <div id="tab-map" class="aoi-tab" hidden><p class="field-note">搜索地点后，在地图上画矩形或多边形。</p><div class="drawing-actions"><button id="drawRectangle" class="button button-outline" data-lock><svg class="icon"><use href="#i-rect"/></svg>画矩形</button><button id="drawPolygon" class="button button-outline" data-lock><svg class="icon"><use href="#i-poly"/></svg>画多边形</button></div></div>
           <div id="tab-import" class="aoi-tab" hidden><button id="importBoundary" class="upload-area" data-lock><svg class="icon"><use href="#i-upload"/></svg><strong>选择 SHP / GeoJSON</strong><span>SHP 的 .shp、.shx、.dbf、.prj 放在同一目录</span></button><label for="sourceCrs">源坐标系 <span class="optional">可手动覆盖 .prj</span></label><input id="sourceCrs" placeholder="自动读取 .prj；也可填 EPSG:4326" data-lock><p id="importFileName" class="field-note"></p></div>
           <div id="tab-coordinates" class="aoi-tab" hidden><label for="coordinates">经度在前、纬度在后 · WGS84</label><textarea id="coordinates" rows="4" placeholder="116.20,39.80&#10;116.30,39.80&#10;116.30,39.90&#10;116.20,39.90" spellcheck="false" data-lock></textarea><p class="field-note">每行一个点，自动闭合。也支持单行：西、南、东、北。</p><button id="applyCoordinates" class="button button-outline full-width" data-lock><svg class="icon"><use href="#i-target"/></svg>应用坐标并定位</button></div>
           <div id="aoiSummary" class="aoi-summary empty"><span class="aoi-status-dot"></span><div><strong id="aoiName">尚未设置研究区</strong><span id="aoiStats">地图绘制、导入边界或填写坐标</span></div><button id="clearAoi" class="icon-button" title="清除研究区" aria-label="清除研究区" disabled data-lock><svg class="icon"><use href="#i-trash"/></svg></button></div>
@@ -223,9 +230,10 @@
     </aside>
 
     <section class="workspace">
+      <section id="taskbar" class="taskbar" hidden aria-label="当前任务"><div><strong id="taskbarTitle">当前任务</strong><span id="taskbarMessage" role="status">准备中…</span></div><span id="taskbarFraction">0%</span><button id="cancelTaskbar" class="button button-outline danger" type="button">取消任务</button></section>
       <div class="map-panel">
         <div id="map" aria-label="研究区域地图"></div>
-        <div id="mapOffline" class="map-offline" hidden><svg class="icon"><use href="#i-info"/></svg><span>底图暂时无法加载，坐标和边界下载功能仍可使用。</span></div>
+        <div id="mapOffline" class="map-offline" hidden><svg class="icon"><use href="#i-info"/></svg><span id="mapOfflineMessage">底图暂时无法加载，城市选择、坐标和边界下载仍可使用。</span><button id="retryBasemap" class="inline-link" type="button">重试底图</button></div>
         <form id="placeSearchForm" class="place-search"><svg class="icon"><use href="#i-search"/></svg><input id="placeQuery" placeholder="搜索城市、县区或地点，例如：平原县" autocomplete="off" aria-label="搜索地点"><button type="submit" id="placeSearchButton">搜索</button><div id="placeResults" class="place-results" hidden></div></form>
         <div class="map-tools"><button id="mapDrawRectangle" class="icon-button" title="画矩形" aria-label="在地图上画矩形"><svg class="icon"><use href="#i-rect"/></svg></button><button id="mapDrawPolygon" class="icon-button" title="画多边形" aria-label="在地图上画多边形"><svg class="icon"><use href="#i-poly"/></svg></button><span class="tool-divider"></span><button id="editBoundary" class="icon-button" title="编辑边界，完成后再点击一次" aria-label="编辑边界"><svg class="icon"><use href="#i-edit"/></svg></button><button id="mapDeleteAoi" class="icon-button danger" title="删除研究区并清空影像选择" aria-label="在地图上删除研究区" disabled><svg class="icon"><use href="#i-trash"/></svg></button><button id="mapFitAoi" class="icon-button" title="定位研究区" aria-label="定位研究区"><svg class="icon"><use href="#i-target"/></svg></button></div>
         <div id="mapFootprintLegend" class="footprint-legend" hidden>
@@ -248,6 +256,7 @@
       <section id="resumeDownloads" class="resume-downloads" hidden aria-label="未完成下载"><strong>未完成的下载</strong><p>关闭软件后仍可继续原任务。已完成影像核验后跳过。</p><div id="resumeDownloadList"></div></section>
       <section class="scenes-panel">
         <div class="scenes-heading"><div><h2>候选产品 <span id="sceneCount" class="count-badge">0</span></h2><p id="scenesSubtitle">每行一个源产品，区域拼接输出一份影像。</p></div><div class="scene-selection-actions"><button id="selectAll" class="inline-link" disabled>全选</button><span>·</span><button id="selectNone" class="inline-link" disabled>清空选择</button></div></div>
+        <div id="monthlyResults" class="monthly-results" hidden><div class="monthly-results-heading"><strong id="monthlySelectionSummary"></strong><label>查看月份 <select id="monthResultSelect" data-lock></select></label></div><div id="monthlyResultTabs" class="monthly-result-tabs" aria-label="各月产品与下载选择"></div></div>
         <div id="batchResultTabs" class="batch-result-tabs" role="tablist" aria-label="主数据与附带数据结果" hidden></div>
         <div id="coveragePanel" class="coverage-panel" hidden>
           <div class="coverage-heading"><strong id="coverageSummary" aria-live="polite"></strong><div class="coverage-actions"><label class="sr-only" for="spatialPriority">交叠区域优先级</label><select id="spatialPriority" aria-label="交叠区域优先级" data-lock><option value="cloud">云量较低优先</option><option value="newest">日期较新优先</option><option value="selection">手动排列优先</option></select><button id="recommendCoverage" class="inline-link" type="button" title="清理重复覆盖的推荐产品，保留独有边缘；可手动加入其他日期补云">精简推荐</button><button id="fitFootprints" class="inline-link" type="button">影像总览</button></div></div>
@@ -259,7 +268,7 @@
         <div id="scenesEmpty" class="scenes-empty"><div class="empty-illustration"><span class="empty-orbit"></span><svg class="icon"><use href="#i-satellite"/></svg><i></i><i></i></div><strong>让影像覆盖你的研究区</strong><span>设置区域和时间，点击「查找可下载影像」。</span></div>
         <div id="scenesLoading" class="scenes-loading" hidden><span class="spinner"></span><strong>正在检索官方影像目录</strong><span id="searchMessage" aria-live="polite">准备检索…</span><button type="button" id="cancelSearch" class="inline-link danger" disabled>取消检索</button></div>
         <div id="scenesTableWrap" class="scenes-table-wrap" hidden><table class="scenes-table"><thead><tr><th class="check-column"></th><th><span id="sceneDateHeading">采集时间</span> <span>UTC</span></th><th>卫星</th><th id="tileHeading">瓦片</th><th>整景云量</th><th id="coverageHeading">区域覆盖</th></tr></thead><tbody id="scenesBody"></tbody></table></div>
-        <div class="download-footer"><div id="downloadEstimate" class="download-estimate"><strong>尚未选择影像</strong><span>选择后查看分辨率、预计体积和处理量。</span></div><button id="downloadSelected" class="button button-primary" disabled><svg class="icon"><use href="#i-download"/></svg><span>下载选中影像</span><span id="selectedCount" class="button-count" hidden>0</span></button></div>
+        <div class="download-footer"><div id="downloadEstimate" class="download-estimate"><strong>尚未选择影像</strong><span>选择后查看分辨率、预计体积和处理量。</span></div><button id="retryPlan" class="inline-link" type="button" hidden>重新检查计划</button><button id="downloadSelected" class="button button-primary" disabled><svg class="icon"><use href="#i-download"/></svg><span>下载选中影像</span><span id="selectedCount" class="button-count" hidden>0</span></button></div>
       </section>
     </section>
   </main>

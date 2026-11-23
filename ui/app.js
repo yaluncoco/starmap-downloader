@@ -80,11 +80,19 @@ const basename = (path) => String(path).split(/[\\/]/).pop();
 async function api(route, data) {
   const headers = {"X-App-Token":appToken};
   const init = data === undefined ? {cache:"no-store",headers} : {method:"POST",headers:{...headers,"Content-Type":"application/json"},body:JSON.stringify(data)};
-  const response = await fetch("/api/" + route, init);
-  let value;
-  try { value = await response.json(); } catch { throw new Error("本地服务没有响应，请重新启动软件。"); }
-  if (!response.ok) throw new Error(value.error || "操作失败，请重试。");
-  return value;
+  const controller=new AbortController();
+  const timeout=route==="dialog"?0:/^(connect|raw-connect|s3-connect|earthdata-connect)$/.test(route)?180000:route.startsWith("job?")?8000:30000;
+  const timer=timeout?setTimeout(()=>controller.abort(),timeout):null;
+  try {
+    const response = await fetch("/api/" + route, {...init,signal:controller.signal});
+    let value;
+    try { value = await response.json(); } catch { throw new Error("本地服务响应不完整，请重试操作。"); }
+    if (!response.ok) throw new Error(value.error || "操作失败，请重试。");
+    return value;
+  } catch(error) {
+    if(error.name==="AbortError")throw new Error("读取本地服务超时。已启动的任务会保留，请查看任务栏或重试读取进度。");
+    throw error;
+  } finally {if(timer)clearTimeout(timer);}
 }
 
 function toast(message, error=false, duration=7500) {
@@ -150,6 +158,7 @@ async function updateAction(download) {
 }
 function displayPath(path) { return path.startsWith("\\\\?\\UNC\\") ? "\\\\" + path.slice(8) : path.startsWith("\\\\?\\") ? path.slice(4) : path; }
 function criteria() {
+  if(Monthly.enabled()&&Monthly.query)return {...Monthly.current().criteria,max_cloud:Number($("maxCloud").value)};
   const result = {start:primaryDateEnabled()?$("startDate").value:null,end:primaryDateEnabled()?$("endDate").value:null};
   if(isOfficial())return {...result,collection:state.collection,radar_mode:state.collection==="sentinel-1-grd"?$("radarMode").value:""};
   if(isS5p()||isSen3())return {...result,collection:$(isSen3()?"sen3Collection":"s5pCollection").value};
@@ -167,8 +176,8 @@ function options() {
   return {mode:$("imageMode").value,resolution:Number($("resolution").value),max_cloud:Number($("maxCloud").value),mask_clouds:$("maskClouds").checked,bands:[...document.querySelectorAll("#customBands input:checked")].map(input=>input.value),layout:isNativeS3()?"mosaic":$("imageLayout").value,priority:Spatial.priorityFor("primary"),fill_gaps:$("mosaicFallback").checked};
 }
 function downloadRequest() {
-  const result={geometry:state.aoi.geometry,profile:state.profile,criteria:criteria(),query_id:state.query?.id,scene_keys:[...state.selected],options:options(),output_dir:$("outputDirectory").value.trim()};
-  return Batch.query?Batch.downloadRequest(result):result;
+  const result={...Cities.request(),profile:state.profile,criteria:criteria(),query_id:state.query?.id,scene_keys:[...state.selected],options:options(),output_dir:$("outputDirectory").value.trim()};
+  return Monthly.enabled()&&Monthly.query?Monthly.request(result):Batch.query?Batch.downloadRequest(result):result;
 }
 function renderCollectionPicker() {
   const term=$("collectionFilter").value.trim().toLocaleLowerCase().replaceAll("‑","-");
@@ -240,6 +249,7 @@ function renderProfile() {
   $("downloadSelected").querySelector("span").textContent=Batch.enabled()?"下载主数据及附带数据":isGedi()?"下载选中 GEDI":"下载选中影像";
   if(Batch.enabled())$("searchScenes").querySelector("span").textContent="检索主数据及附带数据";
   Batch.renderChoices();
+  Monthly.render();
   renderAuth();
 }
 
@@ -399,7 +409,7 @@ function updateAvailability() {
     status.querySelector("span").textContent=state.plan ? (missing.length ? "联合下载需 " + missing.map(transportLabel).join(" / ") : "联合下载 · 下载权限已就绪") : "附带 " + Batch.checked.size + " 个来源 · 可提前登录";
   }
   $("searchScenes").disabled=!canSearch();
-  const companion=Batch.results.get(Batch.active), count=Batch.query?Batch.totalSelected():state.selected.size;
+  const companion=Batch.results.get(Batch.active), count=Monthly.enabled()&&Monthly.query?Monthly.count():Batch.query?Batch.totalSelected():state.selected.size;
   $("selectAll").disabled=!(companion?companion.scenes.length:state.scenes.some(selectable))||state.busy;
   $("selectNone").disabled=!(companion?companion.selected.size:state.selected.size)||state.busy;
   $("downloadSelected").disabled=!hasDownloadAccess()||!state.aoi||!count||state.busy||state.connecting||state.editing||state.aoiPending||!state.plan;
@@ -409,8 +419,12 @@ function updateAvailability() {
   updateButtons();
   Accounts.render();
   Spatial.availability();
+  Cities.describe();
+  $("monthResultSelect").disabled=state.busy||state.connecting;
+  document.querySelectorAll("#monthlyResultTabs button,#monthlyResultTabs input").forEach(element=>element.disabled=state.busy||state.connecting);
   $("retryDownload").disabled=state.busy||state.connecting;
   document.querySelectorAll("[data-retry-download]").forEach(button=>button.disabled=state.busy||state.connecting);
+  document.querySelectorAll("[data-abandon-download]").forEach(button=>button.disabled=state.busy||state.connecting);
 }
 function setBusy(value) {state.busy=value;updateAvailability();}
 function renderAuth() {
@@ -452,6 +466,7 @@ function configureMap() {
   L.control.scale({imperial:false,maxWidth:100}).addTo(map);
   aoiLayer=L.featureGroup().addTo(map);footprintLayer=L.featureGroup().addTo(map);
   Spatial.initializeMap();
+  MapView.initialize();
   changeBasemap("standard");
   map.on(L.Draw.Event.CREATED,async(event)=>{
     $("drawHint").hidden=true;drawHandler=null;
@@ -459,8 +474,8 @@ function configureMap() {
     catch(error){toast(error.message,true);}
   });
   map.on("draw:drawstop",()=>{$("drawHint").hidden=true;updateAvailability();});
-  setTimeout(()=>map.invalidateSize(),150);
-  new ResizeObserver(()=>map.invalidateSize()).observe($("map"));
+  setTimeout(()=>map?.invalidateSize(),150);
+  new ResizeObserver(()=>map?.invalidateSize()).observe($("map"));
 }
 async function toggleMapSize() {
   if(!map)return;
@@ -472,15 +487,7 @@ async function toggleMapSize() {
   $("mapExpand").textContent=expanded?"显示列表":"放大地图";$("mapExpand").setAttribute("aria-pressed",String(expanded));
 }
 function changeBasemap(kind) {
-  if(!map)return;
-  if(baseLayer)map.removeLayer(baseLayer);
-  if(kind==="satellite")baseLayer=L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",{maxZoom:19,attribution:"Tiles © Esri · Maxar · Earthstar Geographics"});
-  else baseLayer=L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",{maxZoom:19,attribution:'© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors'});
-  let errors=0;
-  baseLayer.on("tileerror",()=>{errors++;if(errors>=4)$("mapOffline").hidden=false;});
-  baseLayer.on("tileload",()=>{$("mapOffline").hidden=true;});
-  baseLayer.addTo(map);
-  document.querySelectorAll("#basemapSwitch button").forEach(button=>button.classList.toggle("active",button.dataset.basemap===kind));
+  MapView.change(kind);
 }
 function startDrawing(kind) {
   if(state.busy||state.aoiPending)return;
@@ -496,7 +503,7 @@ function stopBoundaryTools() {
   if(drawHandler){drawHandler.disable();drawHandler=null;}
   if(editHandler){editHandler.disable();editHandler=null;}
   state.editing=false;$("editBoundary").classList.remove("active");$("drawHint").hidden=true;
-  if(map){map.getPane("aoiPane").style.pointerEvents="none";map.getPane("footprintPane").style.pointerEvents="";}
+  if(map?.getPane("aoiPane")){map.getPane("aoiPane").style.pointerEvents="none";map.getPane("footprintPane").style.pointerEvents="";}
 }
 async function mutateAoi(value,fit=true) {
   const version=++state.aoiVersion;state.aoiPending=true;stopBoundaryTools();updateAvailability();
@@ -545,7 +552,7 @@ function setAoi(aoi,fit=true,keepScenes=false) {
 }
 function activateAoiTab(name) {
   document.querySelectorAll("#aoiTabs button").forEach(button=>button.classList.toggle("active",button.dataset.tab===name));
-  for(const tab of ["map","import","coordinates"])$("tab-"+tab).hidden=tab!==name;
+  for(const tab of ["city","map","import","coordinates"])$("tab-"+tab).hidden=tab!==name;
 }
 async function applyCoordinates() {
   try{const result=await mutateAoi({coordinates:$("coordinates").value,name:"坐标研究区"});if(result)toast("坐标已应用。");}
@@ -585,7 +592,7 @@ async function exportBoundary() {
   try{
     const path=await nativePath("save_boundary",{extension},()=>choosePath("保存研究区边界","填写完整保存路径，文件名应以 ."+extension+" 结尾。"));
     if(!path)return;
-    const result=await api("export-aoi",{geometry:state.aoi.geometry,name:state.aoi.name,path});toast("研究区已保存："+displayPath(result.path), false, 11000);
+    const result=await api("export-aoi",{...Cities.request(),name:state.aoi.name,path});toast("研究区已保存："+displayPath(result.path), false, 11000);
   }catch(error){toast(error.message,true);}
 }
 async function searchPlaces(event) {
@@ -601,7 +608,9 @@ async function searchPlaces(event) {
 }
 
 function clearScenes() {
+  clearTimeout(planTimer);
   state.scenes=[];state.selected.clear();state.plan=null;state.query=null;state.planVersion++;Batch.clearResults();
+  Monthly.clear();$("retryPlan").hidden=true;
   Spatial.reset();
   $("sceneCount").textContent="0";$("scenesEmpty").hidden=false;$("scenesTableWrap").hidden=true;$("scenesLoading").hidden=true;
   $("scenesEmpty").querySelector("strong").textContent="让影像覆盖你的研究区";
@@ -614,7 +623,8 @@ function firstSelection() {
   const first=state.scenes.find(selectable);
   return new Set(first?[first.key]:[]);
 }
-function renderScenes() {
+function renderScenes(skipPlan=false) {
+  if(Monthly.query){Monthly.capture();Monthly.renderResults();}
   $("sceneCount").textContent=String(state.scenes.length);$("scenesLoading").hidden=true;$("scenesEmpty").hidden=!!state.scenes.length;$("scenesTableWrap").hidden=!state.scenes.length;
   if(!state.scenes.length){$("scenesEmpty").querySelector("strong").textContent="该条件下没有找到影像";$("scenesEmpty").querySelector(":scope > span").textContent=isDem()?"公开 DEM 索引没有覆盖该研究区的瓦片。":isWorldCover()?"只发布 2020 和 2021 年度产品。请检查日期范围或调整为有覆盖的研究区。":isSlc()?"没有符合条件的精确历史存档 ZIP。此入口不覆盖全球，不提供 2024-04-04 之后的采集数据。":"请调整日期、影像类别、筛选条件或研究区。";}
   $("scenesBody").innerHTML=state.scenes.map(scene=>{
@@ -631,15 +641,19 @@ function renderScenes() {
       isDem()?`${dates} · 可裁剪或下载整瓦片`:isRtc()?`${dates}${q.radar_mode?" · "+q.radar_mode:""} · 每景单独裁剪 · 线性 γ⁰`:
       `${dates} · 云量 ≤ ${q.max_cloud}% · ${$("imageLayout").value==="mosaic"?"候选为源产品，区域拼接输出一份影像":"逐产品时间序列"}`;
   }
-  Batch.renderResults();renderAssetPicker();updateAvailability();schedulePlan();Spatial.refresh();
+  Batch.renderResults();renderAssetPicker();updateAvailability();if(!skipPlan)schedulePlan();Spatial.refresh();
 }
 function renderEstimate() {
-  const selected=Batch.query?Batch.totalSelected():state.selected.size;
+  const selected=Monthly.enabled()&&Monthly.query?Monthly.count():Batch.query?Batch.totalSelected():state.selected.size;
   $("selectedCount").hidden=!selected;$("selectedCount").textContent=String(selected);
   const label=$("downloadEstimate"), headline=label.querySelector("strong"), body=label.querySelector("span");
   const p=state.plan, count=selected;
   if(!count){headline.textContent="尚未选择影像";body.textContent="选择后查看文件类型、预计体积和输出信息。";}
   else if(!p){headline.textContent=`已选择 ${count} 项`;body.textContent=(isRtc()&&rtcPolarizations().issue)||"正在检查下载计划…";}
+  else if(p.kind==="monthly"){
+    headline.textContent=`${p.output_count} 个月 · 每月一份拼接影像 · ${p.scene_count} 个源产品`;
+    body.textContent=`${p.boundary_name} · 各月独立 · 未压缩约 ${sizeLabel(p.estimated_bytes)}${missingAccess().length?" · 请先连接 "+missingAccess().map(transportLabel).join(" / "):""}`;
+  }
   else if(p.kind==="batch"){
     const missing=missingAccess();
     headline.textContent=`联合下载 · ${p.groups.length} 个来源 · ${p.scene_count} 个结果`;
@@ -665,27 +679,32 @@ function renderEstimate() {
 function schedulePlan() {
   clearTimeout(planTimer);state.plan=null;renderEstimate();
   const version=++state.planVersion;
-  if(!state.aoi||state.aoiPending||state.editing||!(Batch.query?Batch.totalSelected():state.selected.size)||state.busy||(isRtc()&&rtcPolarizations().issue))return;
+  $("retryPlan").hidden=true;
+  if(!state.aoi||state.aoiPending||state.editing||!(Monthly.enabled()&&Monthly.query?Monthly.count():Batch.query?Batch.totalSelected():state.selected.size)||state.busy||(isRtc()&&rtcPolarizations().issue))return;
   planTimer=setTimeout(async()=>{
+    if(version!==state.planVersion||state.busy)return;
+    setBusy(true);showTaskbar("检查下载计划","正在规划研究区、月份和源产品…",false);
     try{
-      const result=await api(Batch.query?"batch-plan":"plan",downloadRequest());if(version!==state.planVersion)return;
-      state.plan=result;Batch.updateReferences(result);
-      if(missingAccess().includes("cdse-s3"))$("s3Access").open=true;
-      if(missingAccess().includes("odata"))$("rawODataAccess").open=true;
-      renderEstimate();
+      const result=await api("prepare-plan",downloadRequest());state.jobId=result.job_id;
+      showTaskbar("检查下载计划","正在规划，可取消后调整选择",true);pollJob(result.job_id,version);
     }
-    catch(error){if(version!==state.planVersion)return;$("downloadEstimate").querySelector("span").textContent=error.message;updateAvailability();}
+    catch(error){setBusy(false);$("taskbar").hidden=true;if(version!==state.planVersion){schedulePlan();return;}$("downloadEstimate").querySelector("span").textContent=error.message;$("retryPlan").hidden=false;updateAvailability();}
   },180);
 }
 async function searchScenes() {
   if(!canSearch())return;
   if(state.editing){toast("请先点击编辑按钮保存边界。",true);return;}
-  if(dateEnabled()&&(!$("startDate").value||!$("endDate").value)){toast("请选择开始和结束日期。",true);return;}
-  if(dateEnabled()&&$("startDate").value>$("endDate").value){toast("开始日期不能晚于结束日期。",true);return;}
+  if(Monthly.enabled()){
+    if(!$("startMonth").value||!$("endMonth").value){toast("请选择开始和结束月份。",true);return;}
+    if($("startMonth").value>$("endMonth").value){toast("开始月份不能晚于结束月份。",true);return;}
+  }else{
+    if(dateEnabled()&&(!$("startDate").value||!$("endDate").value)){toast("请选择开始和结束日期。",true);return;}
+    if(dateEnabled()&&$("startDate").value>$("endDate").value){toast("开始日期不能晚于结束日期。",true);return;}
+  }
   if(drawHandler)drawHandler.disable();
   clearScenes();setBusy(true);showSearchProgress();
-  try{const request={geometry:state.aoi.geometry,profile:state.profile,...criteria()};const result=await api(Batch.enabled()?"batch-search":"search",Batch.enabled()?Batch.searchRequest(request):request);state.jobId=result.job_id;$("cancelSearch").disabled=false;pollJob(result.job_id);}
-  catch(error){setBusy(false);$("scenesLoading").hidden=true;$("scenesEmpty").hidden=false;toast(error.message,true);}
+  try{const request={...Cities.request(),profile:state.profile,...criteria()};const result=await api(Monthly.enabled()?"monthly-search":Batch.enabled()?"batch-search":"search",Monthly.enabled()?Monthly.searchRequest():Batch.enabled()?Batch.searchRequest(request):request);state.jobId=result.job_id;$("cancelSearch").disabled=false;showTaskbar("影像检索","正在连接各月份的影像目录…",true);pollJob(result.job_id);}
+  catch(error){setBusy(false);$("taskbar").hidden=true;$("scenesLoading").hidden=true;$("scenesEmpty").hidden=false;toast(error.message,true);}
 }
 function renderPlanFolder() {
   const field=$("planPreviewFolder");
@@ -710,6 +729,10 @@ function showDownloadPlan() {
   if(!$("outputDirectory").value.trim()){toast("请先选择输出文件夹。",true);$("outputDirectory").focus();return;}
   try{
     const p=state.plan;
+    if(p.kind==="monthly"){
+      $("planDetails").innerHTML=Monthly.planHtml(p);$("planNote").textContent="每个月独立输出一份拼接影像，配套图层按所选导出内容保存。月份目录保留实际采集时间和像元来源；根目录保存完整研究区 SHP 及逐月记录。几何覆盖率不代表无云。";
+      renderPlanFolder();if(!$("downloadDialog").open)$("downloadDialog").showModal();return;
+    }
     if(p.kind==="batch"){
       $("planDetails").innerHTML=Batch.planHtml(p);
       $("planNote").textContent="各来源共用研究区和 UTC 日期范围，保留各自的采集或汇总时间。按来源、产品依次下载，当前产品完整性校验通过后处理下一个；跟随主影像的 GEDI 使用所选 GeoTIFF。中断后可继续原任务，已完成产品核验后跳过。";
@@ -744,37 +767,50 @@ function showDownloadPlan() {
 }
 async function beginDownload() {
   $("confirmDownload").disabled=true;
+  const request={...downloadRequest(),plan_fingerprint:state.plan?.fingerprint}, kind=state.plan?.kind;
+  $("downloadDialog").close();setBusy(true);showDownloadProgress(kind==="monthly"?"monthly-download":kind==="batch"?"batch-download":"download");
   try{
-    const request={...downloadRequest(),plan_fingerprint:state.plan?.fingerprint};const result=await api(state.plan?.kind==="batch"?"batch-download":"download",request);
-    $("downloadDialog").close();setBusy(true);state.jobId=result.job_id;
-    showDownloadProgress();pollJob(result.job_id);
-  }catch(error){toast(error.message,true);}
+    const result=await api(kind==="monthly"?"monthly-download":kind==="batch"?"batch-download":"download",request);
+    state.jobId=result.job_id;$("cancelJob").disabled=false;showTaskbar("下载任务","下载已开始，可随时取消",true);pollJob(result.job_id);
+  }catch(error){setBusy(false);$("taskbar").hidden=true;$("cancelJob").hidden=true;$("closeJobPanel").hidden=false;$("jobStatus").textContent="未开始";$("jobMessage").textContent=error.message;toast(error.message,true);}
   finally{$("confirmDownload").disabled=false;}
 }
 function showSearchProgress(canCancel=false) {
   $("scenesEmpty").hidden=true;$("scenesLoading").hidden=false;$("searchMessage").textContent=Batch.enabled()?"连接主数据及附带来源目录…":isGedi()?"连接 NASA CMR 目录…":"连接官方影像目录…";
   $("cancelSearch").disabled=!canCancel;$("cancelSearch").textContent="取消检索";
+  showTaskbar("影像检索","连接影像目录…",canCancel);
+}
+function showTaskbar(title,message,canCancel=false) {
+  $("taskbar").hidden=false;$("taskbarTitle").textContent=title;$("taskbarMessage").textContent=message;$("taskbarFraction").textContent="0%";
+  $("cancelTaskbar").disabled=!canCancel||!state.jobId;$("cancelTaskbar").textContent="取消任务";
 }
 function showDownloadProgress(kind="download") {
   downloads.retryId=null;$("retryDownload").hidden=true;$("retryDownloadNote").hidden=true;
   state.resultFolder="";
-  $("jobTitle").textContent=kind==="update"?"软件更新":Batch.query?"主数据及附带数据":isGedi()?"GEDI 数据下载":"下载队列";
+  $("jobTitle").textContent=kind==="update"?"软件更新":kind==="monthly-download"?"按月影像下载":Batch.query?"主数据及附带数据":isGedi()?"GEDI 数据下载":"下载队列";
   Batch.progress([]);
   $("jobPanel").hidden=false;$("jobFiles").hidden=true;$("jobFiles").innerHTML="";$("openResultFolder").hidden=true;
   $("closeJobPanel").hidden=true;$("cancelJob").hidden=false;$("cancelJob").disabled=false;$("cancelJob").textContent="取消任务";
   $("jobLogs").innerHTML="";$("jobStatus").className="job-status";$("jobStatus").textContent="正在下载";
   $("jobProgress").style.width="0%";$("jobFraction").textContent="0%";$("jobMessage").textContent="正在准备下载…";
+  showTaskbar($("jobTitle").textContent,"正在准备下载；已完成文件会保留",Boolean(state.jobId));
+  $("cancelJob").disabled=!state.jobId;
 }
 async function cancelActive(button) {
   if(!state.jobId||button.disabled)return;
   button.disabled=true;
-  try{await api("cancel",{job_id:state.jobId});button.textContent="正在取消…";}
+  try{await api("cancel",{job_id:state.jobId});for(const id of ["cancelJob","cancelSearch","cancelTaskbar"]){$(id).disabled=true;$(id).textContent="正在取消…";}}
   catch(error){button.disabled=false;toast(error.message,true);}
 }
 function renderResumableDownloads(tasks=downloads.tasks) {
   downloads.tasks=tasks;
   $("resumeDownloads").hidden=!tasks.length;
-  $("resumeDownloadList").innerHTML=tasks.map(task=>`<div class="resume-download"><div><strong>${escapeHtml(task.title)}</strong><span>${escapeHtml(task.message)}</span><small title="${escapeHtml(task.output_dir)}">${escapeHtml(displayPath(task.output_dir))}</small></div><button class="button button-outline" type="button" data-retry-download="${escapeHtml(task.id)}" ${state.busy||state.connecting?"disabled":""}>继续下载</button></div>`).join("");
+  $("resumeDownloadList").innerHTML=tasks.map(task=>`<div class="resume-download"><div><strong>${escapeHtml(task.title)}</strong><span>${escapeHtml(task.message)}</span><small title="${escapeHtml(task.output_dir)}">${escapeHtml(displayPath(task.output_dir))}</small></div><div class="resume-download-actions"><button class="button button-outline" type="button" data-retry-download="${escapeHtml(task.id)}" ${state.busy||state.connecting?"disabled":""}>继续下载</button><button class="inline-link danger" type="button" data-abandon-download="${escapeHtml(task.id)}" title="取消并移除未完成入口；已下载文件和有效缓存保留" ${state.busy||state.connecting?"disabled":""}>取消并移除</button></div></div>`).join("");
+}
+async function abandonDownload(id) {
+  if(state.busy||state.connecting)return;
+  try{const result=await api("abandon-download",{job_id:id});renderResumableDownloads(result.tasks);if(downloads.retryId===id){downloads.retryId=null;$("retryDownload").hidden=true;$("retryDownloadNote").hidden=true;}toast("未完成任务已移除，已下载文件和有效缓存已保留。");}
+  catch(error){toast(error.message,true);}
 }
 async function refreshResumableDownloads() {
   try{const result=await api("resumable-downloads");renderResumableDownloads(result.tasks);}catch(error){toast(error.message,true);}
@@ -782,41 +818,57 @@ async function refreshResumableDownloads() {
 async function retryDownload(id=downloads.retryId) {
   if(!id||state.busy||state.connecting)return;
   setBusy(true);$("retryDownload").disabled=true;renderResumableDownloads();
+  showDownloadProgress(downloads.tasks.find(task=>task.id===id)?.kind||"download");
   try {
     const result=await api("retry-download",{job_id:id});
-    state.jobId=result.job_id;showDownloadProgress();
+    state.jobId=result.job_id;$("cancelJob").disabled=false;showTaskbar("继续原下载任务","核验已完成文件，沿用原月份、来源和保存目录…",true);
     $("jobMessage").textContent="继续原下载任务，核验并跳过已完成影像，读取保存的区块进度…";
     pollJob(result.job_id);await refreshResumableDownloads();
-  } catch(error){setBusy(false);toast(error.message,true);}
+  } catch(error){setBusy(false);$("taskbar").hidden=true;$("cancelJob").hidden=true;$("closeJobPanel").hidden=false;$("jobMessage").textContent=error.message;toast(error.message,true);}
   finally{$("retryDownload").disabled=state.busy;renderResumableDownloads();}
 }
-async function pollJob(id) {
+async function pollJob(id,planVersion=state.planVersion) {
   let retries=0;
   const poll=async()=>{
     if(state.jobId!==id)return;
     try{
       const job=await api("job?id="+encodeURIComponent(id));retries=0;
-      const searching=job.kind==="search"||job.kind==="batch-search";
+      const searching=["search","batch-search","monthly-search"].includes(job.kind), planning=job.kind==="plan";
+      $("taskbar").hidden=false;$("taskbarTitle").textContent=planning?"检查下载计划":searching?"影像检索":job.title||"下载任务";$("taskbarMessage").textContent=job.message;$("taskbarFraction").textContent=Math.round(job.progress*100)+"%";
+      $("cancelTaskbar").disabled=job.status!=="running";$("cancelTaskbar").textContent=job.status==="cancelling"?"正在取消…":"取消任务";
       if(searching)$("searchMessage").textContent=job.message;
-      else{
+      else if(!planning){
         if(job.title)$("jobTitle").textContent=job.title;
         $("jobMessage").textContent=job.message;$("jobProgress").style.width=(job.progress*100).toFixed(1)+"%";$("jobFraction").textContent=Math.round(job.progress*100)+"%";
         $("jobLogs").innerHTML=job.logs.map(log=>`<div class="job-log"><time>${new Date(log.time*1000).toLocaleTimeString("zh-CN",{hour12:false})}</time><span>${escapeHtml(log.message)}</span></div>`).join("");
         $("jobLogs").scrollTop=$("jobLogs").scrollHeight;
         Batch.progress(job.detail?.batch_groups);
+        Monthly.progress(job.detail?.monthly_groups);
         if(job.detail?.folder)state.resultFolder=job.detail.folder;
       }
       if(job.status==="running"||job.status==="cancelling"){if(job.status==="cancelling"){const button=$(searching?"cancelSearch":"cancelJob");button.disabled=true;button.textContent="正在取消…";}setTimeout(poll,900);return;}
-      state.jobId=null;setBusy(false);
-      if(searching){
+      state.jobId=null;setBusy(false);$("taskbar").hidden=true;
+      if(planning){
+        if(planVersion!==state.planVersion){schedulePlan();return;}
+        if(job.status==="completed"){
+          state.plan=job.result;Batch.updateReferences(job.result);$("retryPlan").hidden=true;
+          if(missingAccess().includes("cdse-s3"))$("s3Access").open=true;
+          if(missingAccess().includes("odata"))$("rawODataAccess").open=true;
+          renderEstimate();Spatial.refresh();
+        }else{state.plan=null;$("downloadEstimate").querySelector("span").textContent=job.error||"计划已取消，可调整选择或重新检查。";$("retryPlan").hidden=false;toast(job.error||"下载计划已取消，可继续调整城市、月份和产品。",job.status==="failed");}
+      }else if(searching){
         $("scenesLoading").hidden=true;
-        if(job.status==="completed"){state.scenes=job.result.scenes;state.query=job.result.query;state.selected=firstSelection();if(job.result.batch)Batch.accept(job.result.batch);renderScenes();Spatial.autoSelect();if(job.result.batch)toast(job.message+"，请分别查看各来源结果。",job.result.batch.groups.some(g=>g.error));else if(state.scenes.length)toast(`找到 ${state.scenes.length} 个结果，可在地图和列表中按区块选择。`);}
+        if(job.status==="completed"){
+          if(job.result.monthly){Monthly.accept(job.result.monthly);toast(job.message+"，可切换月份调整产品选择。",job.result.monthly.groups.some(group=>group.error));}
+          else{state.scenes=job.result.scenes;state.query=job.result.query;state.selected=firstSelection();if(job.result.batch)Batch.accept(job.result.batch);renderScenes();Spatial.autoSelect();if(job.result.batch)toast(job.message+"，请分别查看各来源结果。",job.result.batch.groups.some(g=>g.error));else if(state.scenes.length)toast(`找到 ${state.scenes.length} 个结果，可在地图和列表中按区块选择。`);}
+        }
         else{$("scenesEmpty").hidden=false;toast(job.error||job.message,job.status==="failed");}
       }else{
         $("closeJobPanel").hidden=false;$("cancelJob").hidden=true;
         $("jobStatus").className="job-status "+(job.status==="failed"?"failed":job.status==="partial"?"partial":job.status==="cancelled"?"cancelled":"");
         const isUpdate=job.kind==="update";
         if(job.result?.sources)Batch.progress(job.result.sources);
+        if(job.result?.months)Monthly.progress(job.result.months);
         $("jobStatus").textContent=job.status==="completed"?(isUpdate?"校验通过":job.result.files.length?"下载完成":"无有效输出"):job.status==="partial"?"部分完成":job.status==="failed"?"下载失败":"已取消";
         if(job.result?.folder)state.resultFolder=job.result.folder;
         if(job.result?.files?.length){const shown=new Set();$("jobFiles").innerHTML=job.result.files.filter(file=>{if(shown.has(file.path))return false;shown.add(file.path);return true;}).map(file=>`<div class="job-file">${icon("check")}<span title="${escapeHtml(displayPath(file.path))}">${file.status==="skipped"?"已有 · ":"已完成 · "}${escapeHtml(basename(file.path))}</span></div>`).join("");$("jobFiles").hidden=false;}
@@ -966,7 +1018,7 @@ function bindEvents() {
   $("applyCoordinates").addEventListener("click",applyCoordinates);$("importBoundary").addEventListener("click",importBoundary);$("chooseFolder").addEventListener("click",chooseFolder);
   $("outputDirectory").addEventListener("change",()=>api("preferences",{output_dir:$("outputDirectory").value}).catch(()=>{}));
   $("placeSearchForm").addEventListener("submit",searchPlaces);
-  $("placeResults").addEventListener("click",event=>{const button=event.target.closest("[data-index]");if(!button)return;const place=state.places[Number(button.dataset.index)];if(map){const [south,north,west,east]=place.bounds;map.fitBounds([[south,west],[north,east]],{padding:[50,50],maxZoom:15});}$("placeQuery").value=place.name.split(",")[0];$("placeResults").hidden=true;});
+  $("placeResults").addEventListener("click",event=>{const button=event.target.closest("[data-index]");if(!button)return;const place=state.places[Number(button.dataset.index)];if(place.city_id)Cities.apply(place.city_id);else if(map){const [south,north,west,east]=place.bounds;map.fitBounds([[south,west],[north,east]],{padding:[50,50],maxZoom:15});}$("placeQuery").value=place.name.split(",")[0];$("placeResults").hidden=true;});
   document.addEventListener("click",event=>{if(!$("placeSearchForm").contains(event.target))$("placeResults").hidden=true;});
   document.querySelectorAll("#basemapSwitch button").forEach(button=>button.addEventListener("click",()=>changeBasemap(button.dataset.basemap)));
   $("exportBoundary").addEventListener("click",()=>$("exportDialog").showModal());$("saveBoundary").addEventListener("click",exportBoundary);
@@ -980,8 +1032,9 @@ function bindEvents() {
   $("toggleJobLogs").addEventListener("click",()=>{$("jobLogs").hidden=!$("jobLogs").hidden;$("toggleJobLogs").textContent=$("jobLogs").hidden?"查看记录":"收起记录";});
   $("closeJobPanel").addEventListener("click",()=>$("jobPanel").hidden=true);
   $("retryDownload").addEventListener("click",()=>retryDownload());
-  $("resumeDownloadList").addEventListener("click",event=>{const button=event.target.closest("[data-retry-download]");if(button)retryDownload(button.dataset.retryDownload);});
-  for(const id of ["cancelJob","cancelSearch"])$(id).addEventListener("click",()=>cancelActive($(id)));
+  $("resumeDownloadList").addEventListener("click",event=>{const button=event.target.closest("[data-retry-download]");if(button)retryDownload(button.dataset.retryDownload);const abandon=event.target.closest("[data-abandon-download]");if(abandon)abandonDownload(abandon.dataset.abandonDownload);});
+  $("retryPlan").addEventListener("click",schedulePlan);
+  for(const id of ["cancelJob","cancelSearch","cancelTaskbar"])$(id).addEventListener("click",()=>cancelActive($(id)));
   $("openResultFolder").addEventListener("click",()=>api("open-folder",{path:state.resultFolder}).catch(e=>toast(e.message,true)));
 }
 
@@ -992,7 +1045,8 @@ async function initialize() {
   const dateString=(date)=>date.toISOString().slice(0,10);
   $("startDate").value=dateString(before);$("endDate").value=dateString(today);
   for(const id of ["startDate","endDate"]){$(id).min="2015-06-23";$(id).max=dateString(today);}
-  configureMap();bindEvents();Spatial.initialize();Accounts.initialize();
+  try{configureMap();}catch(error){try{map?.remove();}catch{}map=null;aoiLayer=null;footprintLayer=null;MapView.notice("地图初始化失败，仍可按城市或导入 SHP 设置区域，并通过任务栏下载和取消。");}
+  bindEvents();Spatial.initialize();Accounts.initialize();Monthly.initialize();Cities.initialize();
   try{
     const data=await api("bootstrap");state.connected=data.connected;state.rawConnected=data.raw_connected;state.s3Connected=data.s3_connected;state.earthdataConnected=Boolean(data.earthdata_connected);state.gediCollections=data.gedi_collections||[];state.nativeDialogs=data.native_dialogs;
     Batch.initialize(data.batch_sources||[]);
@@ -1022,8 +1076,9 @@ async function initialize() {
     if(data.batch)Batch.accept(data.batch,true);
     renderProfile();
     if(isOfficial()||Batch.checked.has("cdse-original"))loadCollections().then(()=>Batch.renderSettings());
-    if(data.query){state.scenes=data.scenes||[];state.selected=firstSelection();renderScenes();Spatial.autoSelect();}
-    if(data.active_job){state.jobId=data.active_job.id;setBusy(true);if(["search","batch-search"].includes(data.active_job.kind))showSearchProgress(true);else showDownloadProgress(data.active_job.kind);pollJob(state.jobId);}
+    if(data.monthly)Monthly.accept(data.monthly,true);
+    else if(data.query){state.scenes=data.scenes||[];state.selected=firstSelection();renderScenes();Spatial.autoSelect();}
+    if(data.active_job){state.jobId=data.active_job.id;setBusy(true);if(["search","batch-search","monthly-search"].includes(data.active_job.kind))showSearchProgress(true);else if(data.active_job.kind==="plan")showTaskbar("检查下载计划",data.active_job.message,true);else showDownloadProgress(data.active_job.kind);pollJob(state.jobId);}
     await Accounts.startup(data.accounts);
   }catch(error){toast(error.message,true);}
   updateAvailability();

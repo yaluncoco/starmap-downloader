@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import re
+import json
 from pathlib import Path
 
 from scripts.browser_flow import open_data_page
@@ -58,6 +59,13 @@ def test_desktop_ui_search_download_and_reuse(server, provider, tmp_path):
         page.locator("#searchScenes").click()
         pw.expect(page.locator("#scenesBody tr")).to_have_count(1)
         pw.expect(page.locator("#scenesBody")).to_contain_text("03:16:50")
+        try:
+            pw.expect(page.locator("#downloadSelected")).to_be_enabled(timeout=15000)
+        except Exception:
+            ui = page.evaluate("()=>({busy:state.busy,jobId:state.jobId,planVersion:state.planVersion,hasPlan:!!state.plan,selected:[...state.selected],connected:state.connected,connecting:state.connecting,aoiPending:state.aoiPending,estimate:document.querySelector('#downloadEstimate').textContent,toasts:document.querySelector('#toastContainer').textContent})")
+            ui["jobs"] = [{key: job.data.get(key) for key in ("kind", "status", "message", "error")} for job in list(server.service.jobs.values())]
+            ui["page_errors"] = failures
+            pytest.fail(json.dumps(ui, ensure_ascii=False))
         page.locator("#downloadSelected").click()
         pw.expect(page.locator("#downloadDialog")).to_be_visible()
         pw.expect(page.locator("#planDetails")).to_contain_text("EPSG:32650")

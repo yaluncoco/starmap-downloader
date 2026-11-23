@@ -40,15 +40,17 @@ def keys_for(options):
     return options["bands"] + (["SCL"] if options["mask_clouds"] or is_research(options) else [])
 
 
-def public_plan(geometry, scenes, options):
+def public_plan(geometry, scenes, options, *, cancel=None):
+    check_cancel(cancel)
     if options.get("layout") == "mosaic":
         from .mosaic import build_mosaic_plan
-        return build_mosaic_plan(geometry, scenes, options)
+        return build_mosaic_plan(geometry, scenes, options, cancel=cancel)
     for scene in scenes:
+        check_cancel(cancel)
         missing = set(keys_for(options)) - scene["public"]["assets"].keys()
         if missing:
             raise UserError(f"所选瓦片缺少可核对的公开波段：{', '.join(sorted(missing))}。请更改导出内容或选择其他产品。")
-    plan, tiles, projected = build_plan(geometry, options, len(scenes), tile_size=512)
+    plan, tiles, projected = build_plan(geometry, options, len(scenes), tile_size=512, cancel=cancel)
     plan.update(kind="public", estimated_pu=None, requests=None, source_objects=len(keys_for(options)) * len(scenes),
                 folder_name=f"{options['profile'].replace('-', '_')}_{plan['fingerprint']}")
     if options["profile"] == S1_RTC:
@@ -59,12 +61,12 @@ def public_plan(geometry, scenes, options):
 def _open_source(stack, http, asset, cancel, rtc_access=None, *, cache_dir=None, status=None):
     settings = {}
     if cache_dir is not None:
-        settings.update(cache_dir=cache_dir, status=status, page_size=1024**2, cache_pages=8)
+        settings.update(cache_dir=cache_dir, status=status, page_size=1024**2, cache_pages=8, coalesce_pages=4)
     if rtc_access is not None:
         if asset.get("pc_scope") != "rtc":
             raise UserError("Sentinel-1 RTC 原始对象与裁剪路线不匹配。")
         settings.update(access=rtc_access, range_md5=True, expected_size=asset["object_bytes"],
-                        page_size=1024**2, cache_pages=8)
+                        page_size=1024**2, cache_pages=8, coalesce_pages=1)
     stream = stack.enter_context(RangeFile(http, asset["url"], cancel, **settings))
     stream.defer_errors = True
     try:

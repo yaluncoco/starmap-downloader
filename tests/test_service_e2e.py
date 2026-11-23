@@ -46,7 +46,7 @@ def test_rejected_post_with_delayed_body_returns_complete_403(client, server, re
 
 
 def test_full_workflow_multiblock_selection_and_resume(client, provider, tmp_path, monkeypatch):
-    monkeypatch.setattr(service, "build_plan", lambda *args: build_plan(*args, tile_size=16))
+    monkeypatch.setattr(service, "build_plan", lambda *args, **kwargs: build_plan(*args, tile_size=16, **kwargs))
     request = client.search(TRIANGLE, cloud=20)
     assert request["scene_keys"] == [P1]
     options = request["options"]

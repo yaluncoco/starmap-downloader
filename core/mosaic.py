@@ -92,21 +92,31 @@ def _crop(tile, mask, resolution):
     return Tile(tile.index, tile.row + y0, tile.col + x0, x1 - x0, y1 - y0, bounds, True), (slice(y0, y1), slice(x0, x1))
 
 
-def build_mosaic_plan(geometry, scenes, options, *, tile_size=None):
+def build_mosaic_plan(geometry, scenes, options, *, tile_size=None, cancel=None):
+    check_cancel(cancel)
     rows = _rows(geometry, scenes, options)
     identities = _identities(rows, options)
-    coverage = coverage_summary(geometry, rows, [row["key"] for row in rows], priority_option(options))
+    coverage = coverage_summary(geometry, rows, [row["key"] for row in rows], priority_option(options), cancel=cancel)
     public = options.get("profile") == PUBLIC
     native = options.get("profile") == NATIVE
-    plan, tiles, projected = build_plan(geometry, options, 1, tile_size=tile_size or (512 if public else 1024))
+    plan, tiles, projected = build_plan(geometry, options, 1, tile_size=tile_size or (512 if public else 1024), cancel=cancel)
     regions = _projected_regions(geometry, rows, plan["epsg"])
+    for region in regions:
+        prepare(region)
     requests, pixels = 0, 0
     # Conservative upper bounds: all selected overlapping products may be needed for cloud/NoData fallback.
     for tile in tiles:
+        check_cancel(cancel)
         if not tile.intersects:
             continue
         frame = box(*tile.bounds)
         for region in regions:
+            if not region.intersects(frame):
+                continue
+            if region.contains(frame):
+                requests += 1
+                pixels += tile.width * tile.height
+                continue
             overlap = region.intersection(frame)
             if overlap.is_empty or overlap.area <= 0:
                 continue
@@ -212,7 +222,9 @@ class _PublicReader:
                 records[band] = {"etag": stream.etag, "object_bytes": stream.size,
                                  "bytes_received": old.get("bytes_received", 0) + stream.bytes_received,
                                  "range_requests": old.get("range_requests", 0) + stream.requests,
-                                 "cached_ranges": old.get("cached_ranges", 0) + stream.cached_pages}
+                                 "cached_ranges": old.get("cached_ranges", 0) + stream.cached_pages,
+                                 "range_failures": old.get("range_failures", 0) + stream.range_failures,
+                                 "coalesced_fallbacks": old.get("coalesced_fallbacks", 0) + stream.coalesced_fallbacks}
         finally:
             stack.close()
 
@@ -618,6 +630,12 @@ def download_mosaic(geometry, scenes, options, output_dir, *, auth=None, cancel=
         try:
             if reader is not None:
                 reader.close()
+                if hasattr(reader, "transport"):
+                    record["transport"] = reader.transport
+                if hasattr(reader, "evidence"):
+                    record["native_sources"] = reader.evidence
+            record["reused_blocks"] = blocks_cache.reused
+            record["reused_source_blocks"] = request_cache.reused
             bundle.cleanup()
             _save_json(manifest_path, manifest)
         finally:

@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import datetime as dt
 import copy
+import hashlib
 import json
 import os
 import threading
 import time
 import uuid
 import webbrowser
+from collections import OrderedDict
 from pathlib import Path
+from shapely import normalize
 from shapely.geometry import mapping
 
 from . import VERSION
@@ -19,6 +22,9 @@ from .download import download_scenes
 from .download_tasks import DownloadTasks, INCOMPLETE
 from .errors import Cancelled, UserError, io_diagnostic
 from .accounts import Accounts
+from .cities import CityCatalogue
+from .map_tiles import MapTiles
+from .monthly_workflow import MonthlyWorkflow
 from .earthdata_auth import EarthdataAuth
 from .gedi_catalogue import GEDI, COLLECTIONS as GEDI_COLLECTIONS, DEFAULT_COLLECTION as GEDI_DEFAULT, search_gedi
 from .gedi_catalogue import collection_id as gedi_collection, public_collections as gedi_collections
@@ -177,18 +183,24 @@ class Service:
         self._collections_lock = threading.Lock()
         self._collections_cache = None
         self.jobs = {}
+        self._jobs_lock = threading.RLock()
         self.lock = threading.RLock()
         self.scenes = {}
         self.last_aoi = None
         self.last_query = None
+        self.cities = CityCatalogue()
         self._query_geometry = None
         self.batch = BatchWorkflow(self)
+        self.monthly = MonthlyWorkflow(self)
+        self._plans_lock = threading.RLock()
+        self._source_plans = OrderedDict()
         self._connecting = False
         self._geocode_lock = threading.Lock()
         self._last_geocode = 0.0
         self._geocode_cache = {}
         root = Path(config_dir) if config_dir else Path(os.environ.get("LOCALAPPDATA", Path.home())) / "CopernicusDownloader"
         self.config_dir = root
+        self.map_tiles = MapTiles(root / "map-cache")
         self.download_tasks = DownloadTasks(root)
         self.pref_file = root / "preferences.json"
         self.preferences = self._load_preferences()
@@ -234,13 +246,13 @@ class Service:
                     "s5p_collections": public_collections(), "s5p_default": S5P_DEFAULT,
                     "sen3_collections": sen3_collections(), "sen3_default": SEN3_DEFAULT,
                     "gedi_collections": gedi_collections(), "gedi_default": GEDI_DEFAULT,
-                    "batch_sources": batch_sources(), "batch": self.batch.snapshot(),
+                    "batch_sources": batch_sources(), "batch": self.batch.snapshot(), "monthly": self.monthly.snapshot(),
                     "active_job": active.snapshot() if active else None,
                     "resumable_downloads": self.download_tasks.summaries(),
                     "update_repository": self.updates.repository}
 
     def active_job(self):
-        with self.lock:
+        with self._jobs_lock:
             return next((job for job in self.jobs.values() if job.is_active()), None)
 
     def _assert_idle(self):
@@ -252,6 +264,33 @@ class Service:
         self.last_query = None
         self._query_geometry = None
         self.batch.clear()
+        self.monthly.clear()
+
+    def _request_aoi(self, value):
+        if value.get("city_id") is not None:
+            aoi = self.cities.get(value["city_id"])
+            return normalize_aoi(aoi["geometry"]), aoi
+        geometry = normalize_aoi(value.get("geometry"))
+        with self.lock:
+            previous = self.last_aoi
+        if previous and geometry.equals(normalize_aoi(previous["geometry"])):
+            return geometry, copy.deepcopy(previous)
+        return geometry, describe_aoi(geometry, previous["name"] if previous else "研究区")
+
+    @staticmethod
+    def _output_directory(value):
+        output = str(value.get("output_dir", "")).strip()
+        if not output or not Path(output).expanduser().is_absolute():
+            raise UserError("请选择完整的输出文件夹路径。")
+        return output
+
+    def _check_access(self, requires):
+        connected = {"earthdata": self.earthdata_auth.connected, "sentinel-hub": self.auth.connected,
+                     "odata": self.raw_auth.connected, "cdse-s3": self.s3_auth.connected}
+        labels = {"earthdata": "NASA Earthdata", "sentinel-hub": "Sentinel Hub OAuth", "odata": "CDSE OData", "cdse-s3": "CDSE S3"}
+        missing = [labels.get(key, key) for key in set(requires) if not connected.get(key, False)]
+        if missing:
+            raise UserError("请先连接 " + "、".join(sorted(missing)) + "；原下载选择和缓存已保留。")
 
     def account_status(self):
         return self.accounts.status()
@@ -330,13 +369,17 @@ class Service:
     def aoi(self, value):
         result = None
         if value.get("clear") is not True:
-            if value.get("coordinates") is not None:
+            if value.get("city_id") is not None:
+                result = self.cities.get(value["city_id"])
+                geometry = normalize_aoi(result["geometry"])
+            elif value.get("coordinates") is not None:
                 geometry = parse_coordinates(value["coordinates"])
             elif value.get("path"):
                 geometry = load_aoi(value["path"], value.get("source_crs") or None)
             else:
                 geometry = normalize_aoi(value.get("geometry"), value.get("source_crs") or None)
-            result = describe_aoi(geometry, value.get("name") or (Path(value["path"]).stem if value.get("path") else "研究区"))
+            if result is None:
+                result = describe_aoi(geometry, value.get("name") or (Path(value["path"]).stem if value.get("path") else "研究区"))
         with self.lock:
             self._assert_idle()
             self.last_aoi = result
@@ -344,8 +387,8 @@ class Service:
         return result
 
     def export_aoi(self, value):
-        geometry = normalize_aoi(value.get("geometry"))
-        return {"path": save_aoi(geometry, value.get("path", ""), value.get("name", "研究区"))}
+        geometry, aoi = self._request_aoi(value)
+        return {"path": save_aoi(geometry, value.get("path", ""), value.get("name") or aoi["name"])}
 
     def _task_progress(self, snapshot, *, force=False):
         try:
@@ -360,23 +403,37 @@ class Service:
     def _start_job(self, kind, operation, *, definition=None, previous=None):
         with self.lock:
             self._assert_idle()
-            if len(self.jobs) > 20:
-                for key in list(self.jobs)[:-10]:
-                    if not self.jobs[key].is_active():
-                        del self.jobs[key]
+            with self._jobs_lock:
+                if len(self.jobs) > 20:
+                    for key in list(self.jobs)[:-10]:
+                        if not self.jobs[key].is_active():
+                            del self.jobs[key]
             job = Job(kind, self._task_progress if definition else None)
             if definition:
                 self.download_tasks.create(job.id, kind, definition, previous=previous)
                 job.definition = copy.deepcopy(definition)
                 job.data.update(title=definition["title"], previous_id=previous, retry_available=False)
-            self.jobs[job.id] = job
+            with self._jobs_lock:
+                self.jobs[job.id] = job
 
         def run():
             try:
                 result = operation(job)
                 with job.lock:
-                    job.data.update(status=result.get("status", "completed") if kind == "batch-download" else "completed", result=result, progress=1.0)
-                    if kind == "batch-search":
+                    job.data.update(status=result.get("status", "completed") if kind in ("batch-download", "monthly-download") else "completed", result=result, progress=1.0)
+                    if kind == "plan":
+                        job.data["message"] = "下载计划已生成，可确认月份、覆盖范围和保存位置"
+                    elif kind == "monthly-search":
+                        groups = result["monthly"]["groups"]
+                        failed = sum(group["status"] == "failed" for group in groups)
+                        job.data["message"] = f"按月检索完成 · {len(groups)} 个月 · {sum(len(g['scenes']) for g in groups)} 个本月产品 · {failed} 个月检索失败"
+                    elif kind == "monthly-download":
+                        groups = result["months"]
+                        completed = sum(group["status"] == "completed" for group in groups)
+                        empty = sum(group["status"] in ("empty", "not_selected", "no_valid_pixels") for group in groups)
+                        failed = sum(group["status"] in ("failed", "search_failed") for group in groups)
+                        job.data["message"] = f"按月下载 · {completed} 个月完成 · {empty} 个月无匹配、未选择或无有效像元 · {failed} 个月需重试"
+                    elif kind == "batch-search":
                         groups = result["batch"]["groups"]
                         job.data["message"] = f"联合检索完成 · {len(groups)} 个来源 · {sum(len(g['scenes']) for g in groups)} 个结果"
                     elif kind == "search":
@@ -487,8 +544,31 @@ class Service:
     def batch_download(self, value):
         return self.batch.download(value)
 
+    def monthly_search(self, value):
+        return self.monthly.search(value)
+
+    def monthly_plan(self, value, *, cancel=None, progress=None):
+        return self.monthly.prepare(value, cancel=cancel, progress=progress)
+
+    def monthly_download(self, value):
+        return self.monthly.download(value)
+
+    def prepare_plan(self, value):
+        # Register the job before any full-city grid/intersection work, so it is
+        # observable and cancellable even while the download preview is prepared.
+        frozen = copy.deepcopy(value)
+        def operation(job):
+            job.update("正在检查完整研究区和所选产品", 0)
+            check_cancel(job.cancel_event)
+            if frozen.get("monthly_id"):
+                return self.monthly_plan(frozen, cancel=job.cancel_event, progress=job.update)
+            if frozen.get("batch_id"):
+                return self.batch.plan(frozen, cancel=job.cancel_event)
+            return self.plan(frozen, cancel=job.cancel_event)
+        return self._start_job("plan", operation)
+
     def search(self, value):
-        geometry = normalize_aoi(value.get("geometry"))
+        geometry, aoi = self._request_aoi(value)
         profile = _profile(value)
         criteria = _criteria(value, profile)
         start, end = criteria["start"], criteria["end"]
@@ -509,7 +589,7 @@ class Service:
             self._assert_idle()
             if profile == S2_PROCESS and not self.auth.connected:
                 raise UserError("请先连接 Sentinel Hub OAuth 客户端凭据。")
-            self.last_aoi = describe_aoi(geometry, self.last_aoi["name"] if self.last_aoi else "研究区")
+            self.last_aoi = aoi
             self._reset_query()
             return self._start_job("search", operation)
 
@@ -572,7 +652,7 @@ class Service:
         return options
 
     def _selection(self, value, *, coverage=False):
-        geometry = normalize_aoi(value.get("geometry"))
+        geometry, _ = self._request_aoi(value)
         profile = _profile(value)
         supplied = value.get("options", {})
         if not isinstance(supplied, dict):
@@ -597,30 +677,55 @@ class Service:
             return profile, geometry, options, [self.scenes[key] for key in keys]
 
     def coverage(self, value):
+        if value.get("monthly_id"):
+            return self.monthly.coverage(value)
+        if value.get("batch_id") and value.get("group_id", "primary") != "primary":
+            return self.batch.coverage(value)
+        _, geometry, options, scenes = self._selection(value, coverage=True)
         with self.lock:
-            if value.get("batch_id") and value.get("group_id", "primary") != "primary":
-                return self.batch.coverage(value)
-            _, geometry, options, scenes = self._selection(value, coverage=True)
-            return coverage_summary(geometry, list(self.scenes.values()), [s["key"] for s in scenes], options["priority"])
+            candidates = list(self.scenes.values())
+        return coverage_summary(geometry, candidates, [s["key"] for s in scenes], options["priority"])
 
-    def _plan_source(self, profile, geometry, options, scenes, criteria):
+    @staticmethod
+    def _source_plan_key(profile, geometry, options, scenes, criteria):
+        return hashlib.sha256(json.dumps({"profile": profile, "geometry": mapping(normalize(geometry)), "options": options,
+                                          "scenes": scenes, "criteria": criteria if profile == GEDI else None}, sort_keys=True, separators=(",", ":"),
+                                         allow_nan=False).encode("utf-8")).hexdigest()
+
+    def _planned_source(self, profile, geometry, options, scenes, criteria, *, cancel=None):
+        check_cancel(cancel)
+        key = self._source_plan_key(profile, geometry, options, scenes, criteria)
+        with self._plans_lock:
+            if key in self._source_plans and profile != GEDI:
+                self._source_plans.move_to_end(key)
+                return self._source_plans[key]
         if profile == GEDI:
             return build_gedi_plan(geometry, scenes, options, criteria)
         if "transport" in options:
-            return raw_plan(geometry, scenes, options)
-        if options.get("layout") == "mosaic":
-            return build_mosaic_plan(geometry, scenes, options)[0]
-        if profile != S2_PROCESS:
-            return public_plan(geometry, scenes, options)[0]
-        return build_plan(geometry, options, len(scenes))[0]
+            planned = raw_plan(geometry, scenes, options)
+        elif options.get("layout") == "mosaic":
+            planned = build_mosaic_plan(geometry, scenes, options, cancel=cancel)
+        elif profile != S2_PROCESS:
+            planned = public_plan(geometry, scenes, options, cancel=cancel)
+        else:
+            planned = build_plan(geometry, options, len(scenes), cancel=cancel)
+        check_cancel(cancel)
+        with self._plans_lock:
+            self._source_plans[key] = planned
+            self._source_plans.move_to_end(key)
+            while len(self._source_plans) > 6:
+                self._source_plans.popitem(last=False)
+        return planned
+
+    def _plan_source(self, profile, geometry, options, scenes, criteria, *, cancel=None):
+        planned = self._planned_source(profile, geometry, options, scenes, criteria, cancel=cancel)
+        return planned[0] if isinstance(planned, tuple) else planned
 
     def _run_source(self, profile, geometry, options, scenes, plan, output_dir, *, cancel=None, progress=None):
         planned = None
         if profile != GEDI and "transport" not in options:
-            planned = (build_mosaic_plan(geometry, scenes, options) if options.get("layout") == "mosaic" else
-                       build_plan(geometry, options, len(scenes)) if profile == S2_PROCESS else
-                       public_plan(geometry, scenes, options))
-            if planned[0]["fingerprint"] != plan["fingerprint"]:
+            planned = self._planned_source(profile, geometry, options, scenes, None, cancel=cancel)
+            if plan.get("kind") != "pending" and planned[0]["fingerprint"] != plan["fingerprint"]:
                 raise UserError("原下载计划与当前软件的区域网格或产品身份不一致；请重新选择任务，已完成原件仍可复用。")
         if profile == S2_NATIVE:
             return download_native_mosaic(geometry, scenes, options, output_dir, self.s3_auth, cancel=cancel, progress=progress, planned=planned)
@@ -634,70 +739,47 @@ class Service:
             return download_scenes(geometry, scenes, options, output_dir, self.auth, cancel=cancel, progress=progress, planned=planned)
         return download_public(geometry, scenes, options, output_dir, cancel=cancel, progress=progress, planned=planned)
 
-    def plan(self, value):
+    def plan(self, value, *, cancel=None):
         profile, geometry, options, scenes = self._selection(value)
-        return self._plan_source(profile, geometry, options, scenes, self.last_query)
+        return self._plan_source(profile, geometry, options, scenes, self.last_query, cancel=cancel)
 
     def download(self, value):
-        output_dir = str(value.get("output_dir", "")).strip()
-        if not output_dir or not Path(output_dir).expanduser().is_absolute():
-            raise UserError("请选择完整的输出文件夹路径。")
+        output_dir = self._output_directory(value)
         with self.lock:
             self._assert_idle()
             profile, geometry, options, scenes = self._selection(value)
-            if profile == GEDI:
-                plan = build_gedi_plan(geometry, scenes, options, self.last_query)
-                if value.get("plan_fingerprint", plan["fingerprint"]) != plan["fingerprint"]:
-                    raise UserError("GEDI 参数、所选文件或参考影像已变化，请重新确认下载计划。")
-                if not self.earthdata_auth.connected:
-                    raise UserError("请先连接 NASA Earthdata 账号或 User Token；它独立于 Copernicus 认证。")
-                def run(cancel, progress):
-                    return download_gedi(geometry, plan, output_dir, self.earthdata_auth, cancel=cancel, progress=progress)
-            elif "transport" in options:
-                plan = raw_plan(geometry, scenes, options)
-                if profile in MODIS and value.get("plan_fingerprint", plan["fingerprint"]) != plan["fingerprint"]:
-                    raise UserError("MODIS 下载选择已变化，请重新确认所选文件。")
-                missing = []
-                if "odata" in plan["requires"] and not self.raw_auth.connected:
-                    missing.append("CDSE OData（账号或临时访问令牌）")
-                if "cdse-s3" in plan["requires"] and not self.s3_auth.connected:
-                    missing.append("CDSE S3（Access Key 和 Secret Key）")
-                if missing:
-                    raise UserError("请先连接 " + " 和 ".join(missing) + "；这不是 Sentinel Hub OAuth 凭据。")
-                def run(cancel, progress):
-                    if profile == SEN3_PUBLIC:
-                        return download_sen3(geometry, plan, output_dir, cancel=cancel, progress=progress)
-                    return download_original(geometry, plan, output_dir, self.raw_auth, s3_auth=self.s3_auth, cancel=cancel, progress=progress)
-            elif profile == S2_NATIVE:
-                if not self.s3_auth.connected:
-                    raise UserError("请先连接 CDSE S3 Access Key 和 Secret Key，以读取官方原始像元。")
-                plan = build_mosaic_plan(geometry, scenes, options)
-                if value.get("plan_fingerprint", plan[0]["fingerprint"]) != plan[0]["fingerprint"]:
-                    raise UserError("拼接区块或优先级已变化，请重新确认下载计划。")
-                def run(cancel, progress):
-                    return download_native_mosaic(geometry, scenes, options, output_dir, self.s3_auth,
-                                                  cancel=cancel, progress=progress, planned=plan)
-            elif profile == S2_PROCESS:
-                if not self.auth.connected:
-                    raise UserError("请先连接 Sentinel Hub OAuth 客户端凭据。")
-                plan = (build_mosaic_plan(geometry, scenes, options) if options.get("layout") == "mosaic"
-                        else build_plan(geometry, options, len(scenes)))
-                if options.get("layout") == "mosaic" and value.get("plan_fingerprint", plan[0]["fingerprint"]) != plan[0]["fingerprint"]:
-                    raise UserError("拼接区块或优先级已变化，请重新确认下载计划。")
-                def run(cancel, progress):
-                    return download_scenes(geometry, scenes, options, output_dir, self.auth, cancel=cancel, progress=progress, planned=plan)
+            criteria = copy.deepcopy(self.last_query)
+            scenes = copy.deepcopy(scenes)
+            key = self._source_plan_key(profile, geometry, options, scenes, criteria)
+            with self._plans_lock:
+                cached = self._source_plans.get(key)
+            if profile == GEDI or "transport" in options:
+                plan = self._plan_source(profile, geometry, options, scenes, criteria)
+            elif cached is not None:
+                plan = cached[0]
             else:
-                plan = (build_mosaic_plan(geometry, scenes, options) if options.get("layout") == "mosaic"
-                        else public_plan(geometry, scenes, options))
-                if options.get("layout") == "mosaic" and value.get("plan_fingerprint", plan[0]["fingerprint"]) != plan[0]["fingerprint"]:
-                    raise UserError("拼接区块或优先级已变化，请重新确认下载计划。")
-                def run(cancel, progress):
-                    return download_public(geometry, scenes, options, output_dir, cancel=cancel, progress=progress, planned=plan)
+                plan = {"kind": "pending", "fingerprint": None, "requires": []}
+            if value.get("plan_fingerprint") is not None and value["plan_fingerprint"] != plan["fingerprint"]:
+                raise UserError("参数、拼接区块或优先级已变化，请重新确认下载计划。")
+            requires = list(plan.get("requires", [])) + (["sentinel-hub"] if profile == S2_PROCESS else ["cdse-s3"] if profile == S2_NATIVE else ["earthdata"] if profile == GEDI else [])
+            self._check_access(requires)
+            plan = {**plan, "requires": sorted(set(requires))}
             self.save_preferences({"output_dir": output_dir})
             definition = {"title": f"{SOURCE_INFO.get(profile, {}).get('title', '影像下载')} · {len(scenes)} 个产品", "profile": profile, "geometry": mapping(geometry),
-                          "options": options, "scenes": scenes, "criteria": self.last_query,
-                          "plan": plan[0] if isinstance(plan, tuple) else plan, "output_dir": output_dir}
-            return self._start_job("download", lambda job: run(job.cancel_event, job.update), definition=definition)
+                          "options": options, "scenes": scenes, "criteria": criteria, "region": (self.last_aoi or {}).get("region"),
+                          "plan": plan, "output_dir": output_dir}
+
+            def operation(job):
+                actual_plan = plan
+                if plan.get("kind") == "pending":
+                    job.update("规划完整研究区；可随时取消", 0)
+                    actual_plan = self._plan_source(profile, geometry, options, scenes, criteria, cancel=job.cancel_event)
+                    actual_plan = {**actual_plan, "requires": sorted(set(requires))}
+                    job.definition["plan"] = copy.deepcopy(actual_plan)
+                    self.download_tasks.revise(job.id, job.definition)
+                return self._run_source(profile, geometry, options, scenes, actual_plan, output_dir,
+                                        cancel=job.cancel_event, progress=job.update)
+            return self._start_job("download", operation, definition=definition)
 
     def retry_download(self, value):
         """Resume the frozen original selection, using current accounts and verified local caches."""
@@ -719,7 +801,9 @@ class Service:
             missing = [labels.get(key, key) for key in requires if not connected.get(key, False)]
             if missing:
                 raise UserError("请先连接 " + "、".join(missing) + "；原下载选择和缓存已保留。")
-            if kind == "batch-download":
+            if kind == "monthly-download":
+                operation = lambda job: self.monthly.run(job, definition)
+            elif kind == "batch-download":
                 operation = lambda job: self.batch._download(job, geometry, definition["groups"], definition["reference"],
                                                             plan, Path(definition["output_dir"]))
             else:
@@ -733,27 +817,45 @@ class Service:
             return started
 
     def job(self, job_id):
-        with self.lock:
+        with self._jobs_lock:
             job = self.jobs.get(job_id)
             if job is None:
                 raise UserError("任务不存在，可能已过期。")
         return job.snapshot()
 
     def cancel(self, job_id):
-        with self.lock:
+        with self._jobs_lock:
             job = self.jobs.get(job_id)
             if job is None:
                 raise UserError("任务不存在。")
         with job.lock:
             if job.data["status"] in ("running", "cancelling"):
                 job.cancel_event.set()
-                job.data.update(status="cancelling", message="正在取消，等待当前网络请求结束…")
+                job.data.update(status="cancelling", message="正在取消，保留已完成文件和有效下载进度…")
         return job.snapshot()
+
+    def abandon_download(self, value):
+        identifier = value.get("job_id")
+        with self._jobs_lock:
+            old = self.jobs.get(identifier)
+            if old is not None and old.is_active():
+                raise UserError("该任务正在运行，请先点击取消任务，结束后再移除。")
+            result = self.download_tasks.abandon(identifier)
+            if old is not None:
+                with old.lock:
+                    old.data.update(status="abandoned", retry_available=False)
+            return {**result, "tasks": self.download_tasks.summaries()}
 
     def geocode(self, value):
         query = str(value.get("query", "")).strip()
         if not query or len(query) > 200:
             raise UserError("请输入地点名称，最多 200 个字符。")
+        local = self.cities.search(query, limit=5)
+        if local:
+            return {"places": [{"name": row["name"]+" · 完整行政边界", "city_id": row["id"],
+                                "lat": row["center"][1], "lon": row["center"][0],
+                                "bounds": [row["bounds"][1], row["bounds"][3], row["bounds"][0], row["bounds"][2]]}
+                               for row in local]}
         with self._geocode_lock:
             if query in self._geocode_cache:
                 return {"places": self._geocode_cache[query]}
@@ -843,7 +945,7 @@ class Service:
 
     def shutdown(self):
         self.accounts.stop()
-        with self.lock:
+        with self._jobs_lock:
             for job in self.jobs.values():
                 job.cancel_event.set()
         self.auth.clear()

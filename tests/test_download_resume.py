@@ -265,6 +265,134 @@ def test_real_tcp_ranges_resume_without_retransmitting_verified_pages(monkeypatc
         server.server_close()
 
 
+def test_coalesced_tcp_reads_reduce_requests_and_reuse_individual_checked_pages(tmp_path):
+    payload = bytes(range(251)) * 41
+    received = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            start, end = map(int, re.fullmatch(r"bytes=(\d+)-(\d+)", self.headers["Range"]).groups())
+            end = min(end, len(payload) - 1)
+            received.append((start, end, self.headers.get("If-Match")))
+            self.send_response(206)
+            self.send_header("Content-Range", f"bytes {start}-{end}/{len(payload)}")
+            self.send_header("Content-Length", str(end - start + 1))
+            self.send_header("ETag", '"coalesced-v1"')
+            self.end_headers()
+            self.wfile.write(payload[start:end + 1])
+
+        def log_message(self, *_):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    http = HttpClient()
+    http.session.trust_env = False
+    url = f"http://127.0.0.1:{server.server_port}/object"
+    try:
+        with RangeFile(http, url, page_size=1024, cache_pages=4, coalesce_pages=4, cache_dir=tmp_path) as stream:
+            assert stream.read(7168) == payload[:7168]
+            assert len(received) == 3  # Seven required pages, three bounded network requests.
+            assert received[1:] == [(1024, 5119, '"coalesced-v1"'), (5120, 7167, '"coalesced-v1"')]
+            assert all(end - start < 4096 for start, end, _ in received)
+        before = len(received)
+        # A cold reader with single-page requests must reuse the merged transfer's
+        # independently recorded pages, without retransmitting their data.
+        with RangeFile(http, url, page_size=1024, cache_pages=1, cache_dir=tmp_path) as stream:
+            assert stream.read(7168) == payload[:7168] and stream.cached_pages == 7
+        assert len(received) == before
+        page, = [path for path in tmp_path.rglob("3") if path.is_file()]
+        page.write_bytes(b"x" + page.read_bytes()[1:])
+        with RangeFile(http, url, page_size=1024, cache_pages=4, coalesce_pages=4, cache_dir=tmp_path) as stream:
+            assert stream.read(7168) == payload[:7168]
+        assert received[before:] == [(3072, 4095, '"coalesced-v1"')]
+    finally:
+        http.close()
+        server.shutdown()
+        thread.join(3)
+        server.server_close()
+
+
+@pytest.mark.parametrize("mode", ["short_body", "unavailable", "changed_version", "always_unavailable"])
+def test_failed_coalesced_tcp_response_uses_smaller_pinned_pages_with_the_same_retry_budget(tmp_path, monkeypatch, mode):
+    payload = bytes(range(251)) * 41
+    received, messages = [], []
+    revision = [1]
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            start, end = map(int, re.fullmatch(r"bytes=(\d+)-(\d+)", self.headers["Range"]).groups())
+            end = min(end, len(payload) - 1)
+            received.append((start, end, self.headers.get("If-Match")))
+            merged = end - start + 1 > 1024
+            if mode == "changed_version" and revision[0] != 1:
+                self.send_response(412)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            if merged and mode == "unavailable" or start > 0 and mode == "always_unavailable":
+                self.send_response(503)
+                self.send_header("Content-Length", "0")
+                self.send_header("Retry-After", "0")
+                self.end_headers()
+                return
+            self.send_response(206)
+            self.send_header("Content-Range", f"bytes {start}-{end}/{len(payload)}")
+            self.send_header("Content-Length", str(end - start + 1))
+            self.send_header("ETag", '"pinned-v1"')
+            self.end_headers()
+            if merged:
+                self.wfile.write(payload[start:start + 17])
+                self.wfile.flush()
+                self.close_connection = True
+                if mode == "changed_version":
+                    revision[0] = 2
+            else:
+                self.wfile.write(payload[start:end + 1])
+
+        def log_message(self, *_):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setattr("core.range_file.wait_retry", lambda *_: None)
+    http = HttpClient()
+    http.session.trust_env = False
+    url = f"http://127.0.0.1:{server.server_port}/object"
+    try:
+        with RangeFile(http, url, page_size=1024, cache_pages=4, coalesce_pages=4, cache_dir=tmp_path,
+                       status=messages.append) as stream:
+            if mode == "changed_version":
+                with pytest.raises(UserError, match="版本"):
+                    stream.read(7168)
+                assert len(received) == 3
+            elif mode == "always_unavailable":
+                with pytest.raises(TransientDownloadError):
+                    stream.read(7168)
+                assert len(received) == 4 and stream.range_failures == 3
+            else:
+                assert stream.read(7168) == payload[:7168]
+                assert stream.range_failures == 1
+            assert stream.coalesced_fallbacks == 1
+            assert received[1] == (1024, 5119, '"pinned-v1"')
+            assert all(tag == '"pinned-v1"' and end - start < 1024 for start, end, tag in received[2:])
+            assert any("较小区间" in message for message in messages)
+        if mode in ("short_body", "unavailable"):
+            before = len(received)
+            with RangeFile(http, url, page_size=1024, cache_dir=tmp_path) as stream:
+                assert stream.read(7168) == payload[:7168] and stream.cached_pages == 7
+            assert len(received) == before
+        else:
+            assert not list(tmp_path.rglob("1"))  # No page from the rejected or incomplete response is committed.
+    finally:
+        http.close()
+        server.shutdown()
+        thread.join(3)
+        server.server_close()
+
+
 @pytest.mark.parametrize("source_failure", [False, True])
 def test_mosaic_retry_reuses_blocks_and_preserves_all_scientific_layers(tmp_path, source_failure):
     opts = options()

@@ -1,0 +1,79 @@
+"use strict";
+
+const Monthly = {
+  query:null, groups:new Map(), active:"",
+  supported() {return ["s2-process","s2-earth-search","s2-cdse-s3"].includes(state.profile);},
+  enabled() {return this.supported()&&$("timeMode").value==="monthly";},
+  current() {return this.groups.get(this.active);},
+  capture() {const group=this.current();if(group){group.selected=state.selected;group.priority=Spatial.priorities.get("primary")||group.priority||"cloud";}},
+  count() {this.capture();return [...this.groups.values()].reduce((total,group)=>total+(group.include?group.selected.size:0),0);},
+  clear() {this.query=null;this.groups.clear();this.active="";$("monthlyResults").hidden=true;},
+  initialize() {
+    const today=new Date().toISOString().slice(0,7);
+    for(const id of ["startMonth","endMonth"]){$(id).min="2015-06";$(id).max=today;$(id).value=today;$(id).addEventListener("change",clearScenes);}
+    $("timeMode").addEventListener("change",()=>{clearScenes();renderProfile();});
+    $("monthResultSelect").addEventListener("change",()=>this.activate($("monthResultSelect").value));
+    $("monthlyResultTabs").addEventListener("click",event=>{const button=event.target.closest("[data-month]");if(button&&!state.busy)this.activate(button.dataset.month);});
+    $("monthlyResultTabs").addEventListener("change",event=>{
+      const month=event.target.dataset.includeMonth;
+      if(!month||state.busy)return;
+      this.capture();this.groups.get(month).include=event.target.checked;this.renderResults();schedulePlan();
+    });
+    this.render();
+  },
+  render() {
+    const supported=this.supported();
+    $("timeModeField").hidden=!supported;
+    if(!supported)$("timeMode").value="dates";
+    const enabled=this.enabled();
+    $("monthlyFields").hidden=!enabled;$("dateFields").hidden=enabled||!dateEnabled();
+    $("companionSection").hidden=enabled;
+    $("imageLayout").hidden=enabled||isNativeS3();document.querySelector('label[for="imageLayout"]').hidden=enabled||isNativeS3();
+    if(enabled){$("imageLayout").value="mosaic";$("mosaicFallbackField").hidden=false;}
+    $("mosaicDescription").textContent=enabled?"每月拼成一份研究区影像。重叠位置默认云量较低优先，可在该月地图和列表中调整；只用该月选中的产品补齐。":"在地图上选择影像块。交叠处默认云量较低优先；像元来源图保留实际产品和日期。未被选中影像覆盖的位置为 NoData。";
+    if(enabled){$("searchScenes").querySelector("span").textContent="按月查找覆盖影像";$("downloadSelected").querySelector("span").textContent="下载已选月份";}
+    this.renderResults();updateAvailability();
+  },
+  accept(query, restore=false) {
+    this.query=query;this.groups.clear();
+    for(const row of query.groups)this.groups.set(row.month,{...row,selected:new Set(row.recommended_keys||[]),include:true,priority:"cloud"});
+    $("timeMode").value="monthly";$("startMonth").value=query.start_month;$("endMonth").value=query.end_month;
+    this.active=query.groups.find(row=>row.status==="ready")?.month||query.groups[0]?.month;
+    this.activate(this.active,true);this.render();
+  },
+  activate(month, initial=false) {
+    if(!initial)this.capture();
+    const group=this.groups.get(month);if(!group)return;
+    this.active=month;state.scenes=group.scenes;state.query=group.query;state.selected=group.selected;
+    Spatial.priorities.set("primary",group.priority);Spatial.summary=null;
+    this.renderResults();renderScenes(!initial);renderEstimate();
+    if(!group.scenes.length){$("scenesEmpty").querySelector("strong").textContent=group.status==="failed"?`${month} 检索失败`:`${month} 没有匹配影像`;$("scenesEmpty").querySelector(":scope > span").textContent=group.error||"该月不生成影像，不会使用相邻月份的产品补缺。";}
+  },
+  renderResults() {
+    const visible=this.enabled()&&!!this.query;
+    $("monthlyResults").hidden=!visible;if(!visible)return;
+    const rows=[...this.groups.values()];
+    $("monthlySelectionSummary").textContent=`${rows.filter(row=>row.include&&row.selected.size).length} 个月已选产品 · 每月一份拼接影像`;
+    $("monthResultSelect").innerHTML=rows.map(row=>`<option value="${escapeHtml(row.month)}">${escapeHtml(row.month)} · ${row.scenes.length} 个候选${row.status==="failed"?" · 检索失败":""}</option>`).join("");$("monthResultSelect").value=this.active;
+    $("monthlyResultTabs").innerHTML=rows.map(row=>`<div class="monthly-month ${row.month===this.active?"active":""}"><label title="下载本月；无匹配月份不会生成文件"><input type="checkbox" data-include-month="${escapeHtml(row.month)}" aria-label="下载 ${escapeHtml(row.month)}" ${row.include?"checked":""} ${state.busy?"disabled":""}></label><button type="button" data-month="${escapeHtml(row.month)}" ${state.busy?"disabled":""}><strong>${escapeHtml(row.month)}</strong><span>${row.status==="failed"?"检索失败":row.scenes.length?`${row.selected.size} / ${row.scenes.length} 产品`:"无匹配"}</span></button></div>`).join("");
+  },
+  searchRequest() {return {...Cities.request(),profile:state.profile,start_month:$("startMonth").value,end_month:$("endMonth").value,max_cloud:Number($("maxCloud").value),options:{priority:"cloud"}};},
+  request(base) {
+    this.capture();const global=options();
+    return {...Cities.request(),profile:state.profile,monthly_id:this.query.id,start_month:$("startMonth").value,end_month:$("endMonth").value,output_dir:base.output_dir,
+      months:[...this.groups.values()].map(group=>({month:group.month,include:group.include,query_id:group.query.id,criteria:{...group.criteria,max_cloud:Number($("maxCloud").value)},scene_keys:[...group.selected],options:{...global,layout:"mosaic",priority:group.priority}}))};
+  },
+  spatialRequest(current) {return {...Cities.request(),profile:state.profile,monthly_id:this.query.id,month:this.active,query_id:current.query.id,criteria:current.criteria,scene_keys:[...current.selected],options:{priority:this.current().priority}};},
+  planHtml(plan) {
+    const rows=[["研究区域",plan.boundary_name+" · "+(plan.region?.scope||"完整所选边界")],["月份范围",`${plan.start_month} — ${plan.end_month} (UTC)`],["输出数量",`${plan.output_count} 个月 · 每月一份影像`],["预计输出体积",`${sizeLabel(plan.estimated_bytes)}（未压缩，含配套图层）`],["时间与来源",plan.time_note],["下载顺序","按月份依次下载；取消后可继续，已完成影像核验后跳过"]];
+    if(plan.native_source_bytes)rows.push(["官方原件缓存",`约 ${sizeLabel(plan.native_source_bytes)}，相同产品可复用`]);
+    if(plan.estimated_pu)rows.push(["处理额度",`约 ${plan.estimated_pu.toFixed(2)} PU`]);
+    return `<div class="plan-grid">${rows.map(([label,value])=>`<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("")}</div><div class="monthly-plan-list">${plan.months.map(row=>`<div><strong>${escapeHtml(row.month)}</strong><span>${row.plan?`${row.selected_count} 个产品 · 覆盖 ${row.plan.coverage_percent.toFixed(2)}% · ${row.plan.resolution} 米`:row.status==="search_failed"?"检索失败，需要重新检索":row.status==="empty"?"无匹配，不生成文件":"未选择，不生成文件"}</span>${row.plan?`<small>${escapeHtml(row.options.label)}</small>`:""}</div>`).join("")}</div><div class="plan-folder"><span>保存到</span><strong id="planPreviewFolder"></strong></div>`;
+  },
+  progress(groups=[]) {
+    if(!groups.length)return;
+    $("jobSources").hidden=false;
+    const labels={pending:"等待",searching:"检索中",ready:"可选择",running:"下载中",completed:"已完成",empty:"无匹配",not_selected:"未选择",no_valid_pixels:"无有效像元",failed:"失败",search_failed:"检索失败",cancelled:"已取消"};
+    $("jobSources").innerHTML=groups.map(row=>`<div class="job-source ${row.status==="failed"?"failed":""}"><strong>${escapeHtml(row.month||row.id)}</strong><span>${escapeHtml(labels[row.status]||row.status)}</span>${row.error?`<small>${escapeHtml(row.error)}</small>`:""}</div>`).join("");
+  }
+};

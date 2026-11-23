@@ -6,10 +6,11 @@ import math
 from dataclasses import dataclass
 
 from pyproj import Transformer
-from shapely import normalize, transform
+from shapely import normalize, prepare, transform
 from shapely.geometry import box, mapping
 
 from .errors import UserError
+from .http import check_cancel
 from .spatial_selection import priority_option
 
 ALL_BANDS = ["B01", "B02", "B03", "B04", "B05", "B06", "B07", "B08", "B8A", "B09", "B11", "B12"]
@@ -66,7 +67,7 @@ class Tile:
     intersects: bool
 
 
-def build_plan(geometry, options, scene_count=1, tile_size=2048):
+def build_plan(geometry, options, scene_count=1, tile_size=2048, *, cancel=None):
     if options.get("mode") == "research":
         tile_size = min(tile_size, 1024)  # Bound memory for two 10-band rasters and quality/provenance.
     if not 1 <= int(scene_count) <= 500:
@@ -83,6 +84,7 @@ def build_plan(geometry, options, scene_count=1, tile_size=2048):
     transformer = Transformer.from_crs(4326, epsg, always_xy=True)
     dense = geometry.segmentize(0.05)
     projected = transform(dense, transformer.transform, interleaved=False)
+    prepare(projected)
     resolution = options["resolution"]
     minx, miny, maxx, maxy = projected.bounds
     minx, miny = math.floor(minx / resolution) * resolution, math.floor(miny / resolution) * resolution
@@ -95,11 +97,13 @@ def build_plan(geometry, options, scene_count=1, tile_size=2048):
     tiles = []
     requested_pixels = 0
     for row in range(rows):
+        check_cancel(cancel)
         for col in range(cols):
             x, y = col * tile_size, row * tile_size
             w, h = min(tile_size, width - x), min(tile_size, height - y)
             tile_bounds = (minx + x * resolution, maxy - (y + h) * resolution, minx + (x + w) * resolution, maxy - y * resolution)
-            intersects = projected.intersection(box(*tile_bounds)).area > 0
+            frame = box(*tile_bounds)
+            intersects = projected.contains(frame) or (projected.intersects(frame) and projected.intersection(frame).area > 0)
             tiles.append(Tile(len(tiles), y, x, w, h, tile_bounds, intersects))
             if intersects:
                 requested_pixels += w * h

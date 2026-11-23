@@ -61,6 +61,7 @@ def test_upfront_login_draw_shp_and_download_aligned_batch(server, batch_setup, 
         page.locator("#resolution").select_option("20")
         bounds = batch_setup.geometry.bounds
         page.evaluate("bounds => map.fitBounds([[bounds[1],bounds[0]],[bounds[3],bounds[2]]], {padding:[70,60],maxZoom:18,animate:false})", list(bounds))
+        page.locator('#aoiTabs [data-tab="map"]').click()
         page.locator("#drawRectangle").click()
         points = page.evaluate("bounds => [[bounds[3],bounds[0]],[bounds[1],bounds[2]]].map(ll => { const p=map.latLngToContainerPoint(ll); const box=$('map').getBoundingClientRect(); return [p.x+box.left,p.y+box.top]; })", list(bounds))
         screenshot(page, "before-draw")

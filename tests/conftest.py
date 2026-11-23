@@ -4,9 +4,11 @@ import hashlib
 import io
 import json
 import re
+import struct
 import tarfile
 import threading
 import time
+import zlib
 from contextlib import contextmanager
 
 import numpy as np
@@ -18,6 +20,7 @@ from shapely.geometry import box, mapping
 
 from app import make_server
 from core.http import PROCESS_URL, SH_CATALOGUE_URL, TOKEN_URL, HttpClient, check_cancel
+from core.map_tiles import MapTiles
 
 P1 = "S2A_MSIL2A_20240610T030531_N0510_R075_T50TMK_20240610T081949.SAFE"
 P2 = "S2B_MSIL2A_20240605T030529_N0510_R075_T50TMK_20240605T082015.SAFE"
@@ -138,6 +141,11 @@ class StubProvider:
 def provider(monkeypatch):
     upstream = StubProvider()
     monkeypatch.setattr(HttpClient, "request", lambda _, *args, **kwargs: upstream.request(*args, **kwargs))
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xffffffff)
+    png = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 256, 256, 8, 2, 0, 0, 0))
+           + chunk(b"IDAT", zlib.compress((b"\x00" + bytes([235, 241, 237]) * 256) * 256)) + chunk(b"IEND", b""))
+    monkeypatch.setattr(MapTiles, "get", lambda *args: (png, "image/png"))
     return upstream
 
 

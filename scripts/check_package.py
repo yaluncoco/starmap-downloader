@@ -13,10 +13,11 @@ import time
 from pathlib import Path
 
 import requests
+from shapely.geometry import shape
 
 
 def check_executable(executable, *, set_output=None, require_output=None, require_version=None,
-                     require_update_repository=None, require_no_update_channel=False, expect_update_status=None, require_gedi=False, require_batch=False, require_accounts=False):
+                     require_update_repository=None, require_no_update_channel=False, expect_update_status=None, require_gedi=False, require_batch=False, require_accounts=False, require_monthly=False):
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]
@@ -107,6 +108,32 @@ def check_executable(executable, *, set_output=None, require_output=None, requir
             call("export-aoi", {"geometry": area["geometry"], "path": str(path)})
             imported = call("aoi", {"path": str(path)})
             assert imported["bounds"] == area["bounds"]
+            monthly_checked = False
+            if require_monthly or "monthly" in bootstrap:
+                for asset in ("/cities.js", "/monthly.js", "/map.js", "/workflow.css"):
+                    session.get(origin + asset, timeout=3).raise_for_status()
+                assert 'id="cityChoice"' in home.text and 'id="startMonth"' in home.text
+                assert 'id="cancelTaskbar"' in home.text and 'id="retryBasemap"' in home.text
+                catalogue_response = session.get(origin + "/api/cities", timeout=5)
+                catalogue_response.raise_for_status()
+                catalogue = catalogue_response.json()
+                assert len(catalogue["cities"]) == 371 and len(catalogue["provinces"]) == 34
+                assert catalogue["source"]["crs"] == "EPSG:4326"
+                city = call("aoi", {"city_id": "110000"}, timeout=10)
+                assert city["name"] == "北京市" and city["vertices"] > 14000
+                assert 16000 < city["area_km2"] < 17000 and city["region"]["city_id"] == "110000"
+                city_path = temporary / "验证输出" / "北京市完整行政边界.shp"
+                call("export-aoi", {"city_id": "110000", "path": str(city_path)}, timeout=10)
+                roundtrip = call("aoi", {"path": str(city_path)}, timeout=10)
+                assert roundtrip["vertices"] == city["vertices"] and roundtrip["bounds"] == city["bounds"]
+                assert shape(roundtrip["geometry"]).equals(shape(city["geometry"]))
+                basemap = session.get(origin + "/map/admin-basemap.geojson", timeout=5)
+                basemap.raise_for_status()
+                assert basemap.json()["type"] == "FeatureCollection" and len(basemap.json()["features"]) == 34
+                rejected = session.post(origin + "/api/monthly-download", json={"output_dir": str(temporary / "monthly-no-output")}, timeout=4)
+                assert rejected.status_code == 400 and "下载计划" in rejected.json()["error"]
+                assert not (temporary / "monthly-no-output").exists()
+                monthly_checked = True
             batch_checked = False
             if require_batch or "batch_sources" in bootstrap:
                 sources = bootstrap.get("batch_sources")
@@ -143,6 +170,9 @@ def check_executable(executable, *, set_output=None, require_output=None, requir
             if gedi_checked:
                 check["gedi_collections"] = len(collections)
                 check["earthdata_local_routes"] = "ok (synthetic token, no NASA authentication)"
+            if monthly_checked:
+                check["city_catalogue"] = len(catalogue["cities"])
+                check["monthly_resources_full_city_shp_and_offline_basemap"] = "ok"
             if "update_repository" in bootstrap:
                 check["update_repository"] = repository
             if expect_update_status is not None:
@@ -167,6 +197,7 @@ if __name__ == "__main__":
     parser.add_argument("--require-gedi", action="store_true", help="Require GEDI collections and local authentication routes")
     parser.add_argument("--require-batch", action="store_true", help="Require companion sources, batch routes and the supplied icon")
     parser.add_argument("--require-accounts", action="store_true", help="Require centralized accounts, encrypted saving and startup state")
+    parser.add_argument("--require-monthly", action="store_true", help="Require full city boundaries, monthly controls and the offline map")
     channel = parser.add_mutually_exclusive_group()
     channel.add_argument("--require-update-repository")
     channel.add_argument("--require-no-update-channel", action="store_true")
@@ -175,4 +206,5 @@ if __name__ == "__main__":
     check_executable(args.exe.resolve(strict=True), set_output=args.set_output, require_output=args.require_output,
                      require_version=args.require_version, require_update_repository=args.require_update_repository,
                      require_no_update_channel=args.require_no_update_channel, expect_update_status=args.expect_update_status,
-                     require_gedi=args.require_gedi, require_batch=args.require_batch, require_accounts=args.require_accounts)
+                     require_gedi=args.require_gedi, require_batch=args.require_batch, require_accounts=args.require_accounts,
+                     require_monthly=args.require_monthly)

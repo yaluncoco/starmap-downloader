@@ -3,7 +3,7 @@
 const Batch = {
   sources: [], checked: new Set(), configurations: new Map(), query: null,
   results: new Map(), active: "primary", primaryReference: "", primaryStamp: "",
-  enabled() { return this.checked.size > 0; },
+  enabled() { return this.checked.size > 0 && !Monthly.enabled(); },
   totalSelected() { return state.selected.size + [...this.results.values()].reduce((n, group) => n + group.selected.size, 0); },
   sharedDates() { return {start: $("startDate").value, end: $("endDate").value}; },
   isStatic(profile, collection = "") { return profile.startsWith("dem-") || profile === "cdse-original" && /^(cop-dem-|s2glc)/.test(collection); },
@@ -70,6 +70,7 @@ const Batch = {
     return value;
   },
   searchReady() {
+    if(Monthly.enabled())return true;
     return (!this.checked.has("s2-process") || state.connected) && (!this.checked.has("s2-cdse-s3") || state.s3Connected);
   },
   recommendedAccount() {

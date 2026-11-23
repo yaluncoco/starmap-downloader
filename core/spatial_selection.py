@@ -10,6 +10,7 @@ from shapely.ops import unary_union
 
 from .errors import UserError
 from .geometry import area_km2
+from .http import check_cancel
 from .scene_identity import SAFE_ID, utc_time
 
 PRIORITIES = {"cloud": "云量较低优先", "newest": "日期较新优先", "selection": "手动排列优先"}
@@ -142,10 +143,11 @@ def footprint_groups(scenes, full_regions, selected_keys):
     return result
 
 
-def recommended_coverage(scenes, regions, priority):
+def recommended_coverage(scenes, regions, priority, *, cancel=None):
     """Prefer the requested priority, then remove fully replaceable coverage sources."""
     initial, accumulated = [], GeometryCollection()
     for scene in ordered_scenes([s for s in scenes if available(s) and s["key"] in regions], priority):
+        check_cancel(cancel)
         region = regions[scene["key"]]
         extra = polygonal(region.difference(accumulated))
         # Sub-square-metre coordinate noise is not another useful image block.
@@ -154,6 +156,7 @@ def recommended_coverage(scenes, regions, priority):
             accumulated = polygonal(unary_union([accumulated, region]))
     retained = list(initial)
     for key in reversed(initial):
+        check_cancel(cancel)
         # Dissolve the original remaining regions together, rather than previously
         # dissolved prefix/suffix shapes whose extra vertices can leave round-off seams.
         others = polygonal(unary_union([regions[other] for other in retained if other != key]))
@@ -164,7 +167,7 @@ def recommended_coverage(scenes, regions, priority):
     return retained, [key for key in initial if key not in retained_keys]
 
 
-def coverage_summary(geometry, scenes, selected_keys, priority="cloud"):
+def coverage_summary(geometry, scenes, selected_keys, priority="cloud", *, cancel=None):
     """All decisions use actual footprint/AOI intersections, never the basemap grid."""
     priority_option({"priority": priority})
     known = {scene["key"]: scene for scene in scenes}
@@ -173,6 +176,7 @@ def coverage_summary(geometry, scenes, selected_keys, priority="cloud"):
     area = polygon_area(geometry)
     regions, full_regions, missing = {}, {}, []
     for scene in scenes:
+        check_cancel(cancel)
         try:
             full_regions[scene["key"]] = footprint(scene)
             regions[scene["key"]] = polygonal(geometry.intersection(full_regions[scene["key"]]))
@@ -184,13 +188,14 @@ def coverage_summary(geometry, scenes, selected_keys, priority="cloud"):
     covered, overlap = GeometryCollection(), GeometryCollection()
     assigned, ranks = {}, {}
     for rank, scene in enumerate(chosen, 1):
+        check_cancel(cancel)
         key = scene["key"]
         region = regions[key]
         overlap = polygonal(unary_union([overlap, covered.intersection(region)]))
         assigned[key] = polygonal(region.difference(covered))
         covered = polygonal(unary_union([covered, region]))
         ranks[key] = rank
-    recommendation, omitted = recommended_coverage(scenes, regions, priority)
+    recommendation, omitted = recommended_coverage(scenes, regions, priority, cancel=cancel)
     uncovered = polygonal(geometry.difference(covered))
 
     def percent(region):
@@ -201,6 +206,7 @@ def coverage_summary(geometry, scenes, selected_keys, priority="cloud"):
 
     blocks = []
     for scene in scenes:
+        check_cancel(cancel)
         key = scene["key"]
         region = regions.get(key, GeometryCollection())
         allocated = assigned.get(key, GeometryCollection())

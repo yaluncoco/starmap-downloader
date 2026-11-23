@@ -11,6 +11,7 @@ import requests
 
 from . import VERSION
 from .errors import Cancelled, UserError, TransientDownloadError
+from .cancellable_http import request_with_cancel
 
 TOKEN_URL = "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token"
 CATALOGUE_URL = "https://catalogue.dataspace.copernicus.eu/odata/v1/Products"
@@ -74,7 +75,7 @@ class HttpClient:
         for attempt in range(attempts):
             check_cancel(cancel)
             try:
-                response = self.session.request(method, url, timeout=timeout, **kwargs)
+                response = request_with_cancel(self.session, method, url, cancel=cancel, timeout=timeout, **kwargs)
             except requests.exceptions.SSLError:
                 raise UserError("下载连接的证书校验失败，请检查网络或代理设置后重试。") from None
             except (requests.ConnectionError, requests.Timeout):

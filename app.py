@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import mimetypes
+import re
 import secrets
 import sys
 import threading
@@ -11,6 +12,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from core.errors import UserError
+from core.cities import DATA as CITY_DATA
 from core.service import Service
 
 ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -107,6 +109,21 @@ class Handler(BaseHTTPRequestHandler):
                 return self._respond(200, {**self.server.service.bootstrap(), "native_dialogs": self.server.dialogs is not None})
             if path.path == "/api/accounts":
                 return self._respond(200, self.server.service.account_status())
+            if path.path == "/api/cities":
+                return self._respond(200, self.server.service.cities.public())
+            if path.path == "/api/map-status":
+                return self._respond(200, self.server.service.map_tiles.status())
+            if path.path == "/map/admin-basemap.geojson":
+                return self._respond(200, (CITY_DATA / "admin-basemap.geojson").read_bytes(), "application/geo+json; charset=utf-8")
+            if path.path.startswith("/map/tiles/"):
+                match = re.fullmatch(r"/map/tiles/(standard|satellite)/(\d{1,2})/(\d{1,6})/(\d{1,6})\.png", path.path)
+                if match is None:
+                    raise UserError("底图路径无效。")
+                try:
+                    body, mime = self.server.service.map_tiles.get(match[1], *map(int, match.group(2, 3, 4)))
+                except UserError as error:
+                    return self._respond(503, {"error": str(error)})
+                return self._respond(200, body, mime)
             if path.path == "/api/resumable-downloads":
                 return self._respond(200, {"tasks": self.server.service.download_tasks.summaries()})
             if path.path == "/api/job":
@@ -127,7 +144,7 @@ class Handler(BaseHTTPRequestHandler):
             self._respond(200, body, mime)
         except UserError as error:
             self._respond(400, {"error": str(error)})
-        except (BrokenPipeError, ConnectionResetError):
+        except ConnectionError:
             pass
         except Exception:
             self._respond(500, {"error": "本地服务发生异常，请重新启动软件。"})
@@ -147,7 +164,7 @@ class Handler(BaseHTTPRequestHandler):
             self.connection.settimeout(previous_timeout)
         try:
             self._respond(403, {"error": message})
-        except (BrokenPipeError, ConnectionResetError):
+        except ConnectionError:
             pass
 
     def do_POST(self):
@@ -182,11 +199,16 @@ class Handler(BaseHTTPRequestHandler):
                 "/api/batch-search": self.server.service.batch_search,
                 "/api/batch-plan": self.server.service.batch_plan,
                 "/api/batch-download": self.server.service.batch_download,
+                "/api/monthly-search": self.server.service.monthly_search,
+                "/api/monthly-plan": self.server.service.monthly_plan,
+                "/api/monthly-download": self.server.service.monthly_download,
+                "/api/prepare-plan": self.server.service.prepare_plan,
                 "/api/plan": self.server.service.plan,
                 "/api/coverage": self.server.service.coverage,
                 "/api/download": self.server.service.download,
                 "/api/retry-download": self.server.service.retry_download,
                 "/api/cancel": lambda v: self.server.service.cancel(v.get("job_id", "")),
+                "/api/abandon-download": self.server.service.abandon_download,
                 "/api/geocode": self.server.service.geocode,
                 "/api/check-update": self.server.service.check_update,
                 "/api/open-update-release": self.server.service.open_update_release,
@@ -203,7 +225,7 @@ class Handler(BaseHTTPRequestHandler):
             self._respond(400, {"error": str(error)})
         except (ValueError, TypeError):
             self._respond(400, {"error": "输入格式不正确。"})
-        except (BrokenPipeError, ConnectionResetError):
+        except ConnectionError:
             pass
         except Exception:
             self._respond(500, {"error": "本地服务发生异常，请重新启动软件。"})

@@ -17,17 +17,23 @@ from .download_cache import RangeCache
 
 class RangeFile(io.RawIOBase):
     def __init__(self, http, url, cancel=None, *, page_size=512 * 1024, cache_pages=6, expected_size=None,
-                 access=None, range_md5=False, cache_dir=None, status=None):
+                 access=None, range_md5=False, cache_dir=None, status=None, coalesce_pages=1):
         super().__init__()
         if range_md5 and not 1 <= page_size <= 4 * 1024**2:
             raise ValueError("Azure range MD5 needs a positive page size of at most 4 MiB")
         self.http, self.url, self.cancel = http, url, cancel
         self.page_size, self.cache_pages = page_size, cache_pages
+        if type(coalesce_pages) is not int or coalesce_pages < 1:
+            raise ValueError("The number of coalesced range pages must be positive")
+        # Merge only pages required by the current read, keeping each page's
+        # existing identity and receipt for cross-version resume compatibility.
+        self.coalesce_pages = min(coalesce_pages, max(1, cache_pages), max(1, 4 * 1024**2 // page_size))
         self.expected_size, self.access, self.range_md5 = expected_size, access, range_md5
         self.disk_cache = RangeCache(cache_dir, url, page_size) if cache_dir is not None else None
         self.status = status
         self.position, self.size, self.etag = 0, None, None
         self.requests, self.bytes_received, self.failure = 0, 0, None
+        self.range_failures, self.coalesced_fallbacks = 0, 0
         self.verified_range_md5 = 0
         self.cached_pages = 0
         self.cache = OrderedDict()
@@ -59,7 +65,7 @@ class RangeFile(io.RawIOBase):
         self.position = base + offset
         return self.position
 
-    def _page(self, index):
+    def _page(self, index, last_index=None):
         check_cancel(self.cancel)
         if index in self.cache:
             self.cache.move_to_end(index)
@@ -73,7 +79,15 @@ class RangeFile(io.RawIOBase):
                     self.cache.popitem(last=False)
                 return cached
         begin = index * self.page_size
-        last = begin + self.page_size - 1
+        end_index = index
+        if self.size is not None and last_index is not None:
+            limit = min(last_index, index + self.coalesce_pages - 1, (self.size - 1) // self.page_size)
+            for following in range(index + 1, limit + 1):
+                # Never retransmit a verified page to enlarge a network request.
+                if following in self.cache or self.disk_cache and self.disk_cache.read(following) is not None:
+                    break
+                end_index = following
+        last = (end_index + 1) * self.page_size - 1
         if self.size is not None:
             last = min(last, self.size - 1)
         headers = {"Range": f"bytes={begin}-{last}", "Accept-Encoding": "identity"}
@@ -138,8 +152,21 @@ class RangeFile(io.RawIOBase):
             except requests.exceptions.SSLError:
                 raise UserError("公开源连接的证书校验失败，请检查网络或代理设置。") from None
             except (TransientDownloadError, requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError, requests.exceptions.ContentDecodingError) as error:
+                self.range_failures += 1
                 if attempt == 2:
                     raise TransientDownloadError("公开源字节传输多次中断，已保留校验通过的区块，可继续下载。") from None
+                if end_index > index:
+                    # A large response that stalls or is truncated should not
+                    # make every retry retransmit the same large interval.
+                    # Keep the pinned object and the original retry budget,
+                    # then commit each smaller page only after a complete read.
+                    self.coalesce_pages = 1
+                    self.coalesced_fallbacks += 1
+                    end_index = index
+                    last = min(begin + self.page_size - 1, self.size - 1)
+                    headers["Range"] = f"bytes={begin}-{last}"
+                    if self.status:
+                        self.status("较大字节区间传输中断，改为较小区间继续；已校验数据保留")
                 if self.status:
                     self.status(f"当前字节区间中断，正在重试（{attempt + 1}/2）；已完成区间保留")
                 if response is not None:
@@ -150,11 +177,13 @@ class RangeFile(io.RawIOBase):
             finally:
                 if response is not None:
                     response.close()
-            self.cache[index] = bytes(data)
-            if self.disk_cache:
-                self.disk_cache.write(index, self.cache[index])
-            if len(self.cache) > self.cache_pages:
-                self.cache.popitem(last=False)
+            for page in range(index, end_index + 1):
+                offset = (page - index) * self.page_size
+                self.cache[page] = bytes(data[offset:offset + self.page_size])
+                if self.disk_cache:
+                    self.disk_cache.write(page, self.cache[page])
+                if len(self.cache) > self.cache_pages:
+                    self.cache.popitem(last=False)
             return self.cache[index]
         raise AssertionError("range retry limit")
 
@@ -170,7 +199,7 @@ class RangeFile(io.RawIOBase):
             result = bytearray()
             while size:
                 index, offset = divmod(self.position, self.page_size)
-                part = self._page(index)[offset:offset + size]
+                part = self._page(index, (self.position + size - 1) // self.page_size)[offset:offset + size]
                 result.extend(part)
                 size -= len(part)
                 self.position += len(part)

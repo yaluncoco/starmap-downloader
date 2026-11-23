@@ -82,7 +82,7 @@ class BatchWorkflow:
     def coverage(self, value):
         from .service import _criteria
 
-        geometry = normalize_aoi(value.get("geometry"))
+        geometry, _ = self.service._request_aoi(value)
         if not self.state or value.get("batch_id") != self.state["id"] or not geometry.equals(self.geometry):
             raise UserError("联合检索或研究区已变化，请重新检索。")
         group = next((g for g in self.state["groups"] if g["id"] == value.get("group_id")), None)
@@ -105,7 +105,7 @@ class BatchWorkflow:
         # Imported lazily to keep the existing individual-source entry points reusable.
         from .service import DEM, S2_PROCESS, _criteria, _profile
 
-        geometry = normalize_aoi(value.get("geometry"))
+        geometry, aoi = self.service._request_aoi(value)
         shared = value.get("shared_dates")
         if not isinstance(shared, dict):
             raise UserError("附带下载需要一个共同的开始和结束日期。")
@@ -188,11 +188,11 @@ class BatchWorkflow:
             self.service._assert_idle()
             if any(g["profile"] == S2_PROCESS for g in groups) and not self.service.auth.connected:
                 raise UserError("本次来源包含 Sentinel Hub，请先在登录入口连接 OAuth 客户端凭据。")
-            self.service.last_aoi = describe_aoi(geometry, self.service.last_aoi["name"] if self.service.last_aoi else "研究区")
+            self.service.last_aoi = aoi
             self.service._reset_query()
             return self.service._start_job("batch-search", operation)
 
-    def _selected_group(self, group, supplied, geometry, *, primary=False):
+    def _selected_group(self, group, supplied, geometry, *, primary=False, cancel=None):
         from .service import DEM, _criteria
 
         profile = group["profile"]
@@ -234,13 +234,14 @@ class BatchWorkflow:
         selected = [known[k] for k in keys]
         chunks = [[scene] for scene in selected] if options.get("mode") in ("assets", "asset") else [selected]
         for chunk in chunks:
+            check_cancel(cancel)
             requested = copy.deepcopy(options)
             if options.get("mode") == "assets" and scene_assets:
                 if chunk[0]["key"] not in scene_assets:
                     raise UserError("请为每个选中的产品勾选原始文件。")
                 requested["assets"] = scene_assets[chunk[0]["key"]]
             normalized = self.service._selection_options(profile, group["criteria"], requested, chunk)
-            plan = self.service._plan_source(profile, geometry, normalized, chunk, group["criteria"])
+            plan = self.service._plan_source(profile, geometry, normalized, chunk, group["criteria"], cancel=cancel)
             result["units"].append({"options": normalized, "scenes": chunk, "plan": plan})
         return result
 
@@ -275,11 +276,11 @@ class BatchWorkflow:
                                             "grid_source": "batch_primary"}})
         return candidates
 
-    def prepare(self, value):
+    def prepare(self, value, *, cancel=None):
         with self.service.lock:
             if not self.state or value.get("batch_id") != self.state["id"] or value.get("query_id") != self.state["groups"][0]["query"]["id"]:
                 raise UserError("联合检索结果已变化，请重新检索主数据和附带数据。")
-            geometry = normalize_aoi(value.get("geometry"))
+            geometry, _ = self.service._request_aoi(value)
             if not geometry.equals(self.geometry):
                 raise UserError("研究区已变化，请重新检索。")
             if value.get("shared_dates") != self.state["shared_dates"]:
@@ -290,7 +291,7 @@ class BatchWorkflow:
                     any(not isinstance(item, dict) for item in companions) or {item.get("id") for item in companions} != expected):
                 raise UserError("附带数据勾选已变化，请重新检索；不会静默漏掉来源。")
             supplied = {item["id"]: item for item in companions}
-            selected = [self._selected_group(g, value if index == 0 else supplied[g["id"]], geometry, primary=index == 0)
+            selected = [self._selected_group(g, value if index == 0 else supplied[g["id"]], geometry, primary=index == 0, cancel=cancel)
                         for index, g in enumerate(self.state["groups"])]
             if not any(g["units"] for g in selected):
                 raise UserError("请在主数据或附带数据中选择至少一个可下载结果。")
@@ -302,6 +303,7 @@ class BatchWorkflow:
             if reference_id and reference is None:
                 raise UserError("所选主影像参考已不在下载计划中，请重新确认。")
             for group in selected[1:]:
+                check_cancel(cancel)
                 if not group["align_to_primary"] or not group["units"]:
                     continue
                 if reference is None:
@@ -340,8 +342,8 @@ class BatchWorkflow:
                     "primary_reference": reference["id"] if reference else None}
             return geometry, selected, reference, plan
 
-    def plan(self, value):
-        return self.prepare(value)[-1]
+    def plan(self, value, *, cancel=None):
+        return self.prepare(value, cancel=cancel)[-1]
 
     def download(self, value):
         output = str(value.get("output_dir", "")).strip()

@@ -14,12 +14,14 @@ $asset = ".\dist\StarmapDownloader-Setup-$version-win-x64.exe"
 .\scripts\check_installer.ps1 -Installer $asset -UpgradeFrom 'C:\备份\上一版完整安装包.exe' -UpdateRepository $repo
 ```
 
-当前构建脚本会强制检查 GEDI、联合下载、统一账号界面、研究包说明与图标资源（`--require-gedi --require-batch --require-accounts`）。1.5.0 起还检查空间选择脚本与官方 S3 拼接入口。打包后还应验证同一区域与共同日期的真实联网流程：
+当前构建脚本会强制检查 GEDI、联合下载、统一账号界面、研究包说明与图标资源（`--require-gedi --require-batch --require-accounts --require-monthly`）。1.5.0 起还检查空间选择脚本与官方 S3 拼接入口。打包后还应验证同一区域与共同日期的真实联网流程：
 
 ```powershell
-.\.venv\Scripts\python.exe -X utf8 scripts\check_package.py .\dist\StarmapDownloader\StarmapDownloader.exe --require-version $version --require-gedi --require-batch --require-accounts --require-update-repository $repo
+.\.venv\Scripts\python.exe -X utf8 scripts\check_package.py .\dist\StarmapDownloader\StarmapDownloader.exe --require-version $version --require-gedi --require-batch --require-accounts --require-monthly --require-update-repository $repo
 .\.venv\Scripts\python.exe -X utf8 scripts\live_batch.py --exe .\dist\StarmapDownloader\StarmapDownloader.exe --output .\verification\batch\packaged-live
 ```
+
+`live_city_monthly.py --out verification/city-monthly --download --reuse --browser` 验证完整北京市 2026-04 至 2026-05 的逐月研究包、全部栅格块的行政边界与质量规则、来源日期、整城 SHP 和真实标准／卫星底图。可通过 `--exe` 检查构建或安装版；测试配置和输出独立保存。官方 S3／Hub 实传需在隔离会话使用当前加密账号，不能把公开路线的实传当作其他来源验证。
 
 `live_mosaic.py` 可按 README 的命令，以十个官方 SAFE ZIP 的真实范围检验选块、采集日期及两日期接缝。`--browser` 另外验证真实 Edge 的地图选择与边界删除。原件与区域结果分别核验；缺少实际 SHP 时仅声称以官方范围构造 AOI。
 
