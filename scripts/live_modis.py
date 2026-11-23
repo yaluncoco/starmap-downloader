@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from live_public import local_app
 from live_s2_tiles import Local, digest
@@ -55,9 +56,23 @@ def verify_download(api, request, refs):
     result = api.job("download", request, timeout=900)["result"]
     manifest = Path(result["manifest"])
     text = manifest.read_text(encoding="utf-8")
-    assert "sig=" not in text and "?" not in text
+    assert "sig=" not in text.casefold()
     doc = json.loads(text)
-    assert doc["status"] == "completed" and tuple(map(int, doc["software"].split("."))) >= (1, 11, 0)
+    def check_urls(value):
+        if isinstance(value, dict):
+            for child in value.values():
+                check_urls(child)
+        elif isinstance(value, list):
+            for child in value:
+                check_urls(child)
+        elif isinstance(value, str) and value.startswith(("http://", "https://")):
+            address = urlsplit(value)
+            assert not address.query and not address.username and not address.password
+    check_urls(doc)
+    with api.session.get(api.origin + "/api/bootstrap", timeout=10) as response:
+        response.raise_for_status()
+        version = response.json()["version"]
+    assert doc["status"] == "completed" and doc["software"] == version
     files = {}
     for r in doc["items"]:
         alias = r["asset"]

@@ -21,6 +21,7 @@ from shapely.geometry import mapping
 
 from . import VERSION
 from .download import _existing_matches, _save_json
+from .download_cache import ArrayCache
 from .errors import Cancelled, UserError, keep_download_result
 from .http import HttpClient, check_cancel
 from .local_paths import io_path
@@ -55,13 +56,15 @@ def public_plan(geometry, scenes, options):
     return plan, tiles, projected
 
 
-def _open_source(stack, http, asset, cancel, rtc_access=None):
+def _open_source(stack, http, asset, cancel, rtc_access=None, *, cache_dir=None, status=None):
     settings = {}
+    if cache_dir is not None:
+        settings.update(cache_dir=cache_dir, status=status, page_size=1024**2, cache_pages=8)
     if rtc_access is not None:
         if asset.get("pc_scope") != "rtc":
             raise UserError("Sentinel-1 RTC 原始对象与裁剪路线不匹配。")
-        settings = {"access": rtc_access, "range_md5": True, "expected_size": asset["object_bytes"],
-                    "page_size": 1024**2, "cache_pages": 8}
+        settings.update(access=rtc_access, range_md5=True, expected_size=asset["object_bytes"],
+                        page_size=1024**2, cache_pages=8)
     stream = stack.enter_context(RangeFile(http, asset["url"], cancel, **settings))
     stream.defer_errors = True
     try:
@@ -192,7 +195,7 @@ def download_public(geometry, scenes, options, output_dir, *, cancel=None, progr
         target = folder / f"{label}_{options['mode']}_{resolution}m_{identity}.tif"
         items.append((row, assets, source_id, identity, target))
     needed = sum(not item[-1].exists() for item in items)
-    if needed and shutil.disk_usage(folder).free < plan["bytes_per_scene"] * needed * 1.2 + 12 * 1024**2:
+    if needed and shutil.disk_usage(folder).free < plan["bytes_per_scene"] * needed * 3.2 + 16 * 1024**2:
         raise UserError("按未压缩影像估算，输出磁盘空间不足。请缩小区域或分批下载。")
     manifest_path = folder / f"下载记录_{uid}.json"
     profile = options["profile"]
@@ -222,6 +225,9 @@ def download_public(geometry, scenes, options, output_dir, *, cancel=None, progr
             receipt = target.with_suffix(".starmap.json")
             expected = {"file": target.name, "request_fingerprint": plan["fingerprint"], "source_fingerprint": identity}
             bundle = ResearchBundle(target, plan, grid, identity) if is_research(options) else None
+            cache_root = folder / ".download-cache" / identity
+            blocks_cache = ArrayCache(cache_root, {"schema": 1, "grid": plan["fingerprint"], "source": identity},
+                                      bundle.specs if bundle else {"analysis": options})
             partial = bundle.partials["analysis"] if bundle else folder / f".{target.stem}.{uid}.partial.tif"
             try:
                 existing = has_bundle_files(target) if bundle else target.exists() or receipt.exists()
@@ -239,7 +245,8 @@ def download_public(geometry, scenes, options, output_dir, *, cancel=None, progr
                     fill = 0 if options["mode"] == "rgb" else options["nodata"]
                     with rasterio.Env(GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR", GDAL_PAM_ENABLED="NO"):
                         with ExitStack() as stack:
-                            sources = {band: _open_source(stack, http, asset, cancel, rtc_access) for band, asset in assets.items()}
+                            sources = {band: _open_source(stack, http, asset, cancel, rtc_access,
+                                                         cache_dir=cache_root / "ranges", status=report) for band, asset in assets.items()}
                             with ExitStack() as outputs:
                                 out = bundle.open(outputs) if bundle else outputs.enter_context(rasterio.open(
                                     partial, "w", driver="GTiff", width=plan["width"], height=plan["height"], count=options["count"],
@@ -259,7 +266,19 @@ def download_public(geometry, scenes, options, output_dir, *, cancel=None, progr
                                     window = Window(tile.col, tile.row, tile.width, tile.height)
                                     block_grid = out.window_transform(window)
                                     inside = geometry_mask([aoi_shape], out_shape=(tile.height, tile.width), transform=block_grid, invert=True) if tile.intersects else None
-                                    if inside is None or not inside.any():
+                                    key = [tile.row, tile.col, tile.height, tile.width]
+                                    saved_block = blocks_cache.load(key, (tile.height, tile.width), cancel)
+                                    valid = 0
+                                    if saved_block:
+                                        saved_arrays, saved_detail = saved_block
+                                        if saved_detail["versions"] != {band: [src[1].etag, src[1].size] for band, src in sources.items()}:
+                                            raise UserError("已保存裁剪区块的源版本不一致，未混用影像。请重新检索。")
+                                        valid = saved_detail["valid"]
+                                        if bundle:
+                                            blocks, counts = saved_arrays, saved_detail["counts"]
+                                        else:
+                                            values = saved_arrays["analysis"]
+                                    elif inside is None or not inside.any():
                                         if bundle:
                                             shape = (tile.height, tile.width)
                                             blocks, counts = make_block(np.full((options["count"], *shape), fill, dtype=np.float32),
@@ -274,12 +293,16 @@ def download_public(geometry, scenes, options, output_dir, *, cancel=None, progr
                                             valid = counts["analysis"]
                                         else:
                                             values, valid = _output(inputs, inside, options)
-                                        valid_count += valid
+                                    if not saved_block:
+                                        blocks_cache.save(key, blocks if bundle else {"analysis": values},
+                                                          {"valid": valid, "counts": counts if bundle else None,
+                                                           "versions": {band: [src[1].etag, src[1].size] for band, src in sources.items()}}, cancel)
+                                    valid_count += valid
                                     if bundle:
                                         bundle.write(blocks, counts, window)
                                     else:
                                         out.write(values, window=window)
-                                    report(f"裁剪区块 {j+1}/{len(tiles)}", .85*(j+1)/len(tiles))
+                                    report(f"{'复用已校验区块' if saved_block else '裁剪区块'} {j+1}/{len(tiles)}", .85*(j+1)/len(tiles))
                                 out.update_tags(request_fingerprint=plan["fingerprint"], source_fingerprint=identity, catalogue_product_id=source_id,
                                                 acquisition_utc=row["datetime"] or "static", source=manifest["source"], cloud_mask=str(options["mask_clouds"]),
                                                 resampling="nearest", valid_pixels=str(valid_count),
@@ -289,7 +312,8 @@ def download_public(geometry, scenes, options, output_dir, *, cancel=None, progr
                                 if bundle:
                                     bundle.tag({**out.tags(), "reflectance_units": "unitless", "mode": options["mode"]})
                             record["transport"] = {band: {"etag": src[1].etag, "object_bytes": src[1].size, "bytes_received": src[1].bytes_received,
-                                                          "range_requests": src[1].requests} for band, src in sources.items()}
+                                                          "range_requests": src[1].requests, "cached_ranges": src[1].cached_pages} for band, src in sources.items()}
+                            record["reused_blocks"] = blocks_cache.reused
                             if rtc_access is not None:
                                 for band, src in sources.items():
                                     record["transport"][band]["azure_md5_verified_ranges"] = src[1].verified_range_md5
@@ -326,6 +350,8 @@ def download_public(geometry, scenes, options, output_dir, *, cancel=None, progr
                               **({"bundle": bundle.result_paths()} if bundle else {})})
                 _save_json(manifest_path, manifest)
                 report("校验通过", 1.0)
+                if cache_root.is_dir():
+                    shutil.rmtree(cache_root)
             except Cancelled:
                 record["status"] = "cancelled"
                 raise

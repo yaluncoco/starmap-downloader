@@ -18,6 +18,7 @@ from shapely.geometry import mapping
 
 from . import VERSION
 from .errors import Cancelled, UserError, keep_download_result
+from .download_cache import ArrayCache
 from .local_paths import io_path
 from .http import HttpClient, check_cancel
 from .integrity import audit_raster, checked_local_receipt, publish_file
@@ -115,7 +116,7 @@ def download_scenes(geometry, scenes, options, output_dir, auth, *, cancel=None,
     if needed:
         max_tile_pixels = max(tile.width * tile.height for tile in tiles if tile.intersects)
         tile_bytes = max_tile_pixels * transfer_options(options)["count"] * (4 if options["dtype"] == "float32" else 1)
-        required = plan["bytes_per_scene"] * needed * 1.2 + tile_bytes * 4 + 12 * 1024 ** 2
+        required = plan["bytes_per_scene"] * needed * 3.2 + tile_bytes * 4 + 16 * 1024 ** 2
         if shutil.disk_usage(folder).free < required:
             raise UserError(f"按未压缩影像及下载临时空间估算，输出磁盘至少需要约 {required / 1024 ** 2:.0f} MB 可用空间。请换一个文件夹，或分批下载。")
 
@@ -156,6 +157,9 @@ def download_scenes(geometry, scenes, options, output_dir, auth, *, cancel=None,
                 continue
 
             bundle = ResearchBundle(target, plan, grid_transform, identity) if is_research(options) else None
+            cache_root = folder / ".download-cache" / identity
+            blocks_cache = ArrayCache(cache_root, {"schema": 1, "grid": plan["fingerprint"], "source": identity},
+                                      bundle.specs if bundle else {"analysis": options})
             partial = bundle.partials["analysis"] if bundle else target.with_name(target.stem + "." + uuid.uuid4().hex[:8] + ".partial.tif")
             tile_file = folder / (".block_" + uuid.uuid4().hex + ".tif")
             fill = 0 if options["nodata"] is None else options["nodata"]
@@ -177,16 +181,26 @@ def download_scenes(geometry, scenes, options, output_dir, auth, *, cancel=None,
                         if tile.intersects:
                             scene_blocks += 1
                             report(f"处理 {scene_index + 1}/{len(scenes)} 景 · {label} · 区块 {scene_blocks}/{plan['tiles_per_scene']}", completed_scenes=scene_index)
-                            metadata = fetch_tile(http, auth, process_payload(tile, plan, scene, options, products=products), tile_file,
-                                                  options=options, products=products, cancel=cancel, status=report)
-                            reference_transform = from_origin(tile.bounds[0], tile.bounds[3], resolution, resolution)
-                            values = _parts(tile, reference_transform, plan, transfer_options(options), tile_file)
-                            inside = geometry_mask([aoi_shape], out_shape=(tile.height, tile.width), transform=reference_transform, invert=True)
-                            if bundle:
-                                blocks, counts = process_block(values, inside, options, products, metadata)
-                                values = blocks["analysis"]
+                            key = [tile.row, tile.col, tile.height, tile.width]
+                            saved_block = blocks_cache.load(key, (tile.height, tile.width), cancel)
+                            if saved_block:
+                                arrays, detail = saved_block
+                                metadata = detail["metadata"]
+                                values = arrays["analysis"]
+                                if bundle:
+                                    blocks, counts = arrays, detail["counts"]
+                                report(f"复用已校验区块 {scene_blocks}/{plan['tiles_per_scene']}", completed_scenes=scene_index)
                             else:
-                                values[:, ~inside] = fill
+                                metadata = fetch_tile(http, auth, process_payload(tile, plan, scene, options, products=products), tile_file,
+                                                      options=options, products=products, cancel=cancel, status=report)
+                                reference_transform = from_origin(tile.bounds[0], tile.bounds[3], resolution, resolution)
+                                values = _parts(tile, reference_transform, plan, transfer_options(options), tile_file)
+                                inside = geometry_mask([aoi_shape], out_shape=(tile.height, tile.width), transform=reference_transform, invert=True)
+                                if bundle:
+                                    blocks, counts = process_block(values, inside, options, products, metadata)
+                                    values = blocks["analysis"]
+                                else:
+                                    values[:, ~inside] = fill
                             if options["mode"] == "rgb":
                                 data = values[3] == 255
                                 if np.any((values[3] != 0) & ~data) or np.any(values[:3, ~data]):
@@ -199,6 +213,9 @@ def download_scenes(geometry, scenes, options, output_dir, auth, *, cancel=None,
                             valid = int(np.count_nonzero(data))
                             if valid and not metadata["sources"]:
                                 raise UserError("处理服务返回未能对应所选过境的像元，已停止保存该景。")
+                            if not saved_block:
+                                blocks_cache.save(key, blocks if bundle else {"analysis": values},
+                                                  {"metadata": metadata, "counts": counts if bundle else None}, cancel)
                             valid_pixel_count += valid
                             matched_blocks += bool(metadata["sources"])
                             record["blocks"].append({"bounds": list(tile.bounds), "width": tile.width, "height": tile.height, "valid_pixels": valid,
@@ -236,6 +253,7 @@ def download_scenes(geometry, scenes, options, output_dir, auth, *, cancel=None,
                 if not _existing_matches(partial, plan, grid_transform, identity):
                     raise UserError("最终影像校验失败，临时文件未发布。")
                 report("检查最终 GeoTIFF 区块和 SHA-256", completed_scenes=scene_index)
+                record["reused_blocks"] = blocks_cache.reused
                 if bundle:
                     observed = {product["id"]: set() for product in products}
                     for block in record["blocks"]:
@@ -262,6 +280,8 @@ def download_scenes(geometry, scenes, options, output_dir, auth, *, cancel=None,
                 record.update(status="completed", **audited)
                 results.append({"path": str(target), "scene": scene["key"], "status": "completed",
                                 **({"bundle": bundle.result_paths()} if bundle else {})})
+                if cache_root.is_dir():
+                    shutil.rmtree(cache_root)
                 _save_json(manifest_path, manifest)
                 report(f"完成 {scene_index + 1}/{len(scenes)} 景 · {target.name}", completed_scenes=scene_index + 1, file=str(target))
             except Cancelled:

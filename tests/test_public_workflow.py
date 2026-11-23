@@ -136,7 +136,10 @@ def test_public_bad_data_does_not_publish(client, pub_provider, tmp_path, case, 
     else:
         pub_provider.bad = case
     if case == "etag":
-        monkeypatch.setattr("core.public_download.RangeFile", lambda *args: RangeFile(*args, page_size=4096))
+        def small_ranges(*args, **kwargs):
+            kwargs["page_size"] = 4096
+            return RangeFile(*args, **kwargs)
+        monkeypatch.setattr("core.public_download.RangeFile", small_ranges)
     req = {**search_public(client), "output_dir": str(tmp_path / case)}
     status = "completed" if case in ("empty", "cloud") else "failed"
     job = client.wait(client.post("download", req)["job_id"], status)

@@ -252,11 +252,11 @@ def modis_scope(alias):
     return "modis-source" if alias in ("hdf", "metadata") else "modis-cog"
 
 
-def modis_blob_request(http, method, url, headers, cancel, access, *, status=None):
+def modis_blob_request(http, method, url, headers, cancel, access, *, status=None, attempts=5):
     if method not in ("GET", "HEAD") or access is None or not modis_object(url):
         raise UserError("MODIS 文件没有匹配的只读对象通道。")
     for attempt in range(2):
-        response = http.request(method, url, headers=headers, auth=access, stream=True, timeout=(12, 90),
+        response = http.request(method, url, headers=headers, auth=access, stream=True, timeout=(12, 90), attempts=attempts,
                                 cancel=cancel, status=status, allow_redirects=False)
         code = response.status_code
         if code in (200, 206):

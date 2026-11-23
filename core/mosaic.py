@@ -21,6 +21,7 @@ from shapely.geometry import box, mapping
 
 from . import VERSION
 from .errors import Cancelled, UserError, keep_download_result
+from .download_cache import ArrayCache
 from .http import HttpClient, check_cancel
 from .integrity import audit_raster, checked_local_receipt, publish_file, sha256_file
 from .local_paths import io_path
@@ -196,8 +197,9 @@ class _ProcessReader:
 
 
 class _PublicReader:
-    def __init__(self, http, plan, options, cancel):
+    def __init__(self, http, plan, options, cancel, cache_dir=None, report=None):
         self.http, self.plan, self.options, self.cancel = http, plan, _raw_options(options), cancel
+        self.cache_dir, self.report = cache_dir, report
         self.opened, self.versions, self.transport = OrderedDict(), {}, {}
 
     def _close(self, key):
@@ -209,7 +211,8 @@ class _PublicReader:
                 old = records.get(band, {})
                 records[band] = {"etag": stream.etag, "object_bytes": stream.size,
                                  "bytes_received": old.get("bytes_received", 0) + stream.bytes_received,
-                                 "range_requests": old.get("range_requests", 0) + stream.requests}
+                                 "range_requests": old.get("range_requests", 0) + stream.requests,
+                                 "cached_ranges": old.get("cached_ranges", 0) + stream.cached_pages}
         finally:
             stack.close()
 
@@ -223,7 +226,8 @@ class _PublicReader:
                 self._close(next(iter(self.opened)))
             stack = ExitStack()
             try:
-                sources = {band: _open_source(stack, self.http, asset, self.cancel) for band, asset in assets.items()}
+                sources = {band: _open_source(stack, self.http, asset, self.cancel, cache_dir=self.cache_dir,
+                                             status=self.report) for band, asset in assets.items()}
                 for band, src in sources.items():
                     version = (src[1].etag, src[1].size)
                     if (key, band) in self.versions and self.versions[key, band] != version:
@@ -240,7 +244,8 @@ class _PublicReader:
                                      self.cancel, preserve_nodata=band == "SCL") for band, src in sources.items()}
         blocks, _ = public_block(inputs, inside, self.options)
         return blocks["unmasked"], blocks["scl"][0], {
-            "sources": [{"catalogue_id": scene["public"]["source_id"], "match": "safe_id"}], "assets": assets}
+            "sources": [{"catalogue_id": scene["public"]["source_id"], "match": "safe_id"}], "assets": assets,
+            "source_versions": {band: [src[1].etag, src[1].size] for band, src in sources.items()}}
 
     def close(self):
         while self.opened:
@@ -383,6 +388,12 @@ def download_mosaic(geometry, scenes, options, output_dir, *, auth=None, cancel=
     receipt = target.with_suffix(".starmap.json")
     expected = {"file": target.name, "request_fingerprint": plan["fingerprint"], "source_fingerprint": identity}
     bundle = ResearchBundle(target, plan, grid, identity) if is_research(options) else _AuxiliaryBundle(target, plan, grid, identity)
+    cache_root = folder / ".download-cache" / identity
+    cache_identity = {"schema": 1, "grid": plan["fingerprint"], "source": identity}
+    blocks_cache = ArrayCache(cache_root, cache_identity, bundle.specs)
+    request_cache = ArrayCache(cache_root / "requests", cache_identity,
+                               {"unmasked": {"count": len(options["bands"]), "dtype": "float32"},
+                                "scl": {"count": 1, "dtype": "uint8"}})
     manifest_path = folder / ("下载记录_" + uuid4().hex[:10] + ".json")
     record = {"scene": "mosaic", "path": str(target), "status": "running", "source_fingerprint": identity,
               "selected_keys": [row["key"] for row in rows], "blocks": []}
@@ -414,7 +425,7 @@ def download_mosaic(geometry, scenes, options, output_dir, *, auth=None, cancel=
             manifest["status"] = "completed"
             return {"folder": str(folder), "files": files, "manifest": str(manifest_path), "plan": plan, "empty_scenes": [], "used_dates": used_dates}
         max_pixels = max(tile.width * tile.height for tile in tiles)
-        required = plan["bytes_per_scene"] * 1.2 + max_pixels * (len(options["bands"]) * 16 + 48) + 12 * 1024**2
+        required = plan["bytes_per_scene"] * 3.2 + max_pixels * (len(options["bands"]) * 16 + 48) + 16 * 1024**2
         required += plan.get("native_source_bytes", 0) * 1.1
         if shutil.disk_usage(folder).free < required:
             raise UserError(f"拼接输出及临时空间预计至少需要 {required / 1024**2:.0f} MB；请换一个输出文件夹或分区下载。")
@@ -429,15 +440,50 @@ def download_mosaic(geometry, scenes, options, output_dir, *, auth=None, cancel=
                 reader = NativeReader(plan, options, folder / "官方原件缓存", auth, cancel, report)
             else:
                 http = HttpClient()
-                reader = _PublicReader(http, plan, options, cancel) if public else _ProcessReader(http, auth, plan, options, folder, cancel, report)
+                reader = _PublicReader(http, plan, options, cancel, cache_root / "ranges", report) if public else _ProcessReader(http, auth, plan, options, folder, cancel, report)
         used, valid_by_source = np.zeros(len(rows) + 1, dtype=np.int64), np.zeros(len(rows) + 1, dtype=np.int64)
         matches = {item["id"]: set() for item in identities}
         fallback_pixels, inside_pixels = 0, 0
+
+        def restore_evidence(detail):
+            if hasattr(reader, "evidence"):
+                reader.evidence.update(detail.get("native_sources", {}))
+            if hasattr(reader, "versions"):
+                for key, bands in detail.get("versions", {}).items():
+                    for band, version in bands.items():
+                        found = reader.versions.get((key, band))
+                        if found is not None and found != tuple(version):
+                            raise UserError("保存的拼接区块源版本不一致，未混用影像。")
+                        reader.versions[key, band] = tuple(version)
+
+        def cache_evidence():
+            versions = {}
+            for (key, band), version in getattr(reader, "versions", {}).items():
+                versions.setdefault(key, {})[band] = list(version)
+            return {"versions": versions, "native_sources": getattr(reader, "evidence", {})}
+
         with rasterio.Env(GDAL_PAM_ENABLED="NO", GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR"), ExitStack() as outputs:
             bundle.open(outputs)
             for tile in tiles:
                 check_cancel(cancel)
                 window = Window(tile.col, tile.row, tile.width, tile.height)
+                block_key = [tile.row, tile.col, tile.height, tile.width]
+                saved_block = blocks_cache.load(block_key, (tile.height, tile.width), cancel)
+                if saved_block:
+                    blocks, detail = saved_block
+                    restore_evidence(detail)
+                    used += np.array(detail["used"], dtype=np.int64)
+                    valid_by_source += np.array(detail["valid_by_source"], dtype=np.int64)
+                    fallback_pixels += detail["fallback_pixels"]
+                    inside_pixels += detail["inside_pixels"]
+                    record["blocks"].extend(detail["blocks"])
+                    for key, methods in detail["matches"].items():
+                        matches[key].update(methods)
+                    bundle.write(blocks, detail["counts"], window)
+                    completed_tiles += 1
+                    report(f"复用已校验拼接区块 {completed_tiles}/{len(tiles)}")
+                    continue
+                start_blocks = len(record["blocks"])
                 x = np.broadcast_to((tile.bounds[0] + (np.arange(tile.width) + .5) * plan["resolution"])[None], (tile.height, tile.width))
                 y = np.broadcast_to((tile.bounds[3] - (np.arange(tile.height) + .5) * plan["resolution"])[:, None], (tile.height, tile.width))
                 longitude, latitude = inverse.transform(x, y)
@@ -459,7 +505,15 @@ def download_mosaic(geometry, scenes, options, output_dir, *, auth=None, cancel=
                     request_tile, slices = cropped
                     keep = needed[slices]
                     report(f"拼接区块 {completed_tiles + 1}/{len(tiles)} · {scene['tiles'][0]} · {scene['date']} · 优先级 {index}")
-                    values, quality, metadata = reader.read(scene, request_tile, keep)
+                    request_key = [scene["key"], request_tile.row, request_tile.col, request_tile.height, request_tile.width,
+                                   hashlib.sha256(keep.tobytes()).hexdigest()]
+                    saved_request = request_cache.load(request_key, (request_tile.height, request_tile.width), cancel)
+                    if saved_request:
+                        arrays, detail = saved_request
+                        values, quality, metadata = arrays["unmasked"], arrays["scl"][0], detail["metadata"]
+                        restore_evidence(detail)
+                    else:
+                        values, quality, metadata = reader.read(scene, request_tile, keep)
                     # Readers must return source-valid, finite raw values on the exact requested grid.
                     blocks, _ = make_block(values, quality, np.any(np.isfinite(values) & (values != NODATA), axis=0).astype(np.uint16), keep, _raw_options(options))
                     values, quality = blocks["unmasked"], blocks["scl"][0]
@@ -478,6 +532,9 @@ def download_mosaic(geometry, scenes, options, output_dir, *, auth=None, cancel=
                         matches[identity_row["id"]].add(item["match"])
                     if take.any() and not matches[identity_row["id"]]:
                         raise UserError("拼接像元没有可核对的产品来源，未发布影像。")
+                    if not saved_request:
+                        request_cache.save(request_key, {"unmasked": values, "scl": quality[None]},
+                                           {"metadata": metadata, **cache_evidence()}, cancel)
                     record["blocks"].append({"key": scene["key"], "source_index": index, "bounds": list(request_tile.bounds),
                                              "width": request_tile.width, "height": request_tile.height,
                                              "needed_pixels": int(keep.sum()), "accepted_pixels": int(take.sum()), **metadata})
@@ -488,9 +545,17 @@ def download_mosaic(geometry, scenes, options, output_dir, *, auth=None, cancel=
                     analysis, valid = _analysis(raw, scl, options)
                     blocks = {"analysis": analysis, "scl": scl[None], "source": source[None]}
                     counts = {"analysis": int(valid.sum()), "scl": int((scl != SCL_NODATA).sum()), "source": int((source > 0).sum())}
-                used += np.bincount(source.ravel(), minlength=len(rows) + 1)
-                valid_by_source += np.bincount(source[valid], minlength=len(rows) + 1)
-                fallback_pixels += int(((source > 0) & (source != primary)).sum())
+                tile_used = np.bincount(source.ravel(), minlength=len(rows) + 1)
+                tile_valid = np.bincount(source[valid], minlength=len(rows) + 1)
+                tile_fallback = int(((source > 0) & (source != primary)).sum())
+                blocks_cache.save(block_key, blocks,
+                                  {"counts": counts, "used": tile_used.tolist(), "valid_by_source": tile_valid.tolist(),
+                                   "fallback_pixels": tile_fallback, "inside_pixels": int(inside.sum()),
+                                   "blocks": record["blocks"][start_blocks:], "matches": {key: sorted(value) for key, value in matches.items()},
+                                   **cache_evidence()}, cancel)
+                used += tile_used
+                valid_by_source += tile_valid
+                fallback_pixels += tile_fallback
                 bundle.write(blocks, counts, window)
                 completed_tiles += 1
             common = {"source": manifest["source"], "acquisition_utc": "multiple; see source_index_file",
@@ -511,7 +576,7 @@ def download_mosaic(geometry, scenes, options, output_dir, *, auth=None, cancel=
         record.update(inside_pixels=inside_pixels, valid_pixels=bundle.counts["analysis"],
                       source_pixels=int(used[1:].sum()), fallback_pixels=fallback_pixels,
                       uncovered_or_no_spectral_pixels=inside_pixels - int(used[1:].sum()),
-                      actual_requests=len(record["blocks"]))
+                      actual_requests=len(record["blocks"]), reused_blocks=blocks_cache.reused, reused_source_blocks=request_cache.reused)
         used_dates = sorted({item["utc"][:10] for index, item in enumerate(identities, 1) if used[index]})
         record["used_dates"] = used_dates
         if not bundle.counts["analysis"] and (not is_research(options) or not bundle.counts["unmasked"]):
@@ -534,6 +599,8 @@ def download_mosaic(geometry, scenes, options, output_dir, *, auth=None, cancel=
         report("逐块核对光谱、SCL、像元来源与 SHA-256", .94)
         audited = bundle.publish(expected, provenance, cancel)
         record.update(status="completed", **audited)
+        if cache_root.is_dir():
+            shutil.rmtree(cache_root)
         files.append({"path": str(target), "scene": "mosaic", "status": "completed", "bundle": bundle.result_paths()})
         manifest["status"] = "completed"
         report(f"拼接完成 · 实际使用 {len(used_dates)} 个日期 · 1 份区域输出", 1.0, completed_scenes=1)

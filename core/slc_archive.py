@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import json
 import re
 import shutil
 import stat
@@ -16,8 +17,9 @@ from xml.etree import ElementTree
 
 import requests
 
-from .errors import Cancelled, UserError
-from .http import HttpClient, check_cancel
+from .errors import Cancelled, UserError, TransientDownloadError
+from .download_cache import fingerprint, save_json
+from .http import HttpClient, check_cancel, wait_retry
 from .open_slc import check_slc_target, zip_type
 from .scene_identity import utc_text
 
@@ -36,14 +38,55 @@ BODY_ERRORS = (requests.ConnectionError, requests.Timeout, requests.exceptions.C
 def transfer_slc(item, partial, cancel, progress):
     ref = check_slc_target(item)
     size, tag = item["bytes"], item["identity"]["archive_etag"]
-    if shutil.disk_usage(partial.parent).free < size:
-        raise UserError("磁盘剩余空间不足，无法接收完整 SLC ZIP。")
     windows = [(n, min(size, n + RANGE_BYTES) - 1) for n in range(0, size, RANGE_BYTES)]
     lanes = min(LANES, len(windows))
-    with partial.open("xb") as out:
-        out.truncate(size)
+    receipt = partial.with_name(partial.name + ".ranges.json")
+    identity = fingerprint(item)
+    recorded, prefixes = {}, {}
+    try:
+        if receipt.stat().st_size > 4 * 1024**2:
+            raise ValueError
+        saved = json.loads(receipt.read_text(encoding="utf-8"))
+        if saved.get("identity") != identity or saved.get("size") != size or saved.get("etag") != tag or partial.stat().st_size != size:
+            raise ValueError
+        with partial.open("rb") as stream:
+            for begin, end in windows:
+                row = saved.get("windows", {}).get(str(begin))
+                if not isinstance(row, dict):
+                    continue
+                count = row.get("received")
+                if type(count) is not int or not 0 < count <= end - begin + 1 or count == end - begin + 1 and not row.get("complete"):
+                    continue
+                sha, remaining = hashlib.sha256(), count
+                stream.seek(begin)
+                while remaining:
+                    check_cancel(cancel)
+                    block = stream.read(min(BLOCK, remaining))
+                    if not block:
+                        raise ValueError
+                    sha.update(block)
+                    remaining -= len(block)
+                if sha.hexdigest() == row.get("sha256"):
+                    recorded[str(begin)], prefixes[begin] = row, sha
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    if not partial.exists() or partial.stat().st_size != size:
+        if shutil.disk_usage(partial.parent).free < size:
+            raise UserError("磁盘剩余空间不足，无法接收完整 SLC ZIP。")
+        with partial.open("wb") as out:
+            out.truncate(size)
+        recorded, prefixes = {}, {}
     lock, stop = threading.Lock(), threading.Event()
-    received, last_update = 0, 0.0
+    received = sum(row["received"] for row in recorded.values())
+    resumed, last_update = received, 0.0
+    reused_windows = sum(bool(row.get("complete")) for row in recorded.values())
+
+    def checkpoint(begin, position, sha, complete=False):
+        if position <= begin:
+            return
+        with lock:
+            recorded[str(begin)] = {"received": position - begin, "sha256": sha.hexdigest(), "complete": complete}
+            save_json(receipt, {"schema": 1, "identity": identity, "size": size, "etag": tag, "windows": recorded})
 
     class TransferCancel:
         def is_set(self):
@@ -67,15 +110,21 @@ def transfer_slc(item, partial, cancel, progress):
         try:
             with partial.open("r+b", buffering=0) as out:
                 for begin, end in positions:
-                    position = begin
+                    row = recorded.get(str(begin), {})
+                    if row.get("complete"):
+                        continue
+                    position = begin + row.get("received", 0)
+                    sha = prefixes.get(begin, hashlib.sha256())
+                    saved_position, saved_time = position, time.monotonic()
                     for attempt in range(4):
                         check_cancel(signal)
                         if position == end + 1:
                             break
                         request_headers = {"If-Match": tag, "Accept-Encoding": "identity", "Range": f"bytes={position}-{end}"}
                         requests_sent += 1
-                        response = http.request("GET", ref.url, headers=request_headers, stream=True, cancel=signal, timeout=(15, 55))
+                        response = None
                         try:
+                            response = http.request("GET", ref.url, headers=request_headers, stream=True, cancel=signal, timeout=(15, 55), attempts=1)
                             if response.status_code == 412:
                                 raise UserError("SLC 存档对象在检索后已更换，请重新检索；未保存或拼接其他版本。")
                             if (response.status_code != 206 or not zip_type(response.headers)
@@ -93,22 +142,45 @@ def transfer_slc(item, partial, cancel, progress):
                                 if out.write(block) != len(block):
                                     raise OSError("short SLC ZIP write")
                                 position += len(block)
+                                sha.update(block)
                                 with lock:
                                     received += len(block)
                                     now = time.monotonic()
                                     if now - last_update >= .35:
                                         progress("分段接收 SLC 原始 ZIP", received, size)
                                         last_update = now
+                                if position - saved_position >= 16 * 1024**2 or time.monotonic() - saved_time >= 2:
+                                    checkpoint(begin, position, sha)
+                                    saved_position, saved_time = position, time.monotonic()
                             if position == end + 1:
+                                checkpoint(begin, position, sha, complete=True)
                                 break
-                        except BODY_ERRORS:
+                        except requests.exceptions.SSLError:
+                            error = UserError("SLC 下载连接的证书校验失败，请检查网络或代理设置。")
+                            if recorded:
+                                error.download_progress_preserved = True
+                            raise error from None
+                        except (TransientDownloadError, *BODY_ERRORS) as error:
+                            checkpoint(begin, position, sha)
                             # Preserve the prefix in this window; only retry the still-missing bytes, pinned to the same ETag.
                             if position == end + 1:
-                                raise UserError("SLC 区间传输未正常结束；未发布文件。") from None
+                                raise TransientDownloadError("SLC 区间传输未正常结束；已保留已校验区间，可继续下载。") from None
+                            if attempt == 3:
+                                raise TransientDownloadError("SLC 文件的一个区间多次中断；已保留校验通过的区间，可继续下载。") from None
+                            if response is not None:
+                                response.close()
+                                response = None
+                            wait_retry(attempt, signal, getattr(error, "retry_after", None))
+                        except (Cancelled, OSError):
+                            checkpoint(begin, position, sha)
+                            raise
+                        except UserError as error:
+                            if recorded:
+                                error.download_progress_preserved = True
+                            raise
                         finally:
-                            response.close()
-                        if attempt == 3:
-                            raise UserError("SLC 文件的一个区间多次传输中断；未发布不完整文件。")
+                            if response is not None:
+                                response.close()
             return requests_sent
         finally:
             http.close()
@@ -125,6 +197,7 @@ def transfer_slc(item, partial, cancel, progress):
         raise UserError("SLC 区间未覆盖完整 ZIP，未发布。")
     return {"size": size, "etag": tag, "content_type": "application/zip", "expected_bytes": size,
             "transfer_attempts": total_requests, "range_windows": len(windows), "range_workers": lanes,
+            "resumed_bytes": resumed, "reused_range_windows": reused_windows,
             "aws_single_part_md5": None, "azure_blob_md5": None}
 
 

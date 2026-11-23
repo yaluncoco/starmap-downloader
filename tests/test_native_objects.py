@@ -192,7 +192,7 @@ def test_cached_native_file_checks_source_digest_even_if_local_receipt_changes(s
     auth.connect(TEST_ACCESS, TEST_SECRET)
     first = download_original(AOI, plan, tmp_path, None, s3_auth=auth)
     path = Path(first["files"][0]["path"])
-    receipt, = path.parent.glob("*.starmap.json")
+    receipt, = (p for p in path.parent.glob("*.starmap.json") if not p.name.endswith(".zip.starmap.json"))
     changed = HDF.replace(b"fixture", b"changed")
     assert len(changed) == len(HDF)
     path.write_bytes(changed)

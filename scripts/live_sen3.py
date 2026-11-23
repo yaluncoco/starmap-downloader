@@ -323,8 +323,9 @@ def run(exe, output, only, full_rbt, download_timeout, skip_large, check_reuse):
                 raise RuntimeError(f"Local {route} missed its test deadline (final job status: {state})")
 
             boot = session.get(f"{origin}/api/bootstrap", timeout=10).json()
-            cases = LEGACY_CASES if boot["version"] == "1.6.0" else CASES
-            assert {r["id"] for r in boot["sen3_collections"]} == {"sentinel-3-" + r[0] for r in cases}
+            available = {r["id"] for r in boot["sen3_collections"]}
+            cases = LEGACY_CASES if available == {"sentinel-3-" + r[0] for r in LEGACY_CASES} else CASES
+            assert available == {"sentinel-3-" + r[0] for r in cases}
             if only and set(only) - {r[0] for r in cases}:
                 raise RuntimeError("This installed version does not have one of the requested test collections")
             assert not any(boot[k] for k in ("connected", "raw_connected", "s3_connected"))

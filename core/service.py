@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import copy
 import json
 import os
 import threading
@@ -8,12 +9,14 @@ import time
 import uuid
 import webbrowser
 from pathlib import Path
+from shapely.geometry import mapping
 
 from . import VERSION
-from .batch_sources import public_sources as batch_sources
+from .batch_sources import SOURCE_INFO, public_sources as batch_sources
 from .batch_workflow import BatchWorkflow
 from .catalogue import date_range
 from .download import download_scenes
+from .download_tasks import DownloadTasks, INCOMPLETE
 from .errors import Cancelled, UserError, io_diagnostic
 from .accounts import Accounts
 from .earthdata_auth import EarthdataAuth
@@ -133,11 +136,12 @@ OFFICIAL_LINKS = {
 
 
 class Job:
-    def __init__(self, kind):
+    def __init__(self, kind, notify=None):
         self.id = uuid.uuid4().hex
         self.kind = kind
         self.cancel_event = threading.Event()
         self.lock = threading.RLock()
+        self.notify = notify
         self.data = {"id": self.id, "kind": kind, "status": "running", "message": "准备中", "progress": 0.0, "logs": [], "result": None, "detail": {}, "error": None}
 
     def update(self, message, progress=0.0, detail=None):
@@ -149,6 +153,8 @@ class Job:
             if not self.data["logs"] or self.data["logs"][-1]["message"] != message:
                 self.data["logs"].append({"time": time.time(), "message": message})
                 self.data["logs"] = self.data["logs"][-80:]
+        if self.notify:
+            self.notify(self.snapshot())
 
     def is_active(self):
         with self.lock:
@@ -156,7 +162,10 @@ class Job:
 
     def snapshot(self):
         with self.lock:
-            return json.loads(json.dumps(self.data))
+            result = json.loads(json.dumps(self.data))
+            if hasattr(self, "definition"):
+                result["retry_available"] = result["status"] in INCOMPLETE and not result.get("replaced_by")
+            return result
 
 
 class Service:
@@ -180,6 +189,7 @@ class Service:
         self._geocode_cache = {}
         root = Path(config_dir) if config_dir else Path(os.environ.get("LOCALAPPDATA", Path.home())) / "CopernicusDownloader"
         self.config_dir = root
+        self.download_tasks = DownloadTasks(root)
         self.pref_file = root / "preferences.json"
         self.preferences = self._load_preferences()
         self.updates = UpdateClient(packaged_repository())
@@ -226,6 +236,7 @@ class Service:
                     "gedi_collections": gedi_collections(), "gedi_default": GEDI_DEFAULT,
                     "batch_sources": batch_sources(), "batch": self.batch.snapshot(),
                     "active_job": active.snapshot() if active else None,
+                    "resumable_downloads": self.download_tasks.summaries(),
                     "update_repository": self.updates.repository}
 
     def active_job(self):
@@ -336,14 +347,28 @@ class Service:
         geometry = normalize_aoi(value.get("geometry"))
         return {"path": save_aoi(geometry, value.get("path", ""), value.get("name", "研究区"))}
 
-    def _start_job(self, kind, operation):
+    def _task_progress(self, snapshot, *, force=False):
+        try:
+            self.download_tasks.update(snapshot, force=force)
+        except (OSError, ValueError):
+            # Download receipts and source caches still protect the completed files.
+            job = self.jobs.get(snapshot["id"])
+            if job:
+                with job.lock:
+                    job.data["detail"]["resume_record_error"] = "续作记录暂时无法保存；保持软件打开可重试。"
+
+    def _start_job(self, kind, operation, *, definition=None, previous=None):
         with self.lock:
             self._assert_idle()
             if len(self.jobs) > 20:
                 for key in list(self.jobs)[:-10]:
                     if not self.jobs[key].is_active():
                         del self.jobs[key]
-            job = Job(kind)
+            job = Job(kind, self._task_progress if definition else None)
+            if definition:
+                self.download_tasks.create(job.id, kind, definition, previous=previous)
+                job.definition = copy.deepcopy(definition)
+                job.data.update(title=definition["title"], previous_id=previous, retry_available=False)
             self.jobs[job.id] = job
 
         def run():
@@ -382,24 +407,30 @@ class Service:
                                                    if dates else "所选区块在研究区没有有效输出像元")
                         else:
                             job.data["message"] = f"新保存 {saved} 景 · 已有 {skipped} 景 · 无有效像元 {len(result['empty_scenes'])} 景"
-            except Cancelled:
+            except Cancelled as error:
                 with job.lock:
                     message = "已取消安装包下载" if kind == "update" else "任务已取消；已完成的文件已保留"
                     job.data.update(status="cancelled", message=message)
+                    job.data["result"] = getattr(error, "download_result", None)
             except UserError as error:
                 with job.lock:
-                    job.data.update(status="failed", error=str(error), message=str(error))
+                    job.data.update(status="failed", error=str(error), message=str(error), result=getattr(error, "download_result", None))
             except OSError as error:
                 with job.lock:
                     diagnostic = io_diagnostic(error)
                     code = diagnostic.get("winerror", diagnostic.get("errno"))
                     suffix = f"（系统代码 {code}）" if code is not None else ""
                     job.data.update(status="failed", error=f"文件读写失败{suffix}，请检查磁盘空间、文件夹权限和文件占用。",
-                                    message="文件读写失败", io_diagnostic=diagnostic)
+                                    message="文件读写失败", io_diagnostic=diagnostic, result=getattr(error, "download_result", None))
             except Exception as error:
                 # Exception bodies can include network payloads; expose only type.
                 with job.lock:
-                    job.data.update(status="failed", error=f"任务遇到异常（{type(error).__name__}）。请调整参数后重试。", message="任务失败")
+                    job.data.update(status="failed", error=f"任务遇到异常（{type(error).__name__}）。请调整参数后重试。", message="任务失败", result=getattr(error, "download_result", None))
+            finally:
+                with job.lock:
+                    job.data["retry_available"] = bool(definition and job.data["status"] in INCOMPLETE)
+                if definition:
+                    self._task_progress(job.snapshot(), force=True)
         threading.Thread(target=run, name=f"{kind}-{job.id[:6]}", daemon=True).start()
         return {"job_id": job.id}
 
@@ -584,8 +615,15 @@ class Service:
         return build_plan(geometry, options, len(scenes))[0]
 
     def _run_source(self, profile, geometry, options, scenes, plan, output_dir, *, cancel=None, progress=None):
+        planned = None
+        if profile != GEDI and "transport" not in options:
+            planned = (build_mosaic_plan(geometry, scenes, options) if options.get("layout") == "mosaic" else
+                       build_plan(geometry, options, len(scenes)) if profile == S2_PROCESS else
+                       public_plan(geometry, scenes, options))
+            if planned[0]["fingerprint"] != plan["fingerprint"]:
+                raise UserError("原下载计划与当前软件的区域网格或产品身份不一致；请重新选择任务，已完成原件仍可复用。")
         if profile == S2_NATIVE:
-            return download_native_mosaic(geometry, scenes, options, output_dir, self.s3_auth, cancel=cancel, progress=progress)
+            return download_native_mosaic(geometry, scenes, options, output_dir, self.s3_auth, cancel=cancel, progress=progress, planned=planned)
         if profile == GEDI:
             return download_gedi(geometry, plan, output_dir, self.earthdata_auth, cancel=cancel, progress=progress)
         if "transport" in options:
@@ -593,8 +631,8 @@ class Service:
                 return download_sen3(geometry, plan, output_dir, cancel=cancel, progress=progress)
             return download_original(geometry, plan, output_dir, self.raw_auth, s3_auth=self.s3_auth, cancel=cancel, progress=progress)
         if profile == S2_PROCESS:
-            return download_scenes(geometry, scenes, options, output_dir, self.auth, cancel=cancel, progress=progress)
-        return download_public(geometry, scenes, options, output_dir, cancel=cancel, progress=progress)
+            return download_scenes(geometry, scenes, options, output_dir, self.auth, cancel=cancel, progress=progress, planned=planned)
+        return download_public(geometry, scenes, options, output_dir, cancel=cancel, progress=progress, planned=planned)
 
     def plan(self, value):
         profile, geometry, options, scenes = self._selection(value)
@@ -656,7 +694,43 @@ class Service:
                 def run(cancel, progress):
                     return download_public(geometry, scenes, options, output_dir, cancel=cancel, progress=progress, planned=plan)
             self.save_preferences({"output_dir": output_dir})
-            return self._start_job("download", lambda job: run(job.cancel_event, job.update))
+            definition = {"title": f"{SOURCE_INFO.get(profile, {}).get('title', '影像下载')} · {len(scenes)} 个产品", "profile": profile, "geometry": mapping(geometry),
+                          "options": options, "scenes": scenes, "criteria": self.last_query,
+                          "plan": plan[0] if isinstance(plan, tuple) else plan, "output_dir": output_dir}
+            return self._start_job("download", lambda job: run(job.cancel_event, job.update), definition=definition)
+
+    def retry_download(self, value):
+        """Resume the frozen original selection, using current accounts and verified local caches."""
+        identifier = value.get("job_id")
+        with self.lock:
+            self._assert_idle()
+            old = self.jobs.get(identifier)
+            if old is not None and hasattr(old, "definition") and old.snapshot()["status"] in INCOMPLETE:
+                self._task_progress(old.snapshot(), force=True)
+            kind, definition = self.download_tasks.load(identifier)
+            geometry = normalize_aoi(definition["geometry"])
+            plan = definition["plan"]
+            requires = set(plan.get("requires", []))
+            if kind == "download" and definition["profile"] == S2_PROCESS:
+                requires.add("sentinel-hub")
+            connected = {"earthdata": self.earthdata_auth.connected, "sentinel-hub": self.auth.connected,
+                         "odata": self.raw_auth.connected, "cdse-s3": self.s3_auth.connected}
+            labels = {"earthdata": "NASA Earthdata", "sentinel-hub": "Sentinel Hub OAuth", "odata": "CDSE OData", "cdse-s3": "CDSE S3"}
+            missing = [labels.get(key, key) for key in requires if not connected.get(key, False)]
+            if missing:
+                raise UserError("请先连接 " + "、".join(missing) + "；原下载选择和缓存已保留。")
+            if kind == "batch-download":
+                operation = lambda job: self.batch._download(job, geometry, definition["groups"], definition["reference"],
+                                                            plan, Path(definition["output_dir"]))
+            else:
+                operation = lambda job: self._run_source(definition["profile"], geometry, definition["options"],
+                                                         definition["scenes"], plan, definition["output_dir"],
+                                                         cancel=job.cancel_event, progress=job.update)
+            started = self._start_job(kind, operation, definition=definition, previous=identifier)
+            if old is not None:
+                with old.lock:
+                    old.data.update(replaced_by=started["job_id"], retry_available=False)
+            return started
 
     def job(self, job_id):
         with self.lock:

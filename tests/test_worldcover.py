@@ -18,7 +18,7 @@ from rasterio.transform import Affine
 from requests.structures import CaseInsensitiveDict
 from shapely.geometry import Polygon, box
 
-from conftest import StubResponse
+from conftest import StubResponse, assert_download_prefix
 from core import open_worldcover as wc
 from core.errors import Cancelled, UserError
 from core.http import HttpClient, check_cancel
@@ -262,16 +262,20 @@ def test_api_resume_atomic_publish_and_upstream_verified_reuse(client, tmp_path,
     archive.fault = None
     recovered, = client.wait(client.post("download", selection_)["job_id"])["result"]["files"]
     assert recovered["status"] == "completed" and path.read_bytes() == src
+    assert not list(out.rglob("*.zip"))
 
 
 @pytest.mark.parametrize("fault", ["tamper", "stale", "missing", "redirect", "wrong-length", "kms", "bad-part", "bad-range", "always-truncate"])
 def test_transfer_fault_never_publishes_partial_or_wrong_object(client, tmp_path, monkeypatch, archive, fault):
-    archive.put("SWIR", image(tmp_path, monkeypatch), part_bytes=240)
+    original = image(tmp_path, monkeypatch)
+    archive.put("SWIR", original, part_bytes=240)
     output = tmp_path/"out"
     request, _ = selection(client, output)
     archive.fault = fault
     error = client.wait(client.post("download", request)["job_id"], status="failed")["error"]
-    assert "异常（" not in error and not list(output.rglob("*.tif")) and not list(output.rglob("*.part"))
+    assert "异常（" not in error and not list(output.rglob("*.tif")) and not list(output.rglob("*.zip"))
+    for partial in output.rglob("*.part"):
+        assert_download_prefix(partial, original)
     assert get_manifest(output)["items"][0]["status"] == "failed"
 
 
@@ -285,7 +289,8 @@ def test_source_hash_do_not_replace_grid_and_content_semantics(client, tmp_path,
 
 
 def test_cancel_midstream_never_publishes_and_fresh_retry_works(client, tmp_path, monkeypatch, archive):
-    archive.put("SWIR", image(tmp_path, monkeypatch))
+    original = image(tmp_path, monkeypatch)
+    archive.put("SWIR", original)
     dest = tmp_path/"out"
     request, _ = selection(client, dest)
     archive.fault = "cancel"
@@ -293,9 +298,12 @@ def test_cancel_midstream_never_publishes_and_fresh_retry_works(client, tmp_path
     assert archive.stopped.wait(5)
     client.post("cancel", {"job_id": key})
     client.wait(key, status="cancelled")
-    assert get_manifest(dest)["status"] == "cancelled" and not list(dest.rglob("*.tif")) and not list(dest.rglob("*.part"))
+    assert get_manifest(dest)["status"] == "cancelled" and not list(dest.rglob("*.tif")) and not list(dest.rglob("*.zip"))
+    partial, = dest.rglob("*.part")
+    assert_download_prefix(partial, original)
     archive.fault = None
     assert client.wait(client.post("download", request)["job_id"])["result"]["files"][0]["status"] == "completed"
+    assert not list(dest.rglob("*.part"))
 
 
 def test_target_identity_binds_metadata_and_content(client, archive, tmp_path):

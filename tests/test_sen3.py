@@ -282,11 +282,11 @@ def test_group_failure_never_publishes_partial(tmp_path, monkeypatch, nc_files, 
     with pytest.raises(Cancelled if state == "cancel" else UserError):
         download_sen3(AOI, prepared, tmp_path / "failed-output", cancel=stop)
     published = (tmp_path / "failed-output") / prepared["folder_name"]
-    assert not any(p.is_dir() or p.name.endswith(("starmap.json", ".part")) for p in published.iterdir())
+    assert not any((p.is_dir() and p.name != ".download-cache") or p.name.endswith(("starmap.json", ".part", ".zip")) for p in published.iterdir())
     report = json.loads(next(published.glob("下载记录_*.json")).read_text(encoding="utf-8"))
     assert report["status"] == ("cancelled" if state == "cancel" else "failed") and report["items"] == []
     if state == "interrupt":
-        assert len(attempts) == 4 and all(h["If-Match"] == TAG and "Range" not in h for h in attempts)
+        assert len(attempts) == 3 and all(h["If-Match"] == TAG and "Range" not in h for h in attempts)
 
 
 def test_dropped_member_resumes_with_same_pinned_version(tmp_path, monkeypatch, nc_files):
@@ -526,7 +526,7 @@ def test_parallel_group_drains_sibling_writers_before_cleanup(tmp_path, monkeypa
                 else:
                     assert cancel.wait(10)
                     # A sibling is still in the response iterator. It must see its staging directory intact.
-                    assert len(tuple(base.glob("*/.sen3-*"))) == 1
+                    assert len(tuple(base.glob("*/.download-cache/sen3/*/data"))) == 1
                     sibling_stops.append(name)
                     check_cancel(cancel)
 
@@ -544,6 +544,6 @@ def test_parallel_group_drains_sibling_writers_before_cleanup(tmp_path, monkeypa
             download_sen3(AOI, prepared, base, cancel=stop)
     assert sorted(sibling_stops) == names[1:] and len(responses) == 4 and all(r.closed for r in responses)
     folder = base / prepared["folder_name"]
-    assert not any(p.is_dir() or p.name.endswith(("starmap.json", ".part")) for p in folder.iterdir())
+    assert not any((p.is_dir() and p.name != ".download-cache") or p.name.endswith(("starmap.json", ".part", ".zip")) for p in folder.iterdir())
     record = json.loads(next(folder.glob("下载记录_*.json")).read_text(encoding="utf-8"))
     assert record["status"] == ("failed" if mode == "bad-hash" else "cancelled") and not record["items"]

@@ -206,7 +206,8 @@ class RangeStub:
         self.calls=[]
         self.responses=[]
 
-    def request(self,method,url,*,headers,stream,cancel,timeout):
+    def request(self,method,url,*,headers,stream,cancel,timeout,attempts=1):
+        assert attempts == 1
         assert method=="GET" and url==slc_ref(SINGLE).url and headers["If-Match"]==TAG and stream and headers["Accept-Encoding"]=="identity"
         i,j=map(int,re.fullmatch(r"bytes=(\d+)-(\d+)",headers["Range"]).groups())
         with self.lock:

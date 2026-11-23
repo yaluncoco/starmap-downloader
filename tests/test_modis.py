@@ -20,6 +20,7 @@ from rasterio.transform import Affine
 from requests.structures import CaseInsensitiveDict
 from shapely.geometry import box, mapping
 
+from conftest import assert_download_prefix
 from core.errors import UserError
 from core.http import HttpClient, check_cancel
 from core.modis_source import COGS, HOST, SOURCE, granule, modis_object, object_url
@@ -331,9 +332,11 @@ def test_transfer_fails_without_publishing(tmp_path, archive, fault):
     with pytest.raises(UserError):
         download(tmp_path)
     out = tmp_path/"中文数据"
-    assert not any(p.suffix in (".tif", ".part") or p.name.endswith(".starmap.json") for p in out.rglob("*"))
-    assert len(list(out.rglob("*.json"))) == 1
-    assert json.loads(next(out.rglob("*.json")).read_bytes())["status"] == "failed"
+    assert not any(p.suffix in (".tif", ".zip") or p.name.endswith(".starmap.json") for p in out.rglob("*"))
+    for partial in out.rglob("*.part"):
+        assert_download_prefix(partial, archive.objects[COG])
+    manifest, = out.rglob("下载记录_*.json")
+    assert json.loads(manifest.read_bytes())["status"] == "failed"
 
 
 def test_safe_resume_uses_version_and_complete_digest(tmp_path, archive):
@@ -383,6 +386,10 @@ def test_service_pagination_selection_and_cancel(tmp_path, archive):
     assert archive.gate.wait(5)
     service.cancel(job["job_id"])
     assert wait(service, job)["status"] == "cancelled"
-    assert not list((tmp_path/"中文数据").rglob("*.part"))
+    output = tmp_path / "中文数据"
+    assert not list(output.rglob("*.tif")) and not list(output.rglob("*.zip"))
+    partial, = output.rglob("*.part")
+    assert_download_prefix(partial, archive.objects[COG])
     archive.fault = None
     assert wait(service, service.download(req))["status"] == "completed"
+    assert not list(output.rglob("*.part"))

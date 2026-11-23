@@ -100,6 +100,7 @@ def test_persistent_leaf_footprints_select_overlapping_dates_and_download_one_mo
         page.locator("#confirmDownload").click()
         pw.expect(page.locator("#jobStatus")).to_have_text("下载完成", timeout=20000)
         pw.expect(page.locator("#jobFiles .job-file")).to_have_count(1)
+        pw.expect(page.locator("#jobFiles")).to_contain_text(".tif")
         assert {p["id"] for call in provider.process_calls for p in __import__("json").loads(
             re.search(r"^var allowed = (.*);$", call["json"]["evalscript"], re.M)[1])} == {P2.removesuffix(".SAFE"), east.removesuffix(".SAFE")}
         assert failures == []

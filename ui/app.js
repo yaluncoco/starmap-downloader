@@ -4,6 +4,7 @@ const $ = (id) => document.getElementById(id);
 const appToken = document.querySelector('meta[name="app-token"]').content;
 const state = {profile:"s2-process",collection:"",collections:[],gediCollections:[],gediFieldCollection:"",earthdataConnected:false,loadingCollections:false,rawConnected:false,s3Connected:false,connected:false,connecting:false,nativeDialogs:false,aoi:null,aoiPending:false,aoiVersion:0,scenes:[],selected:new Set(),pickedFiles:new Set(),fileScene:"",busy:false,jobId:null,plan:null,planVersion:0,resultFolder:"",places:[],editing:false,query:null};
 const updates = {configured:false, checking:false, working:false, release:null};
+const downloads = {retryId:null, tasks:[]};
 let map, aoiLayer, footprintLayer, baseLayer, drawHandler, editHandler, planTimer;
 let aoiQueue=Promise.resolve();
 const modes = {
@@ -408,6 +409,8 @@ function updateAvailability() {
   updateButtons();
   Accounts.render();
   Spatial.availability();
+  $("retryDownload").disabled=state.busy||state.connecting;
+  document.querySelectorAll("[data-retry-download]").forEach(button=>button.disabled=state.busy||state.connecting);
 }
 function setBusy(value) {state.busy=value;updateAvailability();}
 function renderAuth() {
@@ -709,7 +712,7 @@ function showDownloadPlan() {
     const p=state.plan;
     if(p.kind==="batch"){
       $("planDetails").innerHTML=Batch.planHtml(p);
-      $("planNote").textContent="各来源共用研究区和 UTC 日期范围，保留各自的采集或汇总时间。独立来源可同时下载；跟随主影像的 GEDI 等待所选 GeoTIFF 完成。无匹配、失败和取消会分别记录，已完成的文件保留。";
+      $("planNote").textContent="各来源共用研究区和 UTC 日期范围，保留各自的采集或汇总时间。按来源、产品依次下载，当前产品完整性校验通过后处理下一个；跟随主影像的 GEDI 使用所选 GeoTIFF。中断后可继续原任务，已完成产品核验后跳过。";
       renderPlanFolder();if(!$("downloadDialog").open)$("downloadDialog").showModal();return;
     }
     const raw=p.kind==="original", native=p.transport==="cdse-s3"&&p.kind==="mosaic", pub=p.kind==="public"||p.kind==="mosaic"&&p.transport==="public", gedi=p.kind==="gedi";
@@ -718,6 +721,7 @@ function showDownloadPlan() {
       ["文件形式",p.options.mode==="original"?(isDem()?"完整 DSM GeoTIFF":isModis()?"原始 HDF4":isSlc()?"完整原始 SAFE ZIP":"官方整包或单主文件"):p.options.mode==="metadata"?"目录元数据":"目录所列原始资产"]]:
       [["影像数量",`${p.scene_count} 景`],["输出网格",`${p.width.toLocaleString()} × ${p.height.toLocaleString()} 像元`],["像元大小",`${p.resolution} 米`],["输出内容",p.options.label],["坐标系",`${p.crs_label} · EPSG:${p.epsg}`],["预计文件体积",`${sizeLabel(p.bytes_per_scene*p.scene_count)}（未压缩）`],
        [native?"官方原件缓存":pub?"需读取的公开源":"预计请求数量",native?`${p.source_objects} 个原件 · 约 ${sizeLabel(p.native_source_bytes)}${p.native_size_unknown?"，部分体积下载时确定":""}`:pub?`${p.source_objects} 个源文件`:`最多 ${p.requests} 次 · 每景 ${p.tiles_per_scene} 区块`],["处理额度",pub||native?"无需 Sentinel Hub 额度":`约 ${p.estimated_pu} PU`]];
+    items.push(["下载队列","按产品依次处理 · 完整性校验后继续"],["保存格式","保留来源原始文件；区域分析输出 GeoTIFF 及配套记录"]);
     const rows=items.map(([name,value])=>`<div class="plan-item"><span>${escapeHtml(name)}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
     const mosaicRows=p.kind==="mosaic"?[["拼接产品",`${p.source_count} 个区块 / 1 份区域输出`],["选中采集日期（UTC）",p.dates.join(" / ")],["产品边界覆盖",`${p.coverage.coverage_percent.toFixed(2)}% · 未覆盖 ${p.coverage.uncovered_percent.toFixed(2)}%`],["交叠优先级",p.coverage.priority_label]].map(([name,value])=>`<div class="plan-item"><span>${escapeHtml(name)}</span><strong>${escapeHtml(value)}</strong></div>`).join(""):"";
     const files=raw||gedi? p.targets.map(t=>t.name).slice(0,6).join(" / ")+(p.targets.length>6?`（另 ${p.targets.length-6} 项）`:"") :p.options.output_bands.join(" / ");
@@ -734,6 +738,7 @@ function showDownloadPlan() {
       isRtc()?"导出线性 γ⁰（不转 dB）。各极化保留自己的 NoData；仅读取所需字节区间，校验每段后再裁剪。":
       p.options.mode==="research"?"保存分析影像、未掩膜 10 波段备份、SCL 和像元来源图及来源表。全云时仍保留备份；各文件必须网格一致并通过完整性校验才完成。20 米源波段的细节不会因输出 10 米而增加。完整角度与大气辅助层请使用 SAFE 整包。":
       "区域外及无效像元以 NoData 或透明显示。全空影像不保存；已有文件通过本地 SHA‑256 校验才跳过。";
+    $("planNote").textContent+=" 下载按产品排队，未完成的任务可重试或关闭软件后继续；已校验原件和裁剪区块可复用。请预留影像和下载缓存空间。";
     renderPlanFolder();$("downloadDialog").showModal();
   }catch(error){toast(error.message,true);}
 }
@@ -751,6 +756,7 @@ function showSearchProgress(canCancel=false) {
   $("cancelSearch").disabled=!canCancel;$("cancelSearch").textContent="取消检索";
 }
 function showDownloadProgress(kind="download") {
+  downloads.retryId=null;$("retryDownload").hidden=true;$("retryDownloadNote").hidden=true;
   state.resultFolder="";
   $("jobTitle").textContent=kind==="update"?"软件更新":Batch.query?"主数据及附带数据":isGedi()?"GEDI 数据下载":"下载队列";
   Batch.progress([]);
@@ -765,6 +771,25 @@ async function cancelActive(button) {
   try{await api("cancel",{job_id:state.jobId});button.textContent="正在取消…";}
   catch(error){button.disabled=false;toast(error.message,true);}
 }
+function renderResumableDownloads(tasks=downloads.tasks) {
+  downloads.tasks=tasks;
+  $("resumeDownloads").hidden=!tasks.length;
+  $("resumeDownloadList").innerHTML=tasks.map(task=>`<div class="resume-download"><div><strong>${escapeHtml(task.title)}</strong><span>${escapeHtml(task.message)}</span><small title="${escapeHtml(task.output_dir)}">${escapeHtml(displayPath(task.output_dir))}</small></div><button class="button button-outline" type="button" data-retry-download="${escapeHtml(task.id)}" ${state.busy||state.connecting?"disabled":""}>继续下载</button></div>`).join("");
+}
+async function refreshResumableDownloads() {
+  try{const result=await api("resumable-downloads");renderResumableDownloads(result.tasks);}catch(error){toast(error.message,true);}
+}
+async function retryDownload(id=downloads.retryId) {
+  if(!id||state.busy||state.connecting)return;
+  setBusy(true);$("retryDownload").disabled=true;renderResumableDownloads();
+  try {
+    const result=await api("retry-download",{job_id:id});
+    state.jobId=result.job_id;showDownloadProgress();
+    $("jobMessage").textContent="继续原下载任务，核验并跳过已完成影像，读取保存的区块进度…";
+    pollJob(result.job_id);await refreshResumableDownloads();
+  } catch(error){setBusy(false);toast(error.message,true);}
+  finally{$("retryDownload").disabled=state.busy;renderResumableDownloads();}
+}
 async function pollJob(id) {
   let retries=0;
   const poll=async()=>{
@@ -774,6 +799,7 @@ async function pollJob(id) {
       const searching=job.kind==="search"||job.kind==="batch-search";
       if(searching)$("searchMessage").textContent=job.message;
       else{
+        if(job.title)$("jobTitle").textContent=job.title;
         $("jobMessage").textContent=job.message;$("jobProgress").style.width=(job.progress*100).toFixed(1)+"%";$("jobFraction").textContent=Math.round(job.progress*100)+"%";
         $("jobLogs").innerHTML=job.logs.map(log=>`<div class="job-log"><time>${new Date(log.time*1000).toLocaleTimeString("zh-CN",{hour12:false})}</time><span>${escapeHtml(log.message)}</span></div>`).join("");
         $("jobLogs").scrollTop=$("jobLogs").scrollHeight;
@@ -792,11 +818,16 @@ async function pollJob(id) {
         const isUpdate=job.kind==="update";
         if(job.result?.sources)Batch.progress(job.result.sources);
         $("jobStatus").textContent=job.status==="completed"?(isUpdate?"校验通过":job.result.files.length?"下载完成":"无有效输出"):job.status==="partial"?"部分完成":job.status==="failed"?"下载失败":"已取消";
+        if(job.result?.folder)state.resultFolder=job.result.folder;
+        if(job.result?.files?.length){const shown=new Set();$("jobFiles").innerHTML=job.result.files.filter(file=>{if(shown.has(file.path))return false;shown.add(file.path);return true;}).map(file=>`<div class="job-file">${icon("check")}<span title="${escapeHtml(displayPath(file.path))}">${file.status==="skipped"?"已有 · ":"已完成 · "}${escapeHtml(basename(file.path))}</span></div>`).join("");$("jobFiles").hidden=false;}
         if(job.status==="completed"||job.status==="partial"){
-          state.resultFolder=job.result.folder;$("jobFiles").innerHTML=job.result.files.map(file=>`<div class="job-file">${icon("check")}<span title="${escapeHtml(displayPath(file.path))}">${file.status==="skipped"?"已有 · ":""}${escapeHtml(basename(file.path))}</span></div>`).join("");$("jobFiles").hidden=false;
           toast(isUpdate?job.message:`${job.message}。来源记录已保存。`,job.status==="partial",12000);
         }else toast(job.error||job.message,job.status==="failed",12000);
-        $("openResultFolder").hidden=!state.resultFolder;if(!isUpdate)schedulePlan();
+        downloads.retryId=job.retry_available?id:null;
+        $("retryDownload").hidden=!downloads.retryId;$("retryDownload").disabled=false;
+        $("retryDownload").textContent=job.status==="cancelled"?"继续下载":"重试下载";
+        $("retryDownloadNote").hidden=!downloads.retryId;
+        $("openResultFolder").hidden=!state.resultFolder;if(!isUpdate){schedulePlan();await refreshResumableDownloads();}
       }
     }catch(error){
       retries++;if(retries<=5){setTimeout(poll,1500);return;}
@@ -948,6 +979,8 @@ function bindEvents() {
   $("downloadSelected").addEventListener("click",showDownloadPlan);$("changePlanFolder").addEventListener("click",chooseFolder);$("confirmDownload").addEventListener("click",beginDownload);
   $("toggleJobLogs").addEventListener("click",()=>{$("jobLogs").hidden=!$("jobLogs").hidden;$("toggleJobLogs").textContent=$("jobLogs").hidden?"查看记录":"收起记录";});
   $("closeJobPanel").addEventListener("click",()=>$("jobPanel").hidden=true);
+  $("retryDownload").addEventListener("click",()=>retryDownload());
+  $("resumeDownloadList").addEventListener("click",event=>{const button=event.target.closest("[data-retry-download]");if(button)retryDownload(button.dataset.retryDownload);});
   for(const id of ["cancelJob","cancelSearch"])$(id).addEventListener("click",()=>cancelActive($(id)));
   $("openResultFolder").addEventListener("click",()=>api("open-folder",{path:state.resultFolder}).catch(e=>toast(e.message,true)));
 }
@@ -963,6 +996,7 @@ async function initialize() {
   try{
     const data=await api("bootstrap");state.connected=data.connected;state.rawConnected=data.raw_connected;state.s3Connected=data.s3_connected;state.earthdataConnected=Boolean(data.earthdata_connected);state.gediCollections=data.gedi_collections||[];state.nativeDialogs=data.native_dialogs;
     Batch.initialize(data.batch_sources||[]);
+    renderResumableDownloads(data.resumable_downloads||[]);
     updates.configured=Boolean(data.update_repository);
     $("updateCurrent").textContent=`当前版本 v${data.version}`;
     $("updateButton").disabled=false;

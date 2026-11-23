@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 import requests
 
 from . import VERSION
-from .errors import Cancelled, UserError
+from .errors import Cancelled, UserError, TransientDownloadError
 
 TOKEN_URL = "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token"
 CATALOGUE_URL = "https://catalogue.dataspace.copernicus.eu/odata/v1/Products"
@@ -22,6 +22,17 @@ USER_AGENT = f"CopernicusDownloader/{VERSION} (local desktop; documentation.data
 def check_cancel(event):
     if event is not None and event.is_set():
         raise Cancelled()
+
+
+def wait_retry(attempt, cancel=None, retry_after=None):
+    delay = retry_after if retry_after is not None else min(2 ** (attempt + 1), 16)
+    if delay > 120:
+        raise TransientDownloadError(f"数据服务暂时限流，请至少等待 {math.ceil(delay)} 秒后继续下载。", delay)
+    if cancel is not None:
+        if cancel.wait(delay):
+            raise Cancelled()
+    else:
+        time.sleep(delay)
 
 
 def retry_seconds(response, attempt, *, sentinel_hub=False):
@@ -54,20 +65,24 @@ class HttpClient:
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": USER_AGENT})
 
-    def request(self, method, url, *, cancel=None, status=None, timeout=(15, 120), **kwargs):
+    def request(self, method, url, *, cancel=None, status=None, timeout=(15, 120), attempts=5, **kwargs):
+        if type(attempts) is not int or not 1 <= attempts <= 5:
+            raise ValueError("Invalid HTTP attempt limit")
         sentinel_hub = urlparse(url).hostname == "sh.dataspace.copernicus.eu"
         # Do not forward credentials or request bodies to redirected hosts.
         kwargs.setdefault("allow_redirects", False)
-        for attempt in range(5):
+        for attempt in range(attempts):
             check_cancel(cancel)
             try:
                 response = self.session.request(method, url, timeout=timeout, **kwargs)
+            except requests.exceptions.SSLError:
+                raise UserError("下载连接的证书校验失败，请检查网络或代理设置后重试。") from None
             except (requests.ConnectionError, requests.Timeout):
-                if attempt == 4:
-                    raise UserError("连接官方服务失败，请检查网络后重试。") from None
+                if attempt == attempts - 1:
+                    raise TransientDownloadError("连接数据服务失败，已保留下载进度，可检查网络后继续。") from None
                 delay = min(2 ** (attempt + 1), 16)
                 if status:
-                    status(f"网络连接中断，{delay} 秒后重试（{attempt + 1}/4）")
+                    status(f"网络连接中断，{delay} 秒后重试（{attempt + 1}/{attempts - 1}）")
                 if cancel is not None:
                     if cancel.wait(delay):
                         raise Cancelled()
@@ -75,15 +90,15 @@ class HttpClient:
                     time.sleep(delay)
                 continue
             if response.status_code in (429, 500, 502, 503, 504):
-                if attempt == 4:
-                    response.close()
-                    raise UserError("官方服务限流或暂不可用，已重试 4 次。请稍后重试。")
                 delay = retry_seconds(response, attempt, sentinel_hub=sentinel_hub)
+                if attempt == attempts - 1:
+                    response.close()
+                    raise TransientDownloadError(f"数据服务限流或暂不可用，已尝试 {attempts} 次。可稍后继续下载。", delay)
                 response.close()
                 if delay > 120:
-                    raise UserError(f"官方服务暂时限流，请至少等待 {math.ceil(delay)} 秒后重试。")
+                    raise TransientDownloadError(f"官方服务暂时限流，请至少等待 {math.ceil(delay)} 秒后重试。", delay)
                 if status:
-                    status(f"官方服务暂忙，{delay:g} 秒后重试（{attempt + 1}/4）")
+                    status(f"官方服务暂忙，{delay:g} 秒后重试（{attempt + 1}/{attempts - 1}）")
                 if cancel is not None:
                     if cancel.wait(delay):
                         raise Cancelled()

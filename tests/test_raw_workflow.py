@@ -191,21 +191,36 @@ def test_raw_fail_closed(client, raw_provider, tmp_path, problem, notice):
         raw_provider.headers = {"Location": "https://other.example.test/file"}
     job = client.wait(client.post("download", request)["job_id"], "failed")
     assert notice in job["error"]
-    assert not any(path.suffix in (".part", ".zip") for path in Path(request["output_dir"]).rglob("*"))
+    assert not list(Path(request["output_dir"]).rglob("*.zip"))
+    if problem == "short":
+        from core.download_cache import PartialDownload
+        partial, = Path(request["output_dir"]).rglob("*.part")
+        assert partial.with_name(partial.name + ".resume.json").is_file()
+    else:
+        assert not list(Path(request["output_dir"]).rglob("*.part"))
     assert not any("other.example" in call[1] for call in raw_provider.calls)
     if problem == "uuid":
         assert all(call[1] != PRODUCT_URL for call in raw_provider.calls)
 
 
-def test_raw_cancel_clears_partial(client, raw_provider, tmp_path):
+def test_raw_cancel_retains_verified_prefix_and_retry_skips_completed(client, raw_provider, tmp_path):
     request = {**search_raw(client), "output_dir": str(tmp_path / "cancel")}
     auth_token(client)
     raw_provider.pause = True
     job_id = client.post("download", request)["job_id"]
     assert raw_provider.started.wait(4)
     client.post("cancel", {"job_id": job_id})
-    client.wait(job_id, "cancelled")
-    assert not any(path.suffix in (".part", ".zip") for path in Path(request["output_dir"]).rglob("*"))
+    cancelled = client.wait(job_id, "cancelled")
+    assert cancelled["retry_available"]
+    partial, = Path(request["output_dir"]).rglob("*.part")
+    assert partial.read_bytes() == raw_provider.payload[:12]
+    receipt = json.loads(partial.with_name(partial.name + ".resume.json").read_text(encoding="utf-8"))
+    assert receipt["received"] == 12 and receipt["sha256"] == hashlib.sha256(partial.read_bytes()).hexdigest()
+    assert not list(Path(request["output_dir"]).rglob("*.zip"))
+    raw_provider.pause = False
+    resumed = client.wait(client.post("retry-download", {"job_id": job_id})["job_id"])
+    assert not resumed["retry_available"] and Path(resumed["result"]["files"][0]["path"]).read_bytes() == raw_provider.payload
+    assert not list(Path(request["output_dir"]).rglob("*.part"))
 
 
 @pytest.mark.parametrize("problem", [None, "offset", "etag", "short_range", "short_body"])

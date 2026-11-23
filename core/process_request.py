@@ -9,8 +9,8 @@ import tarfile
 
 import requests
 
-from .errors import UserError
-from .http import PROCESS_URL, check_cancel
+from .errors import UserError, TransientDownloadError
+from .http import PROCESS_URL, check_cancel, wait_retry
 from .scene_identity import SAFE_ID, expected_products, utc_text, utc_time
 from .research_bundle import is_research, transfer_options
 
@@ -200,9 +200,10 @@ def fetch_tile(http, auth, payload, target, *, options, products, cancel=None, s
         while True:
             check_cancel(cancel)
             token = auth.token(cancel)
-            response = http.request("POST", PROCESS_URL, headers={"Authorization": "Bearer " + token, "Accept": "application/tar"},
-                                    json=payload, stream=True, timeout=(15, 150), cancel=cancel, status=status)
+            response = None
             try:
+                response = http.request("POST", PROCESS_URL, headers={"Authorization": "Bearer " + token, "Accept": "application/tar"},
+                                        json=payload, stream=True, timeout=(15, 150), cancel=cancel, status=status, attempts=1)
                 if response.status_code == 401 and not refreshed:
                     auth.token(cancel, force=True)
                     refreshed = True
@@ -225,13 +226,20 @@ def fetch_tile(http, auth, payload, target, *, options, products, cancel=None, s
                 check_cancel(cancel)
                 metadata = _read_archive(archive, target, max_bytes, products)
                 return {"processing_units": response.headers.get("X-ProcessingUnits-Spent"), **metadata}
-            except (requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError, requests.exceptions.ContentDecodingError):
+            except requests.exceptions.SSLError:
+                raise UserError("影像处理连接的证书校验失败，请检查网络或代理设置。") from None
+            except (TransientDownloadError, requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError, requests.exceptions.ContentDecodingError) as error:
                 transfer_failures += 1
                 if transfer_failures >= 3:
-                    raise UserError("影像传输中断，请重试。已完成的影像会保留。") from None
+                    raise TransientDownloadError("影像传输多次中断，可继续原任务；已校验影像和区块进度已保留。") from None
                 if status:
-                    status("影像传输中断，正在重新请求当前区块")
+                    status(f"影像区块中断，正在重试（{transfer_failures}/2）；已完成区块保留")
+                if response is not None:
+                    response.close()
+                    response = None
+                wait_retry(transfer_failures - 1, cancel, getattr(error, "retry_after", None))
             finally:
-                response.close()
+                if response is not None:
+                    response.close()
     finally:
         archive.unlink(missing_ok=True)

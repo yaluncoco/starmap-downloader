@@ -9,14 +9,14 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from tempfile import TemporaryDirectory
 from uuid import uuid4
 
 from shapely.geometry import mapping
 
 from . import VERSION
 from .download import _save_json
-from .errors import Cancelled, UserError, keep_download_result
+from .errors import Cancelled, UserError, TransientDownloadError, DownloadAccessError, keep_download_result
+from .download_cache import PartialDownload, fingerprint
 from .http import HttpClient, check_cancel
 from .integrity import publish_file
 from .open_sen3 import MAX_XML, parse_xfdu
@@ -144,6 +144,7 @@ def _read_existing(target, receipt, items, complete, cancel, report):
                 raise ValueError
             if item["name"] == SEN3_MANIFEST:
                 _manifest_members(path, item["identity"], digest, items, complete)
+            PartialDownload(path, item).forget()
             report(item, "复核通过", row["size"], row["size"], verified=True)
         return rows
     except (KeyError, TypeError, ValueError, OSError, UserError):
@@ -153,9 +154,37 @@ def _read_existing(target, receipt, items, complete, cancel, report):
 def _receive_group(stage, items, complete, http, cancel, report):
     def receive(item, client, event):
         check_cancel(event)
+        path = stage / item["name"]
+        member_receipt = stage.parent / "members" / (item["name"] + ".json")
+        member_receipt.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if member_receipt.stat().st_size > MAX_XML:
+                raise ValueError
+            saved = json.loads(member_receipt.read_text(encoding="utf-8"))
+            if (saved["file"] != item["name"] or saved["url"] != item["url"] or saved["identity"] != item["identity"]
+                    or path.stat().st_size != item["bytes"] or saved["size"] != item["bytes"]):
+                raise ValueError
+            digest, _ = _validated_digests(path, item, saved.get("aws_single_part_md5"), event)
+            if digest != saved["sha256"]:
+                raise ValueError
+            if item["name"] == SEN3_MANIFEST:
+                _manifest_members(path, item["identity"], digest, items, complete)
+            report(item, "复用已校验成员", saved["size"], saved["size"], verified=True)
+            return saved
+        except (OSError, ValueError, KeyError, TypeError, UserError):
+            member_receipt.unlink(missing_ok=True)
         report(item, "下载精确版本", None, None)
-        row = _receive(stage / item["name"], item, items, complete, client, event,
-                       lambda message, received, size: report(item, message, received, size))
+        try:
+            row = _receive(path, item, items, complete, client, event,
+                           lambda message, received, size: report(item, message, received, size))
+            _save_json(member_receipt, row)
+            PartialDownload(path, item).forget()
+        except (Cancelled, TransientDownloadError, DownloadAccessError, OSError):
+            raise
+        except Exception as error:
+            if not getattr(error, "download_progress_preserved", False):
+                PartialDownload(path, item).discard()
+            raise
         report(item, "成员校验通过", row["size"], row["size"], verified=True)
         return row
 
@@ -205,30 +234,35 @@ def _receive_group(stage, items, complete, http, cancel, report):
 
 
 def _stage_group(target, receipt, items, complete, http, cancel, report):
-    if shutil.disk_usage(target.parent).free < sum(item["bytes"] for item in items):
+    cache = target.parent / ".download-cache" / "sen3" / fingerprint(items)[:16]
+    stage = cache / "data"
+    stage.mkdir(parents=True, exist_ok=True)
+    if stage.resolve() != stage or not stage.is_relative_to(target.parent) or target.parent != receipt.parent:
+        raise UserError("SEN3 暂存目录不在选中的输出目录中。")
+    needed = sum(max(0, item["bytes"] - (stage / item["name"]).stat().st_size) if (stage / item["name"]).is_file() else item["bytes"] for item in items)
+    if shutil.disk_usage(target.parent).free < needed:
         raise UserError("输出盘空间不足，未开始下载此 SEN3 产品。")
-    with TemporaryDirectory(prefix=".sen3-", dir=target.parent) as temp:
-        stage = Path(temp)
-        if stage.resolve().parent != target.parent or target.parent != receipt.parent:
-            raise UserError("SEN3 暂存目录不在选中的输出目录中。")
-        rows = _receive_group(stage, items, complete, http, cancel, report)
+    rows = _receive_group(stage, items, complete, http, cancel, report)
+    check_cancel(cancel)
+    if {path.name for path in stage.iterdir()} != {item["name"] for item in items}:
+        raise UserError("SEN3 暂存目录含有未选定成员，未发布完整产品；请核对该暂存目录后重试。")
+    receipt_temp = receipt.parent / f".sen3-{uuid4().hex}.json"
+    created = False
+    try:
+        _save_json(receipt_temp, {"product": items[0]["identity"]["product"], "scope": "complete" if complete else "selected", "members": rows})
+        if _exists(target) or _exists(receipt):
+            raise UserError("输出位置出现同名 SEN3 目录或校验记录，未覆盖。")
+        publish_file(receipt_temp, receipt)
+        created = True
         check_cancel(cancel)
-        receipt_temp = receipt.parent / f".sen3-{uuid4().hex}.json"
+        # Join member writers before atomically exposing the verified directory.
+        stage.rename(target)
         created = False
-        try:
-            _save_json(receipt_temp, {"product": items[0]["identity"]["product"], "scope": "complete" if complete else "selected", "members": rows})
-            if _exists(target) or _exists(receipt):
-                raise UserError("输出位置出现同名 SEN3 目录或校验记录，未覆盖。")
-            publish_file(receipt_temp, receipt)
-            created = True
-            check_cancel(cancel)
-            # On Windows rename is atomic here and refuses to replace an existing destination.
-            stage.rename(target)
-            created = False
-        finally:
-            receipt_temp.unlink(missing_ok=True)
-            if created:
-                receipt.unlink(missing_ok=True)
+        shutil.rmtree(cache)
+    finally:
+        receipt_temp.unlink(missing_ok=True)
+        if created:
+            receipt.unlink(missing_ok=True)
     return rows
 
 

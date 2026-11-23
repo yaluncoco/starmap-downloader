@@ -359,7 +359,11 @@ class BatchWorkflow:
             if missing:
                 raise UserError("请先在登录入口连接 " + "、".join(missing) + "，再开始联合下载。")
             self.service.save_preferences({"output_dir": output})
-            return self.service._start_job("batch-download", lambda job: self._download(job, geometry, selected, reference, plan, Path(output).expanduser()))
+            definition = {"title": f"联合下载 · {len(selected)} 个来源", "geometry": mapping(geometry), "groups": selected,
+                          "reference": reference, "plan": plan, "output_dir": output,
+                          "boundary_name": (self.service.last_aoi or {}).get("name", "研究区")}
+            return self.service._start_job("batch-download", lambda job: self._download(job, geometry, selected, reference, plan, Path(output).expanduser()),
+                                           definition=definition)
 
     def _download(self, job, geometry, groups, reference, plan, base):
         base = io_path(base)
@@ -371,7 +375,7 @@ class BatchWorkflow:
             if not all(boundary.with_suffix(s).is_file() for s in (".shp", ".shx", ".dbf", ".prj", ".cpg")) or not load_aoi(boundary).equals(geometry):
                 raise UserError("已有联合研究区边界缺失或变化，请移动该输出目录后重试。")
         else:
-            save_aoi(geometry, boundary, self.service.last_aoi["name"])
+            save_aoi(geometry, boundary, getattr(job, "definition", {}).get("boundary_name", "研究区"))
         manifest_path = folder / ("联合下载记录_" + uuid.uuid4().hex[:10] + ".json")
         records = [{"id": g["id"], "title": g["title"], "profile": g["profile"], "criteria": g["criteria"],
                     "scene_keys": g["scene_keys"], "status": "pending" if g["units"] else g["status"], "error": g["error"],
@@ -454,25 +458,17 @@ class BatchWorkflow:
         pending = {i for i, group in enumerate(groups) if i and group["units"] and group["align_to_primary"]}
         _write_json(manifest_path, document)
         try:
-            with ThreadPoolExecutor(max_workers=3, thread_name_prefix="shared-aoi") as pool:
-                futures = {pool.submit(run, i): i for i, group in enumerate(groups) if group["units"] and i not in pending}
-                while futures:
-                    completed, _ = wait(futures, timeout=.25, return_when=FIRST_COMPLETED)
-                    for future in completed:
-                        index = futures.pop(future)
-                        future.result()
-                        if index == 0 and pending:
-                            resolved_reference = primary_reference()
-                            for other in sorted(pending):
-                                if job.cancel_event.is_set():
-                                    records[other]["status"] = "cancelled"
-                                    update(other, "已取消", 1)
-                                elif resolved_reference is None:
-                                    records[other].update(status="dependency_failed", error="所选主 GeoTIFF 未成功生成，未用另一影像替代；请重试或关闭跟随。")
-                                    update(other, records[other]["error"], 1)
-                                else:
-                                    futures[pool.submit(run, other)] = other
-                            pending.clear()
+            for index, group in enumerate(groups):
+                check_cancel(job.cancel_event)
+                if not group["units"]:
+                    continue
+                if index in pending and resolved_reference is None:
+                    records[index].update(status="dependency_failed", error="所选主 GeoTIFF 未成功生成，未用另一影像替代；请重试或关闭跟随。")
+                    update(index, records[index]["error"], 1)
+                    continue
+                run(index)
+                if index == 0:
+                    resolved_reference = primary_reference()
             check_cancel(job.cancel_event)
             files = [{**item, "source": record["id"]} for record in records for result in record["results"] for item in result["files"]]
             failures = [r for r in records if r["status"] in ("failed", "partial", "dependency_failed", "search_failed")]
@@ -485,10 +481,13 @@ class BatchWorkflow:
             files.append({"path": str(manifest_path), "status": "saved", "source": "manifest"})
             return {"status": status, "folder": str(folder), "files": files, "manifest": str(manifest_path),
                     "sources": records, "plan": plan, "empty_scenes": []}
-        except Cancelled:
+        except Cancelled as error:
             document["status"] = "cancelled"
             for record in records:
                 if record["status"] == "pending":
                     record["status"] = "cancelled"
             _write_json(manifest_path, document)
+            from .errors import keep_download_result
+            files = [{**item, "source": record["id"]} for record in records for result in record["results"] for item in result["files"]]
+            keep_download_result(error, files, folder, manifest_path, plan)
             raise

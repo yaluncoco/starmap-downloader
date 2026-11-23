@@ -458,8 +458,11 @@ def test_cancel_transfer_and_stale_reference_plan(client, gedi_setup, tmp_path):
     job_id = client.post("download", request)["job_id"]
     assert upstream.started.wait(5)
     client.post("cancel", {"job_id": job_id})
-    client.wait(job_id, status="cancelled")
-    assert not list(Path(request["output_dir"]).rglob("*.part"))
+    cancelled = client.wait(job_id, status="cancelled")
+    assert cancelled["retry_available"]
+    partial, = Path(request["output_dir"]).rglob("*.part")
+    from core.local_paths import io_path
+    assert io_path(partial).with_name(partial.name + ".resume.json").is_file()
     assert not list(Path(request["output_dir"]).rglob("manifest.json"))
 
 

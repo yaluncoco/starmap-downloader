@@ -27,7 +27,9 @@ from shapely.geometry import mapping
 
 from . import VERSION
 from .earthdata_auth import request_data
-from .errors import UserError, keep_download_result
+from .errors import Cancelled, UserError, TransientDownloadError, DownloadAccessError, keep_download_result
+from .download_cache import PartialDownload, save_json
+from .raw_download import _stream
 from .gedi_catalogue import BEAMS, CHECKSUMS, COLLECTIONS, collection_id
 from .http import HttpClient, check_cancel
 from .integrity import checked_local_receipt, publish_file, sha256_file
@@ -264,75 +266,51 @@ def _fetch_source(http, auth, target, root, spec, cancel, progress):
     size = source.get("size")
     if size and shutil.disk_usage(path.parent).free < size + 16 * 1024**2:
         raise UserError("磁盘剩余空间不足以保存所选 GEDI 原始文件。")
-    partial = path.with_name(path.name + ".part")
-    if partial.exists():
-        raise UserError("GEDI 下载目录中已有未确认的 .part 文件，请移走后重试。")
-    version_tag = None
+    partial = path.parent / ".download-cache" / _fingerprint(source) / "payload.part"
+    partial.parent.mkdir(parents=True, exist_ok=True)
+    item = {"name": path.name, "url": source["url"], "bytes": size, "asset": path.name,
+            "transport": "earthdata", "identity": {"source": source}}
+    preserve = False
     try:
-        for attempt in range(3):
-            check_cancel(cancel)
-            headers = {"If-Match": version_tag} if version_tag else {}
-            response = request_data(http, auth, source["url"], cancel=cancel, headers=headers,
-                                    stream=True, timeout=(12, 45))
-            try:
-                if response.status_code != 200:
-                    raise UserError(f"NASA GEDI 文件下载失败（HTTP {response.status_code}）。请重新检索，核对文件权限。")
-                if "html" in response.headers.get("Content-Type", "").lower():
-                    raise UserError("NASA 返回了登录页面，请在 Earthdata Search 首次授权该数据中心，再重新连接。")
-                if response.headers.get("Content-Encoding", "identity").lower() != "identity":
-                    raise UserError("NASA 返回了未支持的压缩传输，无法核对原始文件长度。")
-                length = response.headers.get("Content-Length")
-                if length is not None and (not length.isdigit() or size is not None and int(length) != size):
-                    raise UserError("NASA 文件长度与所选 CMR 修订不一致，请重新检索。")
-                etag = response.headers.get("ETag")
-                strong = etag if etag and etag.startswith('"') and etag.endswith('"') else None
-                if version_tag and strong != version_tag:
-                    raise UserError("GEDI 文件版本在传输中发生变化，未保存。请重新检索。")
-                version_tag = strong
-                sha = hashlib.sha256()
-                checksum = source.get("checksum")
-                digest = hashlib.new(CHECKSUMS[checksum["algorithm"]][0]) if checksum else None
-                received = 0
-                with partial.open("xb") as writer:
-                    for block in response.iter_content(1024 * 1024):
-                        check_cancel(cancel)
-                        if not block:
-                            continue
-                        writer.write(block)
-                        sha.update(block)
-                        if digest:
-                            digest.update(block)
-                        received += len(block)
-                        expected_size = size or (int(length) if length else None)
-                        if expected_size and received > expected_size:
-                            raise UserError("GEDI 接收字节数超过所选文件长度，未保存。")
-                        progress(f"下载 GEDI · {path.name} · {received / 1024**2:.1f} MB", min(0.99, received / expected_size) if expected_size else 0.0)
-                expected_size = size or (int(length) if length else None)
-                if not received or expected_size and received != expected_size:
-                    raise requests.exceptions.ChunkedEncodingError()
-                if digest and digest.hexdigest() != checksum["value"]:
-                    raise UserError("GEDI 文件未通过 NASA 官方 " + checksum["algorithm"] + " 校验，未保存。")
+        def receive_progress(message, received, total):
+            progress(f"GEDI · {path.name} · {message}", min(.98, .98 * received / total) if received is not None and total else 0.0)
+
+        transfer = _stream(http, None, item, partial, cancel, receive_progress,
+                           requester=lambda headers, status: request_data(http, auth, source["url"], cancel=cancel, headers=headers,
+                                                                        stream=True, timeout=(12, 45), attempts=1, status=status))
+        checksum = source.get("checksum")
+        sha = hashlib.sha256()
+        digest = hashlib.new(CHECKSUMS[checksum["algorithm"]][0]) if checksum else None
+        with partial.open("rb") as stream:
+            while block := stream.read(4 * 1024**2):
                 check_cancel(cancel)
-                progress("核对 GEDI 原始文件格式与完整性 · " + path.name, 0.99)
-                format_info = _verify_source(partial, spec, cancel, decode_all=not checksum)
-                record = {**expected, "size": received, "sha256": sha.hexdigest(), "source": source,
-                          "provider_checksum_verified": checksum, "all_datasets_decoded": not bool(checksum), "etag": strong, **format_info}
-                publish_file(partial, path)
-                receipt.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
-                progress("GEDI 原始文件校验完成 · " + path.name, 1.0)
-                return path, {**record, "path": str(path), "status": "saved"}
-            except (requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError):
-                if attempt == 2:
-                    raise UserError("GEDI 文件传输多次中断，未发布不完整文件；已完成的原始文件保留。") from None
-                if not source.get("checksum") and not version_tag:
-                    raise UserError("GEDI 文件传输中断且缺少官方校验值或固定版本标识，请重新检索。") from None
-                progress("GEDI 传输中断，重新接收并核对同一文件版本…", 0.0)
-            finally:
-                response.close()
-                partial.unlink(missing_ok=True)
-        raise AssertionError("GEDI retry limit")
+                sha.update(block)
+                if digest:
+                    digest.update(block)
+        if digest and digest.hexdigest() != checksum["value"]:
+            raise UserError("GEDI 文件未通过 NASA 官方 " + checksum["algorithm"] + " 校验，未保存。")
+        progress("核对 GEDI 原始文件格式与完整性 · " + path.name, .99)
+        format_info = _verify_source(partial, spec, cancel, decode_all=not checksum)
+        record = {**expected, "size": transfer["size"], "sha256": sha.hexdigest(), "source": source,
+                  "provider_checksum_verified": checksum, "all_datasets_decoded": not bool(checksum), **transfer, **format_info}
+        check_cancel(cancel)
+        publish_file(partial, path)
+        try:
+            save_json(receipt, record)
+        except Exception:
+            path.rename(partial)
+            raise
+        progress("GEDI 原始文件校验完成 · " + path.name, 1.0)
+        return path, {**record, "path": str(path), "status": "saved"}
+    except (Cancelled, TransientDownloadError, DownloadAccessError, OSError):
+        preserve = True
+        raise
+    except UserError as error:
+        preserve = bool(getattr(error, "download_progress_preserved", False))
+        raise
     finally:
-        partial.unlink(missing_ok=True)
+        if not preserve or not partial.with_name(partial.name + ".resume.json").is_file():
+            PartialDownload(partial, item).discard()
 
 
 def _epoch(group):
@@ -687,8 +665,11 @@ def download_gedi(geometry, plan, output_dir, auth, *, cancel=None, progress=Non
     try:
         return _download_gedi(geometry, plan, output_dir, auth, retained, cancel=cancel, progress=progress)
     except Exception as error:
+        partial = getattr(error, "download_result", {})
         files = [{"path": r["path"], "status": r["status"]} for r in retained]
-        keep_download_result(error, files, io_path(output_dir) / plan["root_name"], None, plan)
+        seen = {item["path"] for item in files}
+        files.extend(item for item in partial.get("files", []) if item["path"] not in seen)
+        keep_download_result(error, files, partial.get("folder", io_path(output_dir) / plan["root_name"]), partial.get("manifest"), plan)
         raise
 
 
@@ -698,6 +679,8 @@ def _download_gedi(geometry, plan, output_dir, auth, source_records, *, cancel=N
     base.mkdir(parents=True, exist_ok=True)
     folder = base / plan["folder_name"]
     root = base / plan["root_name"]
+    root.mkdir(parents=True, exist_ok=True)
+    save_json(root / "研究区.geojson", {"type": "Feature", "properties": {}, "geometry": mapping(geometry)})
     spec = COLLECTIONS[plan["options"]["collection"]]
     check_cancel(cancel)
     if plan["grid"] and plan["grid"]["reference"]:
@@ -714,12 +697,16 @@ def _download_gedi(geometry, plan, output_dir, auth, source_records, *, cancel=N
             source_records.append(record)
     finally:
         http.close()
-    if folder.exists():
-        files, stats = _reuse_export(folder, plan, cancel)
-        files.append({"path": str(folder / "manifest.json"), "status": "skipped"})
+
+    def finish_export(files, stats):
         if plan["options"]["mode"] == "original":
             files = [{"path": r["path"], "status": r["status"]} for r in source_records] + files
         return {"folder": str(folder), "files": files, "plan": plan, "empty_scenes": stats.get("empty_granules", []), "statistics": stats}
+
+    if folder.exists():
+        files, stats = _reuse_export(folder, plan, cancel)
+        files.append({"path": str(folder / "manifest.json"), "status": "skipped"})
+        return finish_export(files, stats)
     folder.parent.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix=".gedi-export-", dir=folder.parent))
     try:
@@ -759,10 +746,9 @@ def _download_gedi(geometry, plan, output_dir, auth, source_records, *, cancel=N
         stage.rename(folder)
         files = [{"path": str(folder / r["name"]), "status": "saved"} for r in records]
         files.append({"path": str(folder / "manifest.json"), "status": "saved"})
-        if plan["options"]["mode"] == "original":
-            files = [{"path": r["path"], "status": r["status"]} for r in source_records] + files
+        result = finish_export(files, stats)
         progress(f"GEDI 下载与导出完成 · {stats.get('accepted_shots', 0)} 个足迹" if spec["kind"] == "footprint" and plan["options"]["mode"] != "original" else "GEDI 下载与导出完成", 1.0)
-        return {"folder": str(folder), "files": files, "plan": plan, "empty_scenes": stats.get("empty_granules", []), "statistics": stats}
+        return result
     finally:
         if stage.exists():
             shutil.rmtree(stage)

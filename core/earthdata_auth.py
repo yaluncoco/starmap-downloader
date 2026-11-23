@@ -7,7 +7,7 @@ from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 from requests.auth import AuthBase
 
-from .errors import UserError
+from .errors import UserError, DownloadAccessError
 from .http import HttpClient, check_cancel
 
 EDL_TOKEN_URL = "https://urs.earthdata.nasa.gov/api/users/find_or_create_token"
@@ -152,6 +152,6 @@ def request_data(http, auth, url, *, cancel=None, headers=None, **kwargs):
             continue
         if response.status_code in (401, 403):
             response.close()
-            raise UserError("GEDI 下载未获授权或 Earthdata 令牌已过期。请重新连接；首次使用请在 Earthdata Search 授权 LP DAAC / ORNL DAAC 应用。")
+            raise DownloadAccessError("GEDI 下载未获授权或 Earthdata 令牌已过期。请重新连接；首次使用请在 Earthdata Search 授权 LP DAAC / ORNL DAAC 应用。")
         return response
     raise UserError("NASA 下载重定向次数过多，请稍后重试。")

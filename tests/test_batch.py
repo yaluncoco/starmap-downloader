@@ -214,18 +214,27 @@ def test_main_failure_does_not_substitute_another_reference(client, batch_setup,
     assert not list(Path(result["folder"]).rglob("*.h5"))
 
 
-def test_independent_sources_start_together(client, server, batch_setup, tmp_path, monkeypatch):
+def test_independent_sources_complete_in_product_queue_order(client, server, batch_setup, tmp_path, monkeypatch):
     client.post("earthdata-connect", {"token": TOKEN})
     request, _ = prepare(client, search_batch(client, batch_setup, align=False, sample=False), tmp_path / "parallel")
     original = server.service._run_source
-    started = {S2_PUBLIC: threading.Event(), GEDI: threading.Event()}
+    events = []
+    active = []
     def run(profile, *args, **kwargs):
-        started[profile].set()
-        assert started[GEDI if profile == S2_PUBLIC else S2_PUBLIC].wait(5), "Independent source never started concurrently"
-        return original(profile, *args, **kwargs)
+        assert not active
+        active.append(profile)
+        events.append(("start", profile))
+        try:
+            result = original(profile, *args, **kwargs)
+            assert result["files"] and all(Path(item["path"]).is_file() for item in result["files"])
+            return result
+        finally:
+            events.append(("finish", profile))
+            active.pop()
     monkeypatch.setattr(server.service, "_run_source", run)
     result = client.wait(client.post("batch-download", request)["job_id"])["result"]
     assert all(group["status"] == "completed" for group in result["sources"])
+    assert events == [("start", S2_PUBLIC), ("finish", S2_PUBLIC), ("start", GEDI), ("finish", GEDI)]
 
 
 def test_cancel_cleans_up_gedi_and_keeps_completed_image(client, server, batch_setup, tmp_path):

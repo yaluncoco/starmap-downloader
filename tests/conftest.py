@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import re
@@ -24,6 +25,15 @@ D1 = "2024-06-10T03:16:50.553Z"
 D2 = "2024-06-05T03:16:50.631Z"
 BBOX = "116.350,39.900,116.355,39.905"
 TRIANGLE = "116.350,39.900\n116.355,39.900\n116.355,39.905"
+
+
+def assert_download_prefix(partial, original):
+    receipt = json.loads(partial.with_name(partial.name + ".resume.json").read_bytes())
+    data = partial.read_bytes()
+    assert ".download-cache" in partial.parts
+    assert receipt["schema"] == 1 and receipt["total"] == len(original)
+    assert 0 < receipt["received"] <= receipt["total"] and len(data) == receipt["received"]
+    assert data == original[:len(data)] and receipt["sha256"] == hashlib.sha256(data).hexdigest()
 
 
 class StubResponse:

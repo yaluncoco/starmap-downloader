@@ -145,6 +145,7 @@ def l2a_archive(monkeypatch):
 
 def assert_not_published(folder, status):
     assert not list(folder.rglob("*.part")) and not list(folder.rglob("*.starmap.json"))
+    assert not list(folder.rglob("*.tif")) and not list(folder.rglob("*.zip"))
     assert not list(folder.rglob("*.tif")) and not list(folder.rglob("*.xml"))
     manifest, = folder.rglob("下载记录_*.json")
     data = json.loads(manifest.read_bytes())

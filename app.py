@@ -107,6 +107,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._respond(200, {**self.server.service.bootstrap(), "native_dialogs": self.server.dialogs is not None})
             if path.path == "/api/accounts":
                 return self._respond(200, self.server.service.account_status())
+            if path.path == "/api/resumable-downloads":
+                return self._respond(200, {"tasks": self.server.service.download_tasks.summaries()})
             if path.path == "/api/job":
                 job_id = parse_qs(path.query).get("id", [""])[0]
                 return self._respond(200, self.server.service.job(job_id))
@@ -130,12 +132,30 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             self._respond(500, {"error": "本地服务发生异常，请重新启动软件。"})
 
+    def _reject_post(self, message):
+        # Closing over unread request bytes can reset TCP on Windows and lose the 403.
+        # Drain only the existing bounded body, with a short deadline for incomplete senders.
+        previous_timeout = self.connection.gettimeout()
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if 0 < length <= 8 * 1024 * 1024:
+                self.connection.settimeout(3)
+                self.rfile.read(length)
+        except (ValueError, OSError):
+            pass
+        finally:
+            self.connection.settimeout(previous_timeout)
+        try:
+            self._respond(403, {"error": message})
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
     def do_POST(self):
         if not self._trusted_host() or self.headers.get("X-App-Token", "") != self.server.csrf_token:
-            return self._respond(403, {"error": "请求校验失败，请重新打开软件。"})
+            return self._reject_post("请求校验失败，请重新打开软件。")
         origin = self.headers.get("Origin")
         if origin and origin != self.server.origin:
-            return self._respond(403, {"error": "仅支持本地界面请求。"})
+            return self._reject_post("仅支持本地界面请求。")
         try:
             length = int(self.headers.get("Content-Length", "0"))
             if not 0 < length <= 8 * 1024 * 1024:
@@ -165,6 +185,7 @@ class Handler(BaseHTTPRequestHandler):
                 "/api/plan": self.server.service.plan,
                 "/api/coverage": self.server.service.coverage,
                 "/api/download": self.server.service.download,
+                "/api/retry-download": self.server.service.retry_download,
                 "/api/cancel": lambda v: self.server.service.cancel(v.get("job_id", "")),
                 "/api/geocode": self.server.service.geocode,
                 "/api/check-update": self.server.service.check_update,

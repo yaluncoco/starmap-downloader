@@ -1,4 +1,7 @@
 import json
+import socket
+import time
+from http.client import HTTPResponse
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -22,6 +25,24 @@ def test_http_session_is_local_and_credentials_are_not_persisted(client, server)
     client.post("preferences", {"client_secret": "mock-secret", "access_token": "mock-token"})
     preferences = json.loads(server.service.pref_file.read_text(encoding="utf-8"))
     assert preferences["client_id"] == "mock-client" and set(preferences) == {"client_id", "output_dir"}
+
+
+@pytest.mark.parametrize("rejection", ["session", "origin"])
+def test_rejected_post_with_delayed_body_returns_complete_403(client, server, rejection):
+    body = b"x" * (64 * 1024)
+    headers = {"Host": f"127.0.0.1:{server.server_port}", "Content-Length": str(len(body))}
+    if rejection == "origin":
+        headers.update(client.headers)
+        headers["Origin"] = "https://example.test"
+    request = "POST /api/retry-download HTTP/1.1\r\n" + "".join(f"{key}: {value}\r\n" for key, value in headers.items()) + "\r\n"
+    with socket.create_connection(("127.0.0.1", server.server_port), timeout=3) as connection:
+        connection.sendall(request.encode("ascii"))
+        time.sleep(.02)
+        connection.sendall(body)
+        response = HTTPResponse(connection)
+        response.begin()
+        assert response.status == 403 and json.loads(response.read())["error"]
+    assert server.service.active_job() is None
 
 
 def test_full_workflow_multiblock_selection_and_resume(client, provider, tmp_path, monkeypatch):

@@ -23,9 +23,10 @@ from shapely import normalize
 
 from . import VERSION
 from .download import _save_json
-from .errors import Cancelled, UserError, keep_download_result
+from .errors import Cancelled, UserError, TransientDownloadError, DownloadAccessError, keep_download_result
+from .download_cache import PartialDownload
 from .local_paths import io_path
-from .http import CATALOGUE_URL, HttpClient, check_cancel
+from .http import CATALOGUE_URL, HttpClient, check_cancel, wait_retry
 from .integrity import publish_file
 from .native_catalogue import DOWNLOAD_ROOT, _json, download_asset, product_stem
 from .open_l2a import check_l2a_target, verify_l2a_index, verify_l2a_xml
@@ -41,7 +42,7 @@ from .open_worldcover import (PROOF_KIND as WORLDCOVER, check_worldcover_headers
 from .public_token import PlanetaryAccess
 from .s3_source import (ES_HOST, ESSENTIAL_EXTENSIONS, L3_MIRROR_HOST, S1_AWS_HOST, S2_L1C_AWS, S5P_ARCHIVE_HOST, SEN3_ARCHIVE_HOST,
                         SEN3_MANIFEST, SEN3_NAME, WC_HOSTS, is_cdse_url, is_public_url, landsat_blob_object, sen3_archive_object)
-from .scene_identity import utc_time
+from .scene_identity import utc_time, source_fingerprint
 
 CHUNK = 1024 * 1024
 BYTE_RANGE = re.compile(r"bytes ([0-9]+)-([0-9]+)/([0-9]+)\Z", re.ASCII)
@@ -55,6 +56,7 @@ CACHED_EVIDENCE_FIELDS = (
     "aws_single_part_md5", "azure_blob_md5", "safe_product", "odata_name", "l1c_index_etag", "l2a_index_etag", "l2a_index_sha256",
     "l3_index_etag", "l3_index_sha256", "reflectance_scale", "s5p_validation", "modis_validation", "asf_zip_md5", "slc_validation",
     "worldcover_upload_part_bytes", "worldcover_grid_sha256",
+    "resumed_bytes", "reused_range_windows", "range_windows", "range_workers",
 )
 SOURCE_CHECKSUM_FIELDS = (("SHA-256", "provider_sha256", 64), ("SHA3-256", "provider_sha3_256", 64), ("MD5", "provider_md5", 32))
 
@@ -180,7 +182,7 @@ def _authorized_get(http, auth, item, headers, cancel, status):
         if not link or link[0] != item["uuid"] or link[3] != url:
             raise UserError("官方目录返回了与所选产品不匹配的下载地址。")
         response = http.request("GET", url, headers={**headers, "Authorization": "Bearer " + auth.token(cancel)}, cancel=cancel,
-                                status=status, stream=True, timeout=(15, 95))
+                                status=status, stream=True, timeout=(15, 95), attempts=1)
         if response.status_code == 401 and not refreshed:
             response.close()
             auth.token(cancel, force=True)
@@ -223,7 +225,7 @@ def _is_worldcover(item):
 def _transport_get(http, auth, s3_auth, item, headers, cancel, status, pc_auth=None):
     if is_modis(item):
         check_modis_target(item)
-        return modis_blob_request(http, "GET", item["url"], headers, cancel, pc_auth, status=status)
+        return modis_blob_request(http, "GET", item["url"], headers, cancel, pc_auth, status=status, attempts=1)
     if _is_worldcover(item):
         check_worldcover_target(item)  # Verify before any channel can attach credentials or follow a redirect.
     channel = item.get("transport", "odata")
@@ -246,14 +248,14 @@ def _transport_get(http, auth, s3_auth, item, headers, cancel, status, pc_auth=N
     kwargs = {}
     if channel == "cdse-s3" and is_cdse_url(url):
         if s3_auth is None or not s3_auth.connected:
-            raise UserError("请先在软件中连接 CDSE S3 密钥。")
+            raise DownloadAccessError("请先在软件中连接 CDSE S3 密钥。")
         kwargs["auth"] = s3_auth
     elif channel == "pc-public" and landsat_blob_object(url) and pc_auth is not None:
         kwargs["auth"] = pc_auth
     elif channel != "public" or not is_public_url(url):
         raise UserError("原始数据通道或对象来源未通过检查。")
     for attempt in range(2):
-        response = http.request("GET", url, headers=headers, cancel=cancel, status=status, stream=True, timeout=(15, 95), **kwargs)
+        response = http.request("GET", url, headers=headers, cancel=cancel, status=status, stream=True, timeout=(15, 95), attempts=1, **kwargs)
         if channel == "pc-public" and response.status_code in (401, 403) and attempt == 0:
             response.close()
             pc_auth.clear()
@@ -316,12 +318,27 @@ def _s3_denied(response, cancel):
     return messages.get(code, fallback)
 
 
-def _stream(http, auth, item, partial, cancel, progress, *, s3_auth=None, pc_auth=None, pinned_etag=None, pinned_md5=None):
-    tag = total = blob_md5 = None
+def _stream(http, auth, item, partial, cancel, progress, *, s3_auth=None, pc_auth=None, pinned_etag=None, pinned_md5=None, requester=None):
+    checkpoint = PartialDownload(partial, item)
+    previous = checkpoint.load(cancel)
+    tag, total = (previous["etag"], previous["total"]) if previous else (None, None)
+    previous_transfer = (previous or {}).get("transfer") or {}
+    blob_md5 = previous_transfer.get("azure_blob_md5")
+    resumed = (previous or {}).get("received", 0)
     channel = item.get("transport", "odata")
     kind = (item.get("identity") or {}).get("kind")
     pinned = pinned_etag or (item.get("identity") or {}).get("archive_etag")
-    for attempt in range(4):
+    if previous and pinned and tag != pinned:
+        checkpoint.discard()
+        raise UserError("保存的原始下载进度与所选对象版本不同，未混用文件。请重新检索。")
+    if previous and resumed == total and previous_transfer.get("finished"):
+        progress("已完整接收当前原件，继续格式与校验值检查", resumed, total)
+        return {**previous_transfer, "resumed_bytes": resumed, "transfer_attempts": 0}
+    if resumed == total and previous:
+        checkpoint.discard()
+        tag = total = blob_md5 = None
+        resumed = 0
+    for attempt in range(3):
         check_cancel(cancel)
         position = partial.stat().st_size if partial.exists() and tag else 0
         headers = {"Accept-Encoding": "identity"}
@@ -330,8 +347,11 @@ def _stream(http, auth, item, partial, cancel, progress, *, s3_auth=None, pc_aut
         if position:
             conditional = "If-Range" if channel == "odata" else "If-Match"
             headers.update({"Range": f"bytes={position}-", conditional: tag})
-        response = _transport_get(http, auth, s3_auth, item, headers, cancel, lambda msg: progress(msg, None, None), pc_auth=pc_auth)
+        response = None
+        written, content_type = position, previous_transfer.get("content_type")
         try:
+            response = (requester(headers, lambda msg: progress(msg, None, None)) if requester else
+                        _transport_get(http, auth, s3_auth, item, headers, cancel, lambda msg: progress(msg, None, None), pc_auth=pc_auth))
             if response.status_code in (401, 403, 404, 410) and kind == WORLDCOVER:
                 raise UserError("ESA WorldCover 已不提供所选对象；未换用其他年份、瓦片或图层，请重新检索。")
             if response.status_code in (401, 403, 404, 410) and kind == L3_MOSAIC:
@@ -342,12 +362,12 @@ def _stream(http, auth, item, partial, cancel, progress, *, s3_auth=None, pc_aut
                 raise UserError("公开档案不再提供所选 SEN3 原始成员。未换用其他版本，请重新检索。")
             if response.status_code in (401, 403):
                 if channel == "cdse-s3":
-                    raise UserError(_s3_denied(response, cancel))
+                    raise DownloadAccessError(_s3_denied(response, cancel))
                 if channel == "pc-public":
-                    raise UserError("公开 Landsat 服务未授权当前对象；程序未切换到其他产品。")
+                    raise DownloadAccessError("公开 Landsat 服务未授权当前对象；程序未切换到其他产品。")
                 if channel == "public":
-                    raise UserError("公开源拒绝访问选中的对象，未替换其他产品。")
-                raise UserError("CDSE 未授权下载此产品；请检查账号、令牌和数据访问权限。")
+                    raise DownloadAccessError("公开源拒绝访问选中的对象，未替换其他产品。")
+                raise DownloadAccessError("CDSE 未授权下载此产品；请检查账号、令牌和数据访问权限。")
             if response.status_code == 412:
                 if pinned:
                     raise UserError("公开档案对象版本在检索后已变化，请重新检索；未保存文件。")
@@ -389,9 +409,10 @@ def _stream(http, auth, item, partial, cancel, progress, *, s3_auth=None, pc_aut
                 total = size
                 append = True
             else:
-                if channel != "odata" and position and (received_tag != tag or (total is not None and _integer(response.headers.get("Content-Length")) != total)):
+                if position and (received_tag != tag or (total is not None and _integer(response.headers.get("Content-Length")) != total)):
                     raise UserError("续传服务器返回了不同的对象版本或长度，未保存。")
                 tag, total, position, append = received_tag, _integer(response.headers.get("Content-Length")), 0, False
+                checkpoint.reset()
                 if total == 0 or "Content-Length" in response.headers and total is None:
                     raise UserError("原始产品声明的字节长度无效。")
                 if total is None and item["asset"]:
@@ -413,6 +434,10 @@ def _stream(http, auth, item, partial, cancel, progress, *, s3_auth=None, pc_aut
                     if total is not None and written > total:
                         raise UserError("文件传输超过服务声明的长度，已拒绝保存。")
                     out.write(block)
+                    checkpoint.sha.update(block)
+                    if time.monotonic() - checkpoint.saved_at >= 2 or written - checkpoint.saved_size >= 16 * 1024**2:
+                        out.flush()
+                        checkpoint.checkpoint(written, total, tag, transfer={"content_type": content_type, "azure_blob_md5": blob_md5})
                     if time.monotonic() - last_update >= .3:
                         progress("接收原始产品", written, total)
                         last_update = time.monotonic()
@@ -424,14 +449,39 @@ def _stream(http, auth, item, partial, cancel, progress, *, s3_auth=None, pc_aut
             aws_md5 = (tag.strip('"').lower() if channel == "public" and kind not in (L3_MOSAIC, WORLDCOVER) and re.fullmatch(r'"[a-fA-F0-9]{32}"', tag or "")
                        and response.headers.get("X-Amz-Server-Side-Encryption", "") in ("", "AES256")
                        and not response.headers.get("X-Amz-Server-Side-Encryption-Customer-Algorithm") else None)
-            return {"size": written, "etag": tag, "content_type": content_type, "expected_bytes": total,
-                    "transfer_attempts": attempt + 1, "aws_single_part_md5": aws_md5, "azure_blob_md5": blob_md5}
-        except TRANSFER_ERRORS:
-            if attempt == 3:
-                raise UserError("原始产品传输多次中断，没有发布不完整文件。") from None
-            progress("传输中断，正在验证并重试当前文件", None, None)
+            transfer = {"size": written, "etag": tag, "content_type": content_type, "expected_bytes": total, "finished": True,
+                        "transfer_attempts": attempt + 1, "resumed_bytes": resumed, "aws_single_part_md5": aws_md5, "azure_blob_md5": blob_md5}
+            checkpoint.checkpoint(written, total, tag, transfer=transfer, force=True)
+            return transfer
+        except requests.exceptions.SSLError:
+            error = UserError("原始产品连接的证书校验失败，请检查网络或代理设置。")
+            if checkpoint.state:
+                error.download_progress_preserved = True
+            raise error from None
+        except (TransientDownloadError, *TRANSFER_ERRORS) as error:
+            checkpoint.checkpoint(written, total, tag, transfer={"content_type": content_type, "azure_blob_md5": blob_md5}, force=True)
+            if attempt == 2:
+                raise TransientDownloadError("原始产品传输多次中断；已保留校验通过的进度，可继续下载。") from None
+            progress(f"传输中断，继续当前原件剩余字节（{attempt + 1}/2）", written, total)
+            wait_retry(attempt, cancel, getattr(error, "retry_after", None))
+        except Cancelled:
+            checkpoint.checkpoint(written, total, tag, transfer={"content_type": content_type, "azure_blob_md5": blob_md5}, force=True)
+            if not checkpoint.state:
+                checkpoint.discard()
+            raise
+        except DownloadAccessError:
+            raise
+        except UserError as error:
+            # A rejected response must never erase the previously verified source prefix.
+            # Unrecorded tail bytes are truncated by load() before the next attempt.
+            if checkpoint.state:
+                error.download_progress_preserved = True
+            else:
+                checkpoint.discard()
+            raise
         finally:
-            response.close()
+            if response is not None:
+                response.close()
     raise UserError("下载未完成。")
 
 
@@ -756,7 +806,9 @@ def download_original(geometry, plan, output_dir, auth, *, s3_auth=None, cancel=
             check_cancel(cancel)
             name = _basename(item)
             receipt = folder / f"{name}.starmap.json"
-            partial = folder / f".{name}.{uid}.part"
+            partial = folder / ".download-cache" / "raw" / source_fingerprint(item) / "payload.part"
+            partial.parent.mkdir(parents=True, exist_ok=True)
+            preserve_partial = False
             row = {"product": item["key"], "uuid": item["uuid"], "asset": item["asset"], "url": item["url"],
                    "transport": item["transport"], "status": "running"}
             manifest["items"].append(row)
@@ -986,19 +1038,27 @@ def download_original(geometry, plan, output_dir, auth, *, s3_auth=None, cancel=
                                              "asset": item["asset"], "transport": item["transport"], "sha256": digest,
                                              **({"odata_name": row["odata_name"]} if "odata_name" in row else {}), **transfer})
                     except Exception:
-                        target.unlink(missing_ok=True)
+                        target.rename(partial)
                         raise
                     row.update(status="completed", path=str(target), sha256=digest, **transfer)
                 result.append({"path": row["path"], "scene": item["key"], "status": row["status"]})
                 _save_json(record_path, manifest)
             except Cancelled:
+                preserve_partial = True
                 row["status"] = "cancelled"
                 raise
-            except Exception:
+            except Exception as error:
+                preserve_partial = (isinstance(error, (TransientDownloadError, DownloadAccessError, OSError))
+                                    or bool(getattr(error, "download_progress_preserved", False)))
                 row["status"] = "failed"
                 raise
             finally:
-                partial.unlink(missing_ok=True)
+                has_checkpoint = (partial.with_name(partial.name + ".resume.json").is_file()
+                                  or partial.with_name(partial.name + ".ranges.json").is_file())
+                if not preserve_partial or not has_checkpoint:
+                    partial.unlink(missing_ok=True)
+                    partial.with_name(partial.name + ".resume.json").unlink(missing_ok=True)
+                    partial.with_name(partial.name + ".ranges.json").unlink(missing_ok=True)
         manifest["status"] = "completed"
         return {"files": result, "folder": str(folder), "manifest": str(record_path), "plan": plan, "empty_scenes": []}
     except Cancelled as error:

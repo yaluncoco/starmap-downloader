@@ -2,6 +2,18 @@ class UserError(Exception):
     """An error that can be shown to a user without exposing request data."""
 
 
+class TransientDownloadError(UserError):
+    """A bounded transfer stopped; verified progress may be safely retained."""
+
+    def __init__(self, message, retry_after=None):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
+class DownloadAccessError(UserError):
+    """Account access stopped; verified bytes remain reusable after reconnecting."""
+
+
 class Cancelled(Exception):
     pass
 

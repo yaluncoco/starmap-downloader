@@ -115,7 +115,8 @@ const Accounts = {
       }
     }
     state.connecting = false; renderAuth(); renderEstimate();
-    if (this.status.login_required) {
+    const publicResume = downloads.tasks.some(task => Array.isArray(task.requires) && task.requires.length === 0);
+    if (this.status.login_required && !publicResume) {
       const failed = Object.entries(this.status.providers).find(([, value]) => value.error)?.[0];
       this.open(failed === "odata" || failed === "s3" ? "cdse" : failed || Batch.recommendedAccount());
     }
