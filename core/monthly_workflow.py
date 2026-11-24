@@ -24,7 +24,7 @@ from .spatial_selection import available, coverage_summary, priority_option
 
 PROFILES = frozenset({"s2-process", "s2-earth-search", "s2-cdse-s3"})
 MAX_MONTHS = 120
-SCHEMA = 1
+SCHEMA = 2
 
 
 def month_range(start, end):
@@ -177,6 +177,8 @@ class MonthlyWorkflow:
         options = self.service._selection_options(profile, group["criteria"], supplied, scenes)
         if options["layout"] != "mosaic":
             raise UserError("按月下载每月输出一份拼接影像，请使用区域拼接方式。")
+        options["monthly_pipeline"] = "download-scenes-mosaic-clip"
+        options["profile"] = profile
         return options, scenes
 
     def coverage(self, value, *, cancel=None):
@@ -223,10 +225,15 @@ class MonthlyWorkflow:
                            "resolution", "bytes_per_scene", "dates", "source_count", "estimated_pu")}
                 compact["requires"] = list(plan.get("requires", [])) + (["sentinel-hub"] if state["profile"] == "s2-process" else [])
                 compact["coverage_percent"] = plan["coverage"]["coverage_percent"]
+                for key in ("pipeline", "pipeline_schema", "whole_mosaic_bytes", "staging_required_bytes"):
+                    if key in plan:
+                        compact[key] = plan[key]
                 frozen["plan"] = compact
                 requirements.update(compact["requires"])
                 preview.update(plan=compact, estimated_bytes=plan["bytes_per_scene"],
-                               native_source_bytes=plan.get("native_source_bytes", 0), options=options)
+                               native_source_bytes=plan.get("native_source_bytes", 0),
+                               whole_mosaic_bytes=plan.get("whole_mosaic_bytes", 0),
+                               staging_required_bytes=plan.get("staging_required_bytes", 0), options=options)
             selected.append(frozen)
             previews.append(preview)
         if not any(row["scenes"] for row in selected):
@@ -242,10 +249,13 @@ class MonthlyWorkflow:
                 "output_count": sum(bool(group["scenes"]) for group in selected), "requires": sorted(requirements),
                 "estimated_bytes": sum(row.get("estimated_bytes", 0) for row in previews),
                 "native_source_bytes": sum(row.get("native_source_bytes", 0) for row in previews),
+                "whole_mosaic_bytes": sum(row.get("whole_mosaic_bytes", 0) for row in previews),
+                "staging_required_bytes": sum(row.get("staging_required_bytes", 0) for row in previews),
+                "pipeline": "download-scenes-mosaic-clip",
                 "estimated_pu": sum((row.get("plan") or {}).get("estimated_pu") or 0 for row in previews),
                 "boundary_name": state["aoi"]["name"], "region": region,
                 "folder_name": f"{label}_月度_{state['start_month']}_{state['end_month']}_{fingerprint}",
-                "time_note": "UTC 逐月拼接；只使用该月选中的产品，不用相邻月份补缺。"}
+                "time_note": "UTC 逐月处理；先下载本月全部已选整景，再本地整月拼接，最后按完整边界裁剪；只使用该月产品。"}
         check_cancel(cancel)
         with self.service.lock:
             if not self.state or self.state["id"] != state["id"]:
@@ -302,7 +312,7 @@ class MonthlyWorkflow:
         records = [{"month": group["month"], "criteria": group["criteria"], "scene_keys": group["scene_keys"],
                     "status": "pending" if group["scenes"] else group["status"], "error": group["error"],
                     "result": None} for group in groups]
-        document = {"software": VERSION, "schema": SCHEMA, "status": "running", "plan": plan,
+        document = {"software": VERSION, "schema": plan.get("schema", SCHEMA), "status": "running", "plan": plan,
                     "geometry": definition["geometry"], "region": definition.get("region"),
                     "boundary": str(boundary), "boundary_files": [{"path": str(path), "sha256": sha256_file(path, job.cancel_event)}
                                                                   for path in components], "months": records}
@@ -312,11 +322,14 @@ class MonthlyWorkflow:
                     "manifest": str(manifest), "files": [item for row in records for item in (row["result"] or {}).get("files", [])],
                     "empty_scenes": []}
 
-        def report(index, message, fraction=0):
+        def report(index, message, fraction=0, detail=None):
+            if detail and detail.get("month_stage"):
+                records[index]["stage"] = detail["month_stage"]
             job.update(f"{index + 1}/{len(groups)} · {groups[index]['month']} · {message}",
                        (index + fraction) / len(groups),
                        {"folder": str(folder), "monthly_groups": [{"id": row["month"], "month": row["month"],
-                          "title": row["month"], "status": row["status"], "error": row["error"]} for row in records]})
+                          "title": row["month"], "status": row["status"], "stage": row.get("stage"),
+                          "error": row["error"]} for row in records]})
 
         _write_json(manifest, document)
         try:
@@ -333,7 +346,7 @@ class MonthlyWorkflow:
                     row["result"] = self.service._run_source(definition["profile"], geometry, group["options"], group["scenes"],
                                                               group["plan"], str(folder / group["month"]),
                                                               cancel=job.cancel_event,
-                                                              progress=lambda message, fraction=0, detail=None: report(index, message, fraction))
+                                                              progress=lambda message, fraction=0, detail=None: report(index, message, fraction, detail))
                     if any(date[:7] != group["month"] for date in row["result"].get("used_dates", [])):
                         raise UserError("输出来源日期不属于本月，已停止本任务；请检查来源记录。")
                     row["status"] = "completed" if row["result"]["files"] else "no_valid_pixels"

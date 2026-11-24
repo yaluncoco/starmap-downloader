@@ -67,7 +67,7 @@ class Tile:
     intersects: bool
 
 
-def build_plan(geometry, options, scene_count=1, tile_size=2048, *, cancel=None):
+def build_plan(geometry, options, scene_count=1, tile_size=2048, *, cancel=None, epsg=None):
     if options.get("mode") == "research":
         tile_size = min(tile_size, 1024)  # Bound memory for two 10-band rasters and quality/provenance.
     if not 1 <= int(scene_count) <= 500:
@@ -79,8 +79,13 @@ def build_plan(geometry, options, scene_count=1, tile_size=2048, *, cancel=None)
     if east - west > 8 or north - south > 8:
         raise UserError("研究区跨度超过 8°。请分区下载，避免使用服务不支持的全球等面积投影。")
     zone = max(1, min(60, int((center.x + 180) // 6) + 1))
-    epsg = (32600 if center.y >= 0 else 32700) + zone
-    crs_label = f"WGS84 / UTM {zone}{'N' if center.y >= 0 else 'S'}"
+    if epsg is None:
+        epsg = (32600 if center.y >= 0 else 32700) + zone
+    elif type(epsg) is not int or not (32601 <= epsg <= 32660 or 32701 <= epsg <= 32760):
+        raise UserError("月度拼接的目标 UTM 坐标系无效。")
+    else:
+        zone = epsg % 100
+    crs_label = f"WGS84 / UTM {zone}{'N' if epsg < 32700 else 'S'}"
     transformer = Transformer.from_crs(4326, epsg, always_xy=True)
     dense = geometry.segmentize(0.05)
     projected = transform(dense, transformer.transform, interleaved=False)
@@ -115,7 +120,11 @@ def build_plan(geometry, options, scene_count=1, tile_size=2048, *, cancel=None)
     if research:
         bytes_per_pixel = bytes_per_pixel * 2 + 1 + 2  # Main + unmasked + uint8 SCL + uint16 source.
     # Do not reuse files produced under an older grid, mask or source-selection contract.
-    fingerprint = hashlib.sha256(json.dumps({"grid_version": 5, "geometry": mapping(normalize(geometry)), "options": options}, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:12]
+    signature = {"grid_version": 5, "geometry": mapping(normalize(geometry)), "options": options}
+    default_epsg = (32600 if center.y >= 0 else 32700) + max(1, min(60, int((center.x + 180) // 6) + 1))
+    if epsg != default_epsg:
+        signature["target_epsg"] = epsg
+    fingerprint = hashlib.sha256(json.dumps(signature, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:12]
     public = {
         "epsg": epsg, "crs_label": crs_label, "width": width, "height": height,
         "bounds": [minx, miny, maxx, maxy], "resolution": resolution, "scene_count": scene_count,

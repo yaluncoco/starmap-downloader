@@ -102,6 +102,10 @@ def search_earth(geometry, start, stop, max_cloud, *, cancel=None, progress=None
                 check_cancel(cancel)
                 row = _earth_item(feature, geometry, area, start, stop, max_cloud)
                 if row:
+                    from .open_l2a import l2a_row
+                    original = l2a_row(feature, geometry, area, start, stop, max_cloud)
+                    if original is not None:
+                        row["public"]["native_raw"] = original["raw"]
                     items[row["key"]] = row
             if len(items) > 500:
                 raise UserError("找到超过 500 个匹配瓦片，请缩短日期或缩小研究区。")

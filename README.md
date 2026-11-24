@@ -1,10 +1,10 @@
-# 星图影像下载器 1.7.1
+# 星图影像下载器 1.8.0
 
 Windows 10/11 x64 桌面工具。按研究区和 UTC 日期检索影像与 NASA GEDI，可导出区域 GeoTIFF、GEDI 足迹参数与对齐栅格，也可保存指定的整瓦片、元数据或官方原始产品。可在绘制区域前登录所需平台，勾选附带来源后，主数据与附带数据共用研究区和 UTC 日期。GEDI 可跟随本次选中的主 GeoTIFF 网格，并附带采样其像元值。登录与保存规则见 [账号说明](docs/ACCOUNTS.md)，详细用法见 [联合下载](docs/BATCH.md) 和 [GEDI 参数与影像对齐](docs/GEDI.md)。
 
 ## 安装与首次试用
 
-1. 从 [GitHub 稳定版发布页](https://github.com/yaluncoco/starmap-downloader/releases/tag/v1.7.1) 下载 `StarmapDownloader-Setup-1.7.1-win-x64.exe`；源码构建产物位于 `dist/`，也可直接运行 `dist/StarmapDownloader/StarmapDownloader.exe`。按当前用户安装，无需 Python 或管理员权限；需要 Microsoft Edge WebView2 Evergreen Runtime。安装包未签名，可对照同目录的 `.sha256` 文件核对完整性。卸载不删除另存的输出和配置。
+1. 从 [GitHub 稳定版发布页](https://github.com/yaluncoco/starmap-downloader/releases/tag/v1.8.0) 下载 `StarmapDownloader-Setup-1.8.0-win-x64.exe`；源码构建产物位于 `dist/`，也可直接运行 `dist/StarmapDownloader/StarmapDownloader.exe`。按当前用户安装，无需 Python 或管理员权限；需要 Microsoft Edge WebView2 Evergreen Runtime。安装包未签名，可对照同目录的 `.sha256` 文件核对完整性。卸载不删除另存的输出和配置。
 2. 首次打开自动弹出「登录账号」，在同一窗口按需填写 NASA Earthdata、Sentinel Hub、CDSE OData / S3 的完整信息。登录成功后默认加密保存，下次启动自动恢复。可选择「暂不登录，选择数据」使用公开数据；未登录且没有可继续的公开数据任务时，每次启动仍会弹出登录窗口。左侧只保留数据、日期、研究区和保存位置。再在「数据来源与下载方式」选择主路线：
 
    | 路线 | 文件 | 认证 |
@@ -36,7 +36,7 @@ Windows 10/11 x64 桌面工具。按研究区和 UTC 日期检索影像与 NASA 
 
 点击右上角「检查更新」。配置了公开更新渠道的安装版只查询 GitHub 稳定版，不会在后台自动检查，不需要 GitHub 登录，也不会发送影像账号或密钥。有新版时，可打开发布页或点击「下载并校验」。校验通过后，在保存文件夹中找到安装包；先等影像任务结束并关闭软件，再手动安装。校验失败不会保存安装包，也不会替换上一次成功下载的文件。
 
-当前稳定版为 1.7.1，可覆盖安装公开 1.7.0 / 1.6.0 / 1.5.1 / 1.5.0 / 1.4.3 / 1.4.2 / 1.4.1 / 1.1 以及本地 1.2.0 / 1.3.0 / 1.4.0。用过本地预览版的用户，可手动运行稳定版安装包覆盖安装。无更新渠道的本地开发构建会明确提示。版本变化见 [CHANGELOG.md](CHANGELOG.md)。本版测试范围与实传结果见 [验证记录](docs/VALIDATION.md)。
+当前稳定版为 1.8.0，可覆盖安装公开 1.7.1 / 1.7.0 / 1.6.0 / 1.5.1 / 1.5.0 / 1.4.3 / 1.4.2 / 1.4.1 / 1.1 以及本地 1.2.0 / 1.3.0 / 1.4.0。用过本地预览版的用户，可手动运行稳定版安装包覆盖安装。无更新渠道的本地开发构建会明确提示。版本变化见 [CHANGELOG.md](CHANGELOG.md)。本版测试范围与实传结果见 [验证记录](docs/VALIDATION.md)。
 
 ### 稳定下载与中断继续
 
@@ -46,7 +46,7 @@ Windows 10/11 x64 桌面工具。按研究区和 UTC 日期检索影像与 NASA 
 
 ### 完整城市与逐月影像
 
-在「按城市」选择行政范围，再选开始与结束月份。北京等直辖市包含完整下辖县区；边界可另存为整城 SHP。公开区域、Sentinel Hub 和官方 S3 区域三条路线支持跨年逐月拼接，每月一份主影像，配套研究图层和逐像元来源单独保存；只用本月产品补齐，空月明确记录。月内默认云量较低优先，可手动调整产品及顺序。详细规则、内置 2024 年边界来源和文件结构见 [城市逐月下载说明](docs/CITY_MONTHLY.md)。
+在「按城市」选择行政范围，再选开始与结束月份。北京等直辖市包含完整下辖县区；边界可另存为整城 SHP。公开区域、Sentinel Hub 和官方 S3 三条路线支持跨年逐月处理：每月先下载全部已选整景，通过校验后本地拼接整月影像，最后按完整城市边界裁剪。整景、整月中间影像及每月一份城市成果分别保存，各阶段可以继续。配套研究图层与逐像元来源单独保存；只用本月产品补齐，空月明确记录。月内默认云量较低优先，可手动调整产品及顺序。详细规则、内置 2024 年边界来源和文件结构见 [城市逐月下载说明](docs/CITY_MONTHLY.md)。
 
 规划、检索、下载与继续下载均可通过地图外任务栏取消。后台规划时可继续选片和排序，旧计划取消后采用最新选择。未完成任务可继续，也可取消并移除入口；已下载文件及有效缓存保留。标准和卫星底图带备用线路与校验缓存，并限制同时加载数量；联网失败时提供本地行政边界及重试。
 
@@ -182,27 +182,27 @@ python -m venv .venv
 # 同一 SHP 和 UTC 日期检索 Sentinel-2、GEDI、DEM，并实传公开 Sentinel-2 + DEM。
 .\.venv\Scripts\python.exe -X utf8 scripts\live_batch.py --exe .\dist\StarmapDownloader\StarmapDownloader.exe --output .\verification\batch\packaged-live
 # 安装后复测联合下载；需在干净测试用户中运行。
-.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.7.1-win-x64.exe -Batch
+.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.8.0-win-x64.exe -Batch
 # 可选：在干净测试用户中验证从上版升级、保留输出设置以及卸载。
 # -Slc 实传 VV 样本；同时加 -SlcDual 会再实传 VV+VH 样本（共约 2.50 GB）。
-.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.7.1-win-x64.exe -Slc -SlcDual -ModisSmoke
+.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.8.0-win-x64.exe -Slc -SlcDual -ModisSmoke
 # 若有旧的本地预览版 1.12.0，复测编号重置下的覆盖安装时加 -ReplacePreview -UpgradeFrom 'C:\备份\StarmapDownloader-Setup-1.12.0-win-x64.exe'。
 # 独立 MODIS 参考需要可选 pyhdf；--fetch 下载缺失的已锁定的源对象。
 .\.venv\Scripts\python.exe -X utf8 scripts\check_modis_reference.py .\verification\modis-next-source --fetch
-.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.7.1-win-x64.exe -Modis
+.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.8.0-win-x64.exe -Modis
 # 安装后复测 ESA WorldCover 三类数据、独立源文件、真实缺层、损坏重下与界面。
-.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.7.1-win-x64.exe -WorldCover
+.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.8.0-win-x64.exe -WorldCover
 # 安装后复测 L2A 整瓦片和 L3 季度镶嵌，再验证卸载保留。
-.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.7.1-win-x64.exe -S2Tiles
+.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.8.0-win-x64.exe -S2Tiles
 # 安装、复测 RTC 的 IW 两组极化 + 覆盖边缘；-RtcEw 还要求一份指定 EW 样本。
-.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.7.1-win-x64.exe -RtcEw
+.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.8.0-win-x64.exe -RtcEw
 # 雷达测量 TIFF、Landsat 红波段是可选大样本；-Live 也运行新增光学路线、RTC IW 和整 DEM
-.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.7.1-win-x64.exe -Live -RadarMeasurement -LandsatMeasurement -S5pAllNrti
+.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.8.0-win-x64.exe -Live -RadarMeasurement -LandsatMeasurement -S5pAllNrti
 # 复测 9 类 Sentinel-3 样本、3 条 Sentinel-5P 处理流和卸载保留
-.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.7.1-win-x64.exe -Sen3 -S5p
+.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.8.0-win-x64.exe -Sen3 -S5p
 # -Sen3LargeFiles 也实传 WST（约 647 MB）与 SRAL（约 2.52 GB）。
 # -Sen3FullRbt 覆盖所有 11 类样本，并另外验证 RBT 的全部 98 个文件。两种模式都需要较长时间。
-.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.7.1-win-x64.exe -Sen3FullRbt
+.\scripts\check_installer.ps1 -Installer .\dist\StarmapDownloader-Setup-1.8.0-win-x64.exe -Sen3FullRbt
 ```
 
 本机已保存账号的 Sentinel-2 完整性可用以下脚本验证。它使用北京 2024-06-10 的同一 50TMK 产品，保存并恢复输出设置；运行时请关闭其他软件会话。`--source-zip` 可复用已下载的同一官方完整 SAFE，`--regional-only` 只测试两条区域路线、完整包对照和真实云区，不重新测试 S3 / GEDI。缺省不加这两个参数时，还会使用保存账号实传完整 SAFE、S3 与 GEDI。各平台的失败分别记录，凭据不会写入报告。

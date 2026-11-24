@@ -33,6 +33,52 @@ def write(path, value):
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
 
 
+def verify_stage_inputs(result, month):
+    document = json.loads(Path(result["manifest"]).read_text(encoding="utf-8"))
+    stages = document["stages"]
+    assert document["status"] == "completed" and document["pipeline"] == "download-scenes-mosaic-clip"
+    assert [item["id"] for item in stages] == ["download_scenes", "local_mosaic", "clip_region"]
+    assert all(item["status"] == "completed" for item in stages)
+    assert stages[0]["completed_at"] <= stages[1]["started_at"]
+    assert stages[1]["completed_at"] <= stages[2]["started_at"]
+    assert len(document["sources"]) == stages[0]["result"]["selected_scene_products"] == stages[0]["result"]["verified_scene_products"]
+    assert {item["product"] for item in document["sources"]} == set(document["selected_products"])
+    raw_files, raw_bytes, provider_sha256 = 0, 0, 0
+    for source in document["sources"]:
+        assert source["status"] == "verified"
+        manifest = json.loads(Path(source["manifest"]).read_text(encoding="utf-8"))
+        assert manifest["status"] == "completed"
+        for item in source["files"]:
+            path = Path(item["path"])
+            receipt = json.loads(path.with_suffix(".starmap.json").read_text(encoding="utf-8"))
+            with path.open("rb") as stream:
+                digest = hashlib.file_digest(stream, "sha256").hexdigest()
+            assert digest == receipt["sha256"] and path.stat().st_size == receipt["size"]
+            expected = receipt.get("source_checksums", {}).get("SHA-256")
+            if expected:
+                assert digest == expected
+                provider_sha256 += 1
+            raw_files += 1
+            raw_bytes += path.stat().st_size
+    whole = result["whole_mosaic"]
+    assert len(whole["files"]) == 1
+    file = whole["files"][0]
+    paths = {"analysis": file["path"], **file["bundle"]}
+    receipt = json.loads(Path(file["path"]).with_suffix(".starmap.json").read_text(encoding="utf-8"))
+    for role, value in paths.items():
+        path = Path(value)
+        expected = receipt if role == "analysis" else receipt["bundle"][role]
+        with path.open("rb") as stream:
+            assert hashlib.file_digest(stream, "sha256").hexdigest() == expected["sha256"]
+        assert path.stat().st_size == expected["size"]
+    table = json.loads(Path(paths["sources"]).read_text(encoding="utf-8"))
+    assert all(item["acquisition_utc"][:7] == month for item in table["sources"])
+    return paths, {"status": "passed", "ordered_stages": stages,
+                   "selected_scene_products": len(document["sources"]), "complete_source_files": raw_files,
+                   "complete_source_bytes": raw_bytes, "provider_sha256_verified_files": provider_sha256,
+                   "whole_month_files_sha256_verified": True}
+
+
 def verify_month(row, geometry):
     result = row["result"]
     assert result and len(result["files"]) == 1, row
@@ -43,9 +89,18 @@ def verify_month(row, geometry):
     counts, analysis_counts = collections.Counter(), collections.Counter()
     valid_pixels, raw_pixels, outside_pixels, aoi_pixels, partial_pixels = 0, 0, 0, 0, 0
     band_pixels = np.zeros(len(RESEARCH_BANDS), dtype=np.int64)
+    whole_paths, staged = verify_stage_inputs(result, row["month"]) if result.get("pipeline") == "download-scenes-mosaic-clip" else ({}, None)
     with ExitStack() as stack:
         datasets = {role: stack.enter_context(rasterio.open(path)) for role, path in paths.items() if role != "sources"}
+        whole_datasets = {role: stack.enter_context(rasterio.open(path)) for role, path in whole_paths.items() if role != "sources"}
         main = datasets["analysis"]
+        if whole_datasets:
+            full = whole_datasets["analysis"]
+            assert full.crs == main.crs and full.res == main.res
+            assert full.width > main.width and full.height > main.height
+            full_col = (main.transform.c - full.transform.c) / main.res[0]
+            full_row = (full.transform.f - main.transform.f) / main.res[1]
+            assert abs(full_col - round(full_col)) < 1e-5 and abs(full_row - round(full_row)) < 1e-5
         assert main.count == datasets["unmasked"].count == 10
         assert main.descriptions == datasets["unmasked"].descriptions == tuple(RESEARCH_BANDS)
         assert main.dtypes == datasets["unmasked"].dtypes == ("float32",) * 10
@@ -71,6 +126,13 @@ def verify_month(row, geometry):
             assert np.all(source[~inside] == 0)
             assert np.all(raw[:, ~inside] == NODATA) and np.all(values[:, ~inside] == NODATA)
             assert np.all(scl[~inside] == 255)
+            if whole_datasets:
+                full_window = rasterio.windows.Window(window.col_off + round(full_col), window.row_off + round(full_row), window.width, window.height)
+                for role, observed in (("analysis", values), ("unmasked", raw), ("scl", scl[None]), ("source", source[None])):
+                    expected = whole_datasets[role].read(window=full_window, boundless=True,
+                        fill_value=255 if role == "scl" else 0 if role == "source" else NODATA)
+                    expected[:, ~inside] = 255 if role == "scl" else 0 if role == "source" else NODATA
+                    np.testing.assert_array_equal(observed, expected)
             assert np.all(np.isfinite(raw))
             available = raw != NODATA
             present = source > 0
@@ -92,6 +154,26 @@ def verify_month(row, geometry):
             analysis_counts.update({int(key): int(value) for key, value in zip(unique, pixels)})
         grid = {"width": main.width, "height": main.height, "epsg": main.crs.to_epsg(),
                 "transform": list(main.transform)[:6], "bounds": list(main.bounds)}
+        if whole_datasets:
+            full_source = whole_datasets["source"]
+            full_converter = Transformer.from_crs(full_source.crs, 4326, always_xy=True)
+            found_outside = False
+            for _, full_window in full_source.block_windows(1):
+                data = full_source.read(1, window=full_window)
+                if not (data > 0).any():
+                    continue
+                y, x = np.mgrid[0:int(full_window.height), 0:int(full_window.width)]
+                east = full_source.transform.c + (x + full_window.col_off + .5) * full_source.res[0]
+                north = full_source.transform.f - (y + full_window.row_off + .5) * full_source.res[1]
+                lon, lat = full_converter.transform(east, north)
+                if ((data > 0) & ~contains_xy(geometry, lon, lat)).any():
+                    found_outside = True
+                    break
+            assert found_outside
+            staged.update(all_city_raster_blocks_equal_clipped_whole_month=True,
+                          whole_month_has_valid_pixels_outside_city=True,
+                          whole_month_grid={"width": full_source.width, "height": full_source.height,
+                                            "epsg": full_source.crs.to_epsg()})
     assert aoi_pixels > 0 and outside_pixels > 0 and raw_pixels > 0
     assert valid_pixels == receipt["valid_pixels"] and raw_pixels == receipt["unmasked_valid_pixels"]
     assert result["used_dates"] and all(date[:7] == row["month"] for date in result["used_dates"])
@@ -113,7 +195,8 @@ def verify_month(row, geometry):
             "analysis_pixels_by_source": dict(analysis_counts), "partial_spectral_pixels": partial_pixels,
             "unmasked_band_pixels": {band: int(count) for band, count in zip(RESEARCH_BANDS, band_pixels)},
             "used_dates": result["used_dates"], "paths": paths, "sha256": hashes,
-            "pixel_contract": "all raster blocks checked against full WGS84 city, SCL and backup"}
+            "pixel_contract": "all raster blocks checked against full WGS84 city, SCL and backup",
+            **({"staged_pipeline": staged} if staged else {})}
 
 
 def browser_check(origin, out, resolution=60):
@@ -218,7 +301,7 @@ def run(args):
             assert resumed_plan["start_month"] == args.start_month and resumed_plan["end_month"] == args.end_month
             resumed_groups = {group["month"]: group for group in definition["groups"]}
             assert all(group["options"]["resolution"] == args.resolution for group in resumed_groups.values() if group["scenes"])
-            resumed, elapsed = job("retry-download", {"job_id": args.resume_job})
+            resumed, elapsed = job("retry-download", {"job_id": args.resume_job}, deadline=args.deadline)
             report["cold_resume"] = {"original_id": args.resume_job, "seconds": elapsed,
                                      "original_geometry_months_products_and_options_restored": True}
             write(out / "report.json", report)
@@ -247,7 +330,7 @@ def run(args):
                 assert plan["fingerprint"] == resumed_plan["fingerprint"], "Cold resume must retain the exact original monthly plan"
                 result, elapsed = resumed, report["cold_resume"]["seconds"]
             else:
-                result, elapsed = job("monthly-download", request)
+                result, elapsed = job("monthly-download", request, deadline=args.deadline)
             report["download_seconds"] = elapsed
             assert all(row["status"] == "completed" for row in result["months"])
             assert load_aoi(Path(result["folder"]) / "研究区.shp").equals(geometry)
@@ -259,7 +342,7 @@ def run(args):
                 product_paths.update(str(Path(result["folder"]) / ("研究区" + suffix))
                                      for suffix in (".shp", ".shx", ".dbf", ".prj", ".cpg"))
                 previous = {path: Path(path).stat().st_mtime_ns for path in product_paths}
-                repeated, elapsed = job("monthly-download", request)
+                repeated, elapsed = job("monthly-download", request, deadline=args.deadline)
                 assert all(file["status"] == "skipped" for file in repeated["files"])
                 assert all(Path(path).stat().st_mtime_ns == timestamp for path, timestamp in previous.items())
                 report["reuse"] = {"seconds": elapsed, "skipped_months": len(repeated["files"]),
@@ -282,6 +365,7 @@ def main():
     parser.add_argument("--end-month", default="2026-05")
     parser.add_argument("--resolution", choices=(10, 20, 60), type=int, default=60)
     parser.add_argument("--download", action="store_true")
+    parser.add_argument("--deadline", type=int, default=7200, help="Download job deadline in seconds; full scenes may need longer")
     parser.add_argument("--reuse", action="store_true")
     parser.add_argument("--browser", action="store_true")
     parser.add_argument("--copy-accounts", action="store_true", help="Copy the Windows encrypted vault into isolated verification settings")

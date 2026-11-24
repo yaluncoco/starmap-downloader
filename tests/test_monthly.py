@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import rasterio
-from shapely.geometry import shape
+from shapely.geometry import box, shape
 
 from conftest import BBOX, feature
 from core.download_tasks import DownloadTasks
@@ -31,7 +31,9 @@ OPTIONS = {"mode": "research", "layout": "mosaic", "resolution": 10, "max_cloud"
 
 
 def search(client, provider, *, end="2025-02"):
-    provider.catalogue = [feature(DEC, "2024-12-20T03:16:50Z", cloud=20), feature(JAN, "2025-01-10T03:16:50Z", cloud=1)]
+    extent = box(116.349, 39.899, 116.356, 39.906)
+    provider.catalogue = [feature(DEC, "2024-12-20T03:16:50Z", cloud=20, footprint=extent),
+                          feature(JAN, "2025-01-10T03:16:50Z", cloud=1, footprint=extent)]
     client.post("connect", {"client_id": "mock-client", "client_secret": "mock-secret"})
     aoi = client.post("aoi", {"coordinates": BBOX})
     request = {"geometry": aoi["geometry"], "profile": "s2-process", **PERIOD, "end_month": end, "max_cloud": 100}

@@ -701,7 +701,10 @@ class Service:
                 return self._source_plans[key]
         if profile == GEDI:
             return build_gedi_plan(geometry, scenes, options, criteria)
-        if "transport" in options:
+        if options.get("monthly_pipeline") == "download-scenes-mosaic-clip":
+            from .monthly_scenes import build_monthly_scene_plan
+            planned = build_monthly_scene_plan(geometry, scenes, options, cancel=cancel)
+        elif "transport" in options:
             planned = raw_plan(geometry, scenes, options)
         elif options.get("layout") == "mosaic":
             planned = build_mosaic_plan(geometry, scenes, options, cancel=cancel)
@@ -727,6 +730,10 @@ class Service:
             planned = self._planned_source(profile, geometry, options, scenes, None, cancel=cancel)
             if plan.get("kind") != "pending" and planned[0]["fingerprint"] != plan["fingerprint"]:
                 raise UserError("原下载计划与当前软件的区域网格或产品身份不一致；请重新选择任务，已完成原件仍可复用。")
+        if options.get("monthly_pipeline") == "download-scenes-mosaic-clip":
+            from .monthly_scenes import download_monthly_scenes
+            return download_monthly_scenes(geometry, scenes, options, output_dir, auth=self.auth,
+                                           s3_auth=self.s3_auth, cancel=cancel, progress=progress, planned=planned)
         if profile == S2_NATIVE:
             return download_native_mosaic(geometry, scenes, options, output_dir, self.s3_auth, cancel=cancel, progress=progress, planned=planned)
         if profile == GEDI:

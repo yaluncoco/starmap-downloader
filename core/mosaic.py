@@ -92,14 +92,14 @@ def _crop(tile, mask, resolution):
     return Tile(tile.index, tile.row + y0, tile.col + x0, x1 - x0, y1 - y0, bounds, True), (slice(y0, y1), slice(x0, x1))
 
 
-def build_mosaic_plan(geometry, scenes, options, *, tile_size=None, cancel=None):
+def build_mosaic_plan(geometry, scenes, options, *, tile_size=None, cancel=None, epsg=None):
     check_cancel(cancel)
     rows = _rows(geometry, scenes, options)
     identities = _identities(rows, options)
     coverage = coverage_summary(geometry, rows, [row["key"] for row in rows], priority_option(options), cancel=cancel)
     public = options.get("profile") == PUBLIC
     native = options.get("profile") == NATIVE
-    plan, tiles, projected = build_plan(geometry, options, 1, tile_size=tile_size or (512 if public else 1024), cancel=cancel)
+    plan, tiles, projected = build_plan(geometry, options, 1, tile_size=tile_size or (512 if public else 1024), cancel=cancel, epsg=epsg)
     regions = _projected_regions(geometry, rows, plan["epsg"])
     for region in regions:
         prepare(region)
@@ -156,7 +156,7 @@ def _valid(raw, scl, options):
     valid = present.all(axis=0)
     if options["mask_clouds"]:
         valid &= np.isin(scl, CLEAR_CLASSES)
-    if options["mode"] == "ndvi":
+    if options.get("allocation_mode", options["mode"]) == "ndvi":
         red = raw[options["bands"].index("B04")]
         nir = raw[options["bands"].index("B08")]
         valid &= np.abs(red + nir) > 1e-6
@@ -614,6 +614,7 @@ def download_mosaic(geometry, scenes, options, output_dir, *, auth=None, cancel=
                       "reflectance_conversion": "BOA reflectance = (native DN + XML BOA_ADD_OFFSET) / XML BOA_QUANTIFICATION_VALUE" if native else "BOA reflectance = source DN * STAC scale + offset" if public else "Process API BOA reflectance; harmonizeValues=false",
                       **({"native_sources": record["native_sources"]} if native else {}),
                       "identity_note": "Only selected products are used. safe_id identifies the complete product; mgrs_and_utc cannot distinguish an unreported processing version."}
+        provenance.update(getattr(reader, "provenance", {}))
         report("逐块核对光谱、SCL、像元来源与 SHA-256", .94)
         audited = bundle.publish(expected, provenance, cancel)
         record.update(status="completed", **audited)

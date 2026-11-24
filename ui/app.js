@@ -740,7 +740,7 @@ function showDownloadPlan() {
   try{
     const p=state.plan;
     if(p.kind==="monthly"){
-      $("planDetails").innerHTML=Monthly.planHtml(p);$("planNote").textContent="每个月独立输出一份拼接影像，配套图层按所选导出内容保存。月份目录保留实际采集时间和像元来源；根目录保存完整研究区 SHP 及逐月记录。几何覆盖率不代表无云。";
+      $("planDetails").innerHTML=Monthly.planHtml(p);$("planNote").textContent="每月先下载全部已选整景，完成校验后本地拼成整月影像，最后按完整边界裁剪。保留整景、整月中间影像及城市裁剪成果；配套图层保留实际采集时间和像元来源，根目录保存完整研究区 SHP。完整原始波段不等于完整 SAFE；Sentinel Hub 使用整景导出。几何覆盖率不代表无云。";
       renderPlanFolder();if(!$("downloadDialog").open)$("downloadDialog").showModal();return;
     }
     if(p.kind==="batch"){
