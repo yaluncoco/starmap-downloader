@@ -17,6 +17,8 @@ _ACQUISITION = "按相同 UTC 日期范围检索采集数据；不保证各卫�
 _OPTICAL = {"mode": "research", "resolution": 10, "max_cloud": 20, "mask_clouds": True,
             "layout": "mosaic", "priority": "cloud", "fill_gaps": True}
 SOURCES = [
+    _source("s2-cdse-zip", "Sentinel-2 L2A · 官方整景 ZIP（与网页一致）", "光学影像", "native", _ACQUISITION,
+            auth="cdse", modes=["original"], options={"mode": "original", "max_cloud": 20, "transport": "odata"}),
     _source("gedi-earthdata", "NASA GEDI · 高度 / 森林结构 / 生物量", "激光与森林参数", "gedi",
             "足迹按相同 UTC 日期范围筛选；L3/L4B 按整个汇总期重叠匹配。", auth="earthdata",
             options={"collection": GEDI_DEFAULT, "mode": "aligned", "quality": "recommended", "nondegraded": True,

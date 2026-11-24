@@ -22,7 +22,7 @@ from .local_paths import io_path
 from .scene_identity import utc_time
 from .spatial_selection import available, coverage_summary, priority_option
 
-PROFILES = frozenset({"s2-process", "s2-earth-search", "s2-cdse-s3"})
+PROFILES = frozenset({"s2-cdse-zip", "s2-process", "s2-earth-search", "s2-cdse-s3"})
 MAX_MONTHS = 120
 SCHEMA = 2
 
@@ -92,7 +92,7 @@ class MonthlyWorkflow:
 
         profile = _profile(value)
         if profile not in PROFILES:
-            raise UserError("按月拼接支持 Sentinel-2 的公开区域裁剪、Sentinel Hub 和官方 S3 区域路线。")
+            raise UserError("按月下载支持 Sentinel-2 的官方整景 ZIP、公开区域裁剪、Sentinel Hub 和官方 S3 路线。")
         geometry, aoi = self.service._request_aoi(value)
         dates = month_range(value.get("start_month"), value.get("end_month"))
         groups = [{**period, "criteria": _criteria({**period, "max_cloud": value.get("max_cloud", 20)}, profile),
@@ -175,10 +175,14 @@ class MonthlyWorkflow:
         if coverage or not scenes:
             return {"priority": priority_option(supplied)}, scenes
         options = self.service._selection_options(profile, group["criteria"], supplied, scenes)
+        if profile == "s2-cdse-zip" and options["mode"] == "original":
+            return options, scenes
         if options["layout"] != "mosaic":
             raise UserError("按月下载每月输出一份拼接影像，请使用区域拼接方式。")
         options["monthly_pipeline"] = "download-scenes-mosaic-clip"
         options["profile"] = profile
+        if profile == "s2-cdse-zip":
+            options["selected_month"] = group["month"]
         return options, scenes
 
     def coverage(self, value, *, cancel=None):
@@ -221,8 +225,10 @@ class MonthlyWorkflow:
                     progress(f"规划 {group['month']} 的完整研究区", index / len(state["groups"]))
                 plan = self.service._plan_source(state["profile"], geometry, options, scenes, group["criteria"], cancel=cancel)
                 # The frozen plan needs its contract and grid, not duplicate city polygons.
-                compact = {key: plan[key] for key in ("kind", "fingerprint", "width", "height", "epsg", "crs_label", "bounds",
-                           "resolution", "bytes_per_scene", "dates", "source_count", "estimated_pu")}
+                archive_only = state["profile"] == "s2-cdse-zip" and plan["kind"] == "original"
+                compact = copy.deepcopy(plan) if archive_only else {
+                    key: plan[key] for key in ("kind", "fingerprint", "width", "height", "epsg", "crs_label", "bounds",
+                                               "resolution", "bytes_per_scene", "dates", "source_count", "estimated_pu")}
                 compact["requires"] = list(plan.get("requires", [])) + (["sentinel-hub"] if state["profile"] == "s2-process" else [])
                 compact["coverage_percent"] = plan["coverage"]["coverage_percent"]
                 for key in ("pipeline", "pipeline_schema", "whole_mosaic_bytes", "staging_required_bytes"):
@@ -230,7 +236,7 @@ class MonthlyWorkflow:
                         compact[key] = plan[key]
                 frozen["plan"] = compact
                 requirements.update(compact["requires"])
-                preview.update(plan=compact, estimated_bytes=plan["bytes_per_scene"],
+                preview.update(plan=compact, estimated_bytes=(plan.get("estimated_bytes") or 0) if archive_only else plan["bytes_per_scene"],
                                native_source_bytes=plan.get("native_source_bytes", 0),
                                whole_mosaic_bytes=plan.get("whole_mosaic_bytes", 0),
                                staging_required_bytes=plan.get("staging_required_bytes", 0), options=options)
@@ -243,6 +249,7 @@ class MonthlyWorkflow:
                                           for group in selected]})
         region = state["aoi"].get("region", {})
         label = re.sub(r"[^\w\u3400-\u9fff.-]+", "_", state["aoi"]["name"])[:40]
+        archive_only = all(not row["scenes"] or row["options"]["mode"] == "original" for row in selected)
         plan = {"kind": "monthly", "schema": SCHEMA, "profile": state["profile"], "fingerprint": fingerprint,
                 "monthly_id": state["id"], "start_month": state["start_month"], "end_month": state["end_month"],
                 "months": previews, "scene_count": sum(len(group["scenes"]) for group in selected),
@@ -251,11 +258,13 @@ class MonthlyWorkflow:
                 "native_source_bytes": sum(row.get("native_source_bytes", 0) for row in previews),
                 "whole_mosaic_bytes": sum(row.get("whole_mosaic_bytes", 0) for row in previews),
                 "staging_required_bytes": sum(row.get("staging_required_bytes", 0) for row in previews),
-                "pipeline": "download-scenes-mosaic-clip",
+                "pipeline": "download-zip" if archive_only else "download-scenes-mosaic-clip",
+                "archive_only": archive_only,
                 "estimated_pu": sum((row.get("plan") or {}).get("estimated_pu") or 0 for row in previews),
                 "boundary_name": state["aoi"]["name"], "region": region,
                 "folder_name": f"{label}_月度_{state['start_month']}_{state['end_month']}_{fingerprint}",
-                "time_note": "UTC 逐月处理；先下载本月全部已选整景，再本地整月拼接，最后按完整边界裁剪；只使用该月产品。"}
+                "time_note": ("UTC 逐月保存本月全部已选官方完整 SAFE ZIP；产品版本和文件名与网页一致。"
+                              if archive_only else "UTC 逐月处理；先下载本月全部已选整景，再本地整月拼接，最后按完整边界裁剪；只使用该月产品。")}
         check_cancel(cancel)
         with self.service.lock:
             if not self.state or self.state["id"] != state["id"]:

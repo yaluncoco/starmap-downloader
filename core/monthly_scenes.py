@@ -36,6 +36,7 @@ from .public_download import read_on_grid
 from .raw_download import download_original, raw_plan
 from .research_bundle import NODATA, SCL_NODATA, bundle_paths
 from .scene_identity import expected_products
+from .safe_zip import PROFILE as ZIP, prepare_zip_source, zip_source_plan
 from .spatial_selection import footprint, polygon_area
 
 PIPELINE = "download-scenes-mosaic-clip"
@@ -102,6 +103,9 @@ def build_monthly_scene_plan(geometry, scenes, options, *, cancel=None):
         if options["profile"] == PUBLIC:
             planned = _public_source_plan(scene, options)
             extents.append(_grid_footprint(scene["public"]["assets"][options["bands"][0]]))
+        elif options["profile"] == ZIP:
+            planned = zip_source_plan(scene, options)
+            extents.append(footprint(scene))
         elif options["profile"] == NATIVE:
             planned = native_source_plan(scene, options)
             extents.append(footprint(scene))
@@ -114,7 +118,8 @@ def build_monthly_scene_plan(geometry, scenes, options, *, cancel=None):
             source_bytes += planned[0]["bytes_per_scene"]
             pu += planned[0]["estimated_pu"]
         else:
-            source_bytes += sum(target.get("bytes") or 0 for target in planned["targets"])
+            source_bytes += (planned.get("estimated_bytes") or 0) if options["profile"] == ZIP else sum(
+                target.get("bytes") or 0 for target in planned["targets"])
             source_unknown |= any(not target.get("bytes") for target in planned["targets"])
     whole_options = _raw_options(options)
     whole_estimate = build_plan(unary_union(extents), whole_options, 1, tile_size=1024,
@@ -139,7 +144,8 @@ def build_monthly_scene_plan(geometry, scenes, options, *, cancel=None):
                 (whole_estimate["bytes_per_scene"] + city[0]["bytes_per_scene"]) * 3.2 + 128 * 1024**2),
             "source_objects": sum(len(entry["targets"]) if isinstance(entry, dict) else entry[0]["requests"]
                                   for entry in source_plans),
-            "requires": ["cdse-s3"] if options["profile"] == NATIVE else
+            "requires": ["odata"] if options["profile"] == ZIP else
+                        ["cdse-s3"] if options["profile"] == NATIVE else
                         ["sentinel-hub"] if options["profile"] == "s2-process" else [],
             "source_note": "先下载本月全部已选整景；再只读本地文件拼接；最后按原始完整研究区裁剪。"}
     return plan, {"rows": rows, "source_plans": source_plans, "city": city,
@@ -186,7 +192,7 @@ class _LocalSceneReader:
                                 or list(ds.shape) != asset["shape"] or ds.nodata != asset["nodata"]
                                 or not ds.transform.almost_equals(Affine(*asset["transform"]), precision=1e-6)):
                             raise UserError("已下载整景的波段网格与所选目录不一致。")
-                elif self.options["profile"] == NATIVE:
+                elif self.options["profile"] in (NATIVE, ZIP):
                     for band, ds in datasets.items():
                         grid = record["metadata"]["grids"][NATIVE_RESOLUTION[band]]
                         if (ds.count != 1 or ds.crs is None or ds.crs.to_epsg() != grid["epsg"]
@@ -224,7 +230,7 @@ class _LocalSceneReader:
                                for band in self.options["bands"]])
             quality = np.where(np.isfinite(inputs["SCL"]), inputs["SCL"], SCL_NODATA)
             methods = ["safe_id"]
-        elif self.options["profile"] == NATIVE:
+        elif self.options["profile"] in (NATIVE, ZIP):
             values, quality = [], None
             metadata = record["metadata"]
             for band, ds in datasets.items():
@@ -312,7 +318,7 @@ class _MonthMosaicReader:
 
 
 def download_monthly_scenes(geometry, scenes, options, output_dir, *, auth=None, s3_auth=None,
-                            cancel=None, progress=None, planned=None):
+                            raw_auth=None, cancel=None, progress=None, planned=None):
     plan, inputs = planned or build_monthly_scene_plan(geometry, scenes, options, cancel=cancel)
     rows = copy.deepcopy(inputs["rows"])
     folder = io_path(output_dir) / plan["folder_name"]
@@ -369,7 +375,11 @@ def download_monthly_scenes(geometry, scenes, options, output_dir, *, auth=None,
                 f"{index + 1}/{len(rows)} 景 · {scene['tiles'][0]} · {scene['date']} · {message}",
                 (index + fraction) / len(rows), detail)
             metadata, matches = {}, ["safe_id"]
-            if options["profile"] in (PUBLIC, NATIVE):
+            if options["profile"] == ZIP:
+                downloaded = download_original(footprint(scene), source_plan, str(folder / "原始ZIP"), raw_auth,
+                                               cancel=cancel, progress=source_progress)
+                paths = {}
+            elif options["profile"] in (PUBLIC, NATIVE):
                 downloaded = download_original(footprint(scene), source_plan, str(folder / "原始影像"), None,
                                                s3_auth=s3_auth, cancel=cancel, progress=source_progress)
                 paths = {target["asset"]: Path(file["path"]) for target, file in
@@ -398,6 +408,20 @@ def download_monthly_scenes(geometry, scenes, options, output_dir, *, auth=None,
         finish({"selected_scene_products": len(rows), "verified_scene_products": len(records)})
 
         start(1)
+        if options["profile"] == ZIP:
+            for index, scene in enumerate(rows):
+                record = prepare_zip_source(scene, records[scene["key"]]["result"], options,
+                    folder / ".download-cache" / "SAFE本地波段", cancel=cancel,
+                    progress=lambda message, fraction=0, i=index: report(
+                        f"{i + 1}/{len(rows)} 景 · {message}", .1 * (i + fraction) / len(rows)))
+                actual = record["scene"]
+                if options.get("selected_month") and actual["date"][:7] != options["selected_month"]:
+                    raise UserError("ZIP 元数据中的真实瓦片采集日期不属于所选月份，未混入其他月份。")
+                if (options.get("selection_start") and actual["date"] < options["selection_start"]
+                        or options.get("selection_end") and actual["date"] > options["selection_end"]):
+                    raise UserError("ZIP 元数据中的真实瓦片采集日期超出所选范围，未采用该来源。")
+                rows[index] = actual
+                records[scene["key"]] = record
         reader = _LocalSceneReader(records, options, plan, cancel)
         for scene in rows:
             extent = reader.extent(scene)

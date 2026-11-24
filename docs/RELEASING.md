@@ -14,12 +14,14 @@ $asset = ".\dist\StarmapDownloader-Setup-$version-win-x64.exe"
 .\scripts\check_installer.ps1 -Installer $asset -UpgradeFrom 'C:\备份\上一版完整安装包.exe' -UpdateRepository $repo
 ```
 
-当前构建脚本会强制检查 GEDI、联合下载、统一账号界面、研究包说明与图标资源（`--require-gedi --require-batch --require-accounts --require-monthly`）。1.5.0 起还检查空间选择脚本与官方 S3 拼接入口。打包后还应验证同一区域与共同日期的真实联网流程：
+当前构建脚本会强制检查 GEDI、联合下载、统一账号界面、研究包说明、月度流程、默认官方完整 ZIP 与图标资源（`--require-gedi --require-batch --require-accounts --require-monthly --require-safe-zip`）。1.5.0 起还检查空间选择脚本与官方 S3 拼接入口。打包后还应验证同一区域与共同日期的真实联网流程：
 
 ```powershell
-.\.venv\Scripts\python.exe -X utf8 scripts\check_package.py .\dist\StarmapDownloader\StarmapDownloader.exe --require-version $version --require-gedi --require-batch --require-accounts --require-monthly --require-update-repository $repo
+.\.venv\Scripts\python.exe -X utf8 scripts\check_package.py .\dist\StarmapDownloader\StarmapDownloader.exe --require-version $version --require-gedi --require-batch --require-accounts --require-monthly --require-safe-zip --require-update-repository $repo
 .\.venv\Scripts\python.exe -X utf8 scripts\live_batch.py --exe .\dist\StarmapDownloader\StarmapDownloader.exe --output .\verification\batch\packaged-live
 ```
+
+`live_safe_zip.py --out verification/safe-zip --local-check --browser-compare` 使用本机已保存的 CDSE 账号，实传一个官方完整 SAFE ZIP，再从真实 Edge 的 Copernicus Browser 网站 origin 请求同一整包入口，比较完整 ZIP 或所有 SAFE 成员字节，并独立对照原生 JP2 窗口。对照会实际下载两份同一完整产品 ZIP；它验证浏览器网络路径与完整产品，不自动操作官网登录和选片控件。文件 CRC、清单散列及原生像元检查的范围分别记录，耗时只报告该次网络条件下的测量结果。
 
 `live_city_monthly.py --out verification/city-monthly --download --reuse --browser` 验证完整北京市 2026-04 至 2026-05 的逐月研究包、全部栅格块的行政边界与质量规则、来源日期、整城 SHP 和真实标准／卫星底图。可通过 `--exe` 检查构建或安装版；测试配置和输出独立保存。官方 S3／Hub 实传需在隔离会话使用当前加密账号，不能把公开路线的实传当作其他来源验证。
 

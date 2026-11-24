@@ -213,6 +213,7 @@ class Handler(BaseHTTPRequestHandler):
                 "/api/check-update": self.server.service.check_update,
                 "/api/open-update-release": self.server.service.open_update_release,
                 "/api/download-update": self.server.service.download_update,
+                "/api/install-update": self.server.service.install_update,
                 "/api/open-link": self.server.service.open_link,
                 "/api/open-folder": self.server.service.open_folder,
                 "/api/preferences": self.server.service.save_preferences,

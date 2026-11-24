@@ -29,7 +29,7 @@ try {
 } finally {
     $env:STARMAP_RELEASE_REPOSITORY=$previousRepository
 }
-$packageArgs=@((Join-Path $package 'StarmapDownloader.exe'),'--require-version',$version,'--require-gedi','--require-batch','--require-accounts','--require-monthly')
+$packageArgs=@((Join-Path $package 'StarmapDownloader.exe'),'--require-version',$version,'--require-gedi','--require-batch','--require-accounts','--require-monthly','--require-safe-zip')
 if ($UpdateRepository) {
     $packageArgs+=@('--require-update-repository',$UpdateRepository)
 } else {
@@ -37,7 +37,7 @@ if ($UpdateRepository) {
 }
 & $python -X utf8 scripts\check_package.py @packageArgs
 if ($LASTEXITCODE -ne 0) { throw 'Packaged startup check failed' }
-foreach ($notice in @('installer\快速开始.txt', 'installer\ChineseSimplified.LICENSE.txt', 'THIRD_PARTY_NOTICES.md', 'docs\GEDI.md', 'docs\BATCH.md', 'docs\ACCOUNTS.md', 'docs\S2_RESEARCH.md', 'docs\CITY_MONTHLY.md')) {
+foreach ($notice in @('installer\快速开始.txt', 'installer\ChineseSimplified.LICENSE.txt', 'THIRD_PARTY_NOTICES.md', 'docs\GEDI.md', 'docs\BATCH.md', 'docs\ACCOUNTS.md', 'docs\S2_RESEARCH.md', 'docs\CITY_MONTHLY.md', 'docs\SAFE_ZIP.md')) {
     Copy-Item -LiteralPath (Join-Path $project $notice) -Destination $package
 }
 $compilerArgs=@("/DAppRoot=$package","/DOutputRoot=$dist","/DAppVersion=$version")

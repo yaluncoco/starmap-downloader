@@ -113,6 +113,7 @@ try {
     $env:LOCALAPPDATA=$userAppData
     $env:PYTHONUTF8='1'
     $pkgArgs=@($exe,'--require-version',$check.RegisteredVersion)
+    if ([version]$check.RegisteredVersion -ge [version]'1.9.0') { $pkgArgs+='--require-safe-zip' }
     if ($UpdateRepository) { $pkgArgs+=@('--require-update-repository',$UpdateRepository) }
     if ($ExpectUpdateStatus) { $pkgArgs+=@('--expect-update-status',$ExpectUpdateStatus) }
     if ($priorSetup) {
@@ -155,7 +156,7 @@ try {
     }
 
     if ($bootstrap.PSObject.Properties.Name -contains 'batch_sources') {
-        $taskExpectedSources=if([version]$check.RegisteredVersion -ge [version]'1.5.0'){24}else{23}
+        $taskExpectedSources=if([version]$check.RegisteredVersion -ge [version]'1.9.0'){25}elseif([version]$check.RegisteredVersion -ge [version]'1.5.0'){24}else{23}
         if ($bootstrap.batch_sources.Count -ne $taskExpectedSources -or !(Test-Path -LiteralPath (Join-Path $app 'BATCH.md') -PathType Leaf)) {
             throw 'Installed batch sources or instructions are incomplete'
         }

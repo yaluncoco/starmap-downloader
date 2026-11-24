@@ -56,6 +56,7 @@ CACHED_EVIDENCE_FIELDS = (
     "aws_single_part_md5", "azure_blob_md5", "safe_product", "odata_name", "l1c_index_etag", "l2a_index_etag", "l2a_index_sha256",
     "l3_index_etag", "l3_index_sha256", "reflectance_scale", "s5p_validation", "modis_validation", "asf_zip_md5", "slc_validation",
     "worldcover_upload_part_bytes", "worldcover_grid_sha256",
+    "safe_zip_validation",
     "resumed_bytes", "reused_range_windows", "range_windows", "range_workers",
 )
 SOURCE_CHECKSUM_FIELDS = (("SHA-256", "provider_sha256", 64), ("SHA3-256", "provider_sha3_256", 64), ("MD5", "provider_md5", 32))
@@ -179,7 +180,7 @@ def _authorized_get(http, auth, item, headers, cancel, status):
     while True:
         check_cancel(cancel)
         link = download_asset(url)
-        if not link or link[0] != item["uuid"] or link[3] != url:
+        if not link or link[0] != item["uuid"] or link[3] != item["url"]:
             raise UserError("官方目录返回了与所选产品不匹配的下载地址。")
         response = http.request("GET", url, headers={**headers, "Authorization": "Bearer " + auth.token(cancel)}, cancel=cancel,
                                 status=status, stream=True, timeout=(15, 95), attempts=1)
@@ -194,9 +195,10 @@ def _authorized_get(http, auth, item, headers, cancel, status):
             redirects += 1
             if not target or redirects > 3:
                 raise UserError("官方原始产品下载重定向无法完成。")
-            # Only the canonical official object may receive the bearer. Do not guess storage hosts.
+            # The official download and legacy zipper hosts must resolve to this exact object.
             url = urljoin(url, target)
-            if url != item["url"]:
+            resolved = download_asset(url)
+            if not resolved or resolved[0] != item["uuid"] or resolved[3] != item["url"]:
                 raise UserError("官方产品返回了未验证的重定向，未向新地址发送凭据。")
             continue
         return response
@@ -342,6 +344,8 @@ def _stream(http, auth, item, partial, cancel, progress, *, s3_auth=None, pc_aut
         check_cancel(cancel)
         position = partial.stat().st_size if partial.exists() and tag else 0
         headers = {"Accept-Encoding": "identity"}
+        if kind == "cdse-safe-zip":
+            headers["Accept"] = "application/octet-stream"
         if pinned:
             headers["If-Match"] = pinned
         if position:
@@ -439,7 +443,7 @@ def _stream(http, auth, item, partial, cancel, progress, *, s3_auth=None, pc_aut
                         out.flush()
                         checkpoint.checkpoint(written, total, tag, transfer={"content_type": content_type, "azure_blob_md5": blob_md5})
                     if time.monotonic() - last_update >= .3:
-                        progress("接收原始产品", written, total)
+                        progress("接收完整 ZIP" if kind == "cdse-safe-zip" else "接收原始产品", written, total)
                         last_update = time.monotonic()
             if not written or (total is not None and written != total):
                 raise requests.exceptions.ChunkedEncodingError("incomplete")
@@ -768,6 +772,9 @@ def _cached_digests(path, item, meta, cancel):
 
 
 def _basename(item):
+    if (item.get("identity") or {}).get("kind") == "cdse-safe-zip":
+        from .safe_zip import check_zip_target
+        return check_zip_target(item)
     if is_slc(item):
         return check_slc_target(item).product  # Preserve the original SAFE ZIP filename.
     if is_modis(item):
@@ -818,12 +825,24 @@ def download_original(geometry, plan, output_dir, auth, *, s3_auth=None, cancel=
             wc = _is_worldcover(item)
             modis = is_modis(item)
             slc = is_slc(item)
+            meter = {"received": None, "when": 0., "speed": 0.}
 
             def report(message, received, size):
                 if progress:
                     extra = min(.94, received/size*.94) if received is not None and size else 0.0
+                    receiving = message in ("接收原始产品", "接收完整 ZIP") and received is not None
+                    speed = 0.
+                    if receiving:
+                        now = time.monotonic()
+                        if meter["received"] is not None and received >= meter["received"] and now > meter["when"]:
+                            instant = (received - meter["received"]) / (now - meter["when"])
+                            speed = instant if not meter["speed"] else .35 * instant + .65 * meter["speed"]
+                        meter.update(received=received, when=now, speed=speed)
                     progress(f"{index + 1}/{total} · {item['name']} · {message}", (index + extra)/total,
-                             {"folder": str(folder), "received_bytes": received, "total_bytes": size, "completed_scenes": index, "total_scenes": total})
+                             {"folder": str(folder), "received_bytes": received, "total_bytes": size,
+                              "transfer_phase": "download" if receiving else "verify", "bytes_per_second": speed,
+                              "eta_seconds": max(0., (size - received) / speed) if size and speed else None,
+                              "completed_scenes": index, "total_scenes": total})
 
             try:
                 if l2a:
@@ -971,7 +990,12 @@ def download_original(geometry, plan, output_dir, auth, *, s3_auth=None, cancel=
                         transfer.update(worldcover_upload_part_bytes=wc_part_bytes, worldcover_grid_sha256=proof["grid_sha256"])
                     elif l2a or l3:  # Reject mismatched bytes before opening with a raster or XML decoder.
                         digest, verified = _validated_digests(partial, validation_item, transfer["aws_single_part_md5"], cancel)
-                    if slc:
+                    if proof.get("kind") == "cdse-safe-zip":
+                        from .safe_zip import verify_safe_archive
+                        report("核对完整 SAFE ZIP、全部成员 CRC 和清单校验值", transfer["size"], transfer["size"])
+                        transfer["safe_zip_validation"] = verify_safe_archive(partial, validation_item, cancel)
+                        suffix = ".zip"
+                    elif slc:
                         digest, verified = _validated_digests(partial, validation_item, None, cancel)
                         report("核对 SAFE 产品、全部成员与复数测量", transfer["size"], transfer["size"])
                         transfer.update(asf_zip_md5=item["provider_md5"], slc_validation=verify_slc_archive(partial, item, cancel))
@@ -1014,6 +1038,7 @@ def download_original(geometry, plan, output_dir, auth, *, s3_auth=None, cancel=
                         report("解码并校对大气条带与主要变量", transfer["size"], transfer["size"])
                         transfer["s5p_validation"] = verify_swath(partial, proof, cancel)
                     transfer["format_validation"] = (
+                        "SAFE ZIP identity, all file CRCs and all declared member checksums" if "safe_zip_validation" in transfer else
                         SLC_VALIDATION if slc else
                         transfer["modis_validation"]["format_validation"] if modis else
                         "NetCDF swath identity and full core-array decode" if "s5p_validation" in transfer else

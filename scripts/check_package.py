@@ -17,7 +17,7 @@ from shapely.geometry import shape
 
 
 def check_executable(executable, *, set_output=None, require_output=None, require_version=None,
-                     require_update_repository=None, require_no_update_channel=False, expect_update_status=None, require_gedi=False, require_batch=False, require_accounts=False, require_monthly=False):
+                     require_update_repository=None, require_no_update_channel=False, expect_update_status=None, require_gedi=False, require_batch=False, require_accounts=False, require_monthly=False, require_safe_zip=False):
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]
@@ -58,6 +58,13 @@ def check_executable(executable, *, set_output=None, require_output=None, requir
                 assert Path(bootstrap["preferences"]["output_dir"]) == require_output, "Existing output preference was not loaded"
             for asset in ("/app.js", "/styles.css", "/vendor/leaflet/leaflet.js", "/vendor/leaflet-draw/leaflet.draw.js"):
                 session.get(origin + asset, timeout=3).raise_for_status()
+            if require_safe_zip:
+                assert home.text.index('value="s2-cdse-zip"') < home.text.index('value="s2-process"')
+                assert 'id="zipProcessing"' in home.text and 'id="installUpdate"' in home.text
+                app_script = session.get(origin + "/app.js", timeout=3).text
+                assert 'profile:"s2-cdse-zip"' in app_script and 'api("install-update"' in app_script
+                rejected = session.post(origin + "/api/install-update", json={"tag": "v99.9.0"}, timeout=4)
+                assert rejected.status_code == 400 and "先下载并校验" in rejected.json()["error"]
             boundary = {"type": "Polygon", "coordinates": [[[444430, 4416850], [444870, 4416850],
                                                            [444870, 4417420], [444430, 4417420], [444430, 4416850]]]}
 
@@ -145,6 +152,8 @@ def check_executable(executable, *, set_output=None, require_output=None, requir
                     expected_sources.add("s2-cdse-s3")
                     session.get(origin + "/spatial.js", timeout=3).raise_for_status()
                     assert 'value="s2-cdse-s3"' in home.text
+                if tuple(map(int, bootstrap["version"].split("."))) >= (1, 9, 0):
+                    expected_sources.add("s2-cdse-zip")
                 assert isinstance(sources, list) and {s["id"] for s in sources} == expected_sources
                 assert bootstrap.get("batch") is None
                 assert 'id="manageAccounts"' in home.text and 'id="companionSources"' in home.text
@@ -173,6 +182,8 @@ def check_executable(executable, *, set_output=None, require_output=None, requir
             if monthly_checked:
                 check["city_catalogue"] = len(catalogue["cities"])
                 check["monthly_resources_full_city_shp_and_offline_basemap"] = "ok"
+            if require_safe_zip:
+                check["default_safe_zip_and_install_retry_resources"] = "ok"
             if "update_repository" in bootstrap:
                 check["update_repository"] = repository
             if expect_update_status is not None:
@@ -198,6 +209,7 @@ if __name__ == "__main__":
     parser.add_argument("--require-batch", action="store_true", help="Require companion sources, batch routes and the supplied icon")
     parser.add_argument("--require-accounts", action="store_true", help="Require centralized accounts, encrypted saving and startup state")
     parser.add_argument("--require-monthly", action="store_true", help="Require full city boundaries, monthly controls and the offline map")
+    parser.add_argument("--require-safe-zip", action="store_true", help="Require default whole SAFE ZIP and automatic installer resources")
     channel = parser.add_mutually_exclusive_group()
     channel.add_argument("--require-update-repository")
     channel.add_argument("--require-no-update-channel", action="store_true")
@@ -207,4 +219,4 @@ if __name__ == "__main__":
                      require_version=args.require_version, require_update_repository=args.require_update_repository,
                      require_no_update_channel=args.require_no_update_channel, expect_update_status=args.expect_update_status,
                      require_gedi=args.require_gedi, require_batch=args.require_batch, require_accounts=args.require_accounts,
-                     require_monthly=args.require_monthly)
+                     require_monthly=args.require_monthly, require_safe_zip=args.require_safe_zip)

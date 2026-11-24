@@ -40,7 +40,8 @@ def test_fresh_and_unlogged_restarts_open_modal_and_every_login_control_stays_th
                 pw.expect(page.locator("#accountsDialog")).to_be_visible()
                 pw.expect(page.locator("#accountsTitle")).to_have_text("登录账号")
                 pw.expect(page.locator("#accountComplete")).to_have_text("暂不登录，选择数据")
-                pw.expect(page.locator("#connectButton")).to_be_in_viewport(ratio=1)
+                pw.expect(page.locator('[data-account="cdse"]')).to_have_attribute("aria-selected", "true")
+                pw.expect(page.locator("#rawConnect")).to_be_in_viewport(ratio=1)
                 pw.expect(page.locator("#accountComplete")).to_be_in_viewport(ratio=1)
                 assert page.locator('.sidebar input[type="password"]').count() == 0
                 assert page.locator("#manageAccountsSidebar, #loginBeforeBatch, .sidebar #connectButton, .sidebar #rawConnect").count() == 0
@@ -73,6 +74,7 @@ def test_complete_four_platform_logins_are_saved_and_cold_start_restores_without
         with serve(config) as server:
             page = page_for(browser, server.origin, errors)
             pw.expect(page.locator("#accountsDialog")).to_be_visible()
+            page.locator('[data-account="oauth"]').click()
             page.locator("#clientId").fill(OAUTH["client_id"])
             page.locator("#clientSecret").fill(OAUTH["client_secret"])
             page.locator("#connectButton").click()
@@ -100,12 +102,12 @@ def test_complete_four_platform_logins_are_saved_and_cold_start_restores_without
                 pw.expect(page.locator('[data-account="' + name + '"] small')).to_have_text("已连接")
             capture(page, "saved")
             page.locator("#accountComplete").click()
-            assert page.evaluate("state.profile") == "s2-process" and page.evaluate("state.aoi") is None
+            assert page.evaluate("state.profile") == "s2-cdse-zip" and page.evaluate("state.aoi") is None
             page.close()
         with serve(config) as server:
             page = page_for(browser, server.origin, errors)
             page.wait_for_selector('#manageAccounts[aria-busy="false"]')
-            pw.expect(page.locator("#connectionStatus")).to_contain_text("API 已连接")
+            pw.expect(page.locator("#connectionStatus")).to_contain_text("CDSE 已登录")
             pw.expect(page.locator("#accountsDialog")).to_be_hidden()
             assert page.evaluate("state.connected && state.rawConnected && state.s3Connected && state.earthdataConnected")
             assert page.evaluate("['clientSecret','earthdataPassword','earthdataToken','rawPassword','rawToken','rawTotp','s3SecretKey','s3AccessKey'].every(id => $(''+id).value === '')")

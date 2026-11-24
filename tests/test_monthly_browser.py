@@ -32,6 +32,7 @@ def test_full_city_month_picker_plan_cancel_resume_and_abandon(client, server, p
         page = browser.new_page(viewport={"width": 1366, "height": 768})
         page.on("pageerror", lambda error: errors.append(str(error)))
         open_data_page(page, server.origin)
+        page.locator("#sourceProfile").select_option("s2-process")
         pw.expect(page.locator("#cityChoice")).to_have_value("110000")
         page.locator("#applyCity").click()
         pw.expect(page.locator("#aoiName")).to_have_text("北京市")

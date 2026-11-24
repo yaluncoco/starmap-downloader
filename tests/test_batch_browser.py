@@ -35,6 +35,7 @@ def test_upfront_login_draw_shp_and_download_aligned_batch(server, batch_setup, 
         page.on("pageerror", lambda error: errors.append(str(error)))
         page.route(re.compile(r"^https://"), lambda route: route.abort())
         open_data_page(page, server.origin)
+        page.locator("#sourceProfile").select_option("s2-process")
         pw.expect(page.locator("#sourceProfile")).to_have_value("s2-process")
         page.locator("#manageAccounts").click()
         page.locator('[data-account="earthdata"]').click()

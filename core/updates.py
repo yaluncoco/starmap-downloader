@@ -1,4 +1,4 @@
-"""Manually check and verify installers from a build-pinned public GitHub Release."""
+"""Check, verify and open installers from a build-pinned public GitHub Release."""
 from __future__ import annotations
 
 import hashlib
@@ -63,6 +63,33 @@ class Release:
     installer: Installer | None
 
 
+class InstallerLaunchError(UserError):
+    """The verified download is intact, but the operating system did not open it."""
+
+
+def _verified_installer(path, installer, cancel=None):
+    try:
+        if path.name != installer.name or path.stat().st_size != installer.size:
+            return False
+        digest = hashlib.sha256()
+        with path.open("rb") as source:
+            while chunk := source.read(1024 * 1024):
+                check_cancel(cancel)
+                digest.update(chunk)
+        return hmac.compare_digest(digest.hexdigest(), installer.sha256)
+    except OSError:
+        return False
+
+
+def _open_installer(path):
+    if os.name != "nt":
+        raise InstallerLaunchError("自动安装需要 Windows；已校验的安装包已保留。")
+    try:
+        os.startfile(str(path.resolve()), "open")
+    except OSError as error:
+        raise InstallerLaunchError("安装包已下载并校验，但安装程序未能打开。请点击“开始安装”重试。") from error
+
+
 def _installer(assets, version):
     if not isinstance(assets, list):
         return None
@@ -81,7 +108,7 @@ def _installer(assets, version):
 
 def _anonymous_session():
     session = requests.Session()
-    # Do not read .netrc, stale proxy auth, or credentials for any imagery service.
+    # Do not import .netrc or authentication for any imagery service.
     session.trust_env = False
     return session
 
@@ -118,6 +145,7 @@ class UpdateClient:
             with _anonymous_session() as session, session.get(
                 url, headers={**_HEADERS, "Accept": "application/vnd.github+json"},
                 timeout=_TIMEOUT, allow_redirects=False, stream=True,
+                proxies=requests.utils.get_environ_proxies(url),
             ) as response:
                 if response.status_code == 404:
                     return None
@@ -150,6 +178,10 @@ class UpdateClient:
         folder.mkdir(parents=True, exist_ok=True)
         url = f"{_API}/repos/{self.repository}/releases/assets/{installer.asset_id}"
         target = folder / installer.name
+        if _verified_installer(target, installer, cancel):
+            check_cancel(cancel)
+            progress("已有安装包校验通过，正在准备安装…", .99)
+            return target
         temporary = None
         try:
             with _anonymous_session() as session:
@@ -158,7 +190,10 @@ class UpdateClient:
                     headers = {"Accept": "application/octet-stream", "Accept-Encoding": "identity"}
                     if hop == 0:
                         headers.update(_HEADERS)
-                    with session.get(url, headers=headers, timeout=_TIMEOUT, stream=True, allow_redirects=False) as response:
+                    # Use the same configured network route as the browser while remaining anonymous.
+                    # Resolve it per host so NO_PROXY still applies to the asset CDN after redirects.
+                    with session.get(url, headers=headers, timeout=_TIMEOUT, stream=True, allow_redirects=False,
+                                     proxies=requests.utils.get_environ_proxies(url)) as response:
                         if response.status_code in (301, 302, 303, 307, 308):
                             url = response.headers.get("Location")
                             if not _trusted_asset_redirect(url):
@@ -204,3 +239,11 @@ class UpdateClient:
         finally:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
+
+    def install(self, installer, path, *, cancel=None):
+        """Open only the exact downloaded release asset, rechecking it before execution."""
+        check_cancel(cancel)
+        if not _verified_installer(path, installer, cancel):
+            raise UserError("安装包大小或 SHA-256 校验未通过，未启动安装。请重新下载安装包。")
+        check_cancel(cancel)
+        _open_installer(path)

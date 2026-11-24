@@ -57,6 +57,7 @@
 <p id="publicAuth" class="section-description" hidden>无需登录。下载选定的开放数据，不消耗 Sentinel Hub 处理额度。</p>
           <label for="sourceProfile">数据来源与下载方式</label>
           <select id="sourceProfile" data-lock>
+            <option value="s2-cdse-zip">Sentinel-2 L2A · 官方完整 ZIP（与网页一致）</option>
             <option value="s2-process">Sentinel-2 L2A · Sentinel Hub 区域裁剪</option>
             <option value="s2-earth-search">Sentinel-2 L2A · 公开区域裁剪（免密钥）</option>
             <option value="s2-cdse-s3">Sentinel-2 L2A · 官方 S3 区域拼接（原始像元）</option>
@@ -121,6 +122,11 @@
           <div class="label-row"><label for="maxCloud">整景云量上限</label><span id="cloudValue" class="value-pill">20%</span></div>
           <input id="maxCloud" type="range" min="0" max="100" value="20" step="1" data-lock>
           <div class="range-labels"><span>晴空优先</span><span>包含多云影像</span></div>
+          </div>
+          <div id="zipOptions" hidden>
+            <label for="zipProcessing">下载完成后的操作</label>
+            <select id="zipProcessing" data-lock><option value="original">保存完整 ZIP · 与网页下载一致（默认）</option><option value="analysis">保留 ZIP，再本地拼接和裁剪研究区</option></select>
+            <p class="field-note">每个选中产品保存一份官方 SAFE ZIP，使用官网产品编号与原始文件名。包含全部波段、质量图层和元数据；支持中断继续。检索无需登录，下载使用已保存的 CDSE 账号。</p>
           </div>
           <div id="opticalOptions">
           <label for="imageMode">导出内容</label>
@@ -250,12 +256,21 @@
         <div class="map-bottom-left"><span id="mapAoiBadge" class="map-badge"><i></i><span>绘制你的研究区</span></span><span class="map-badge muted-badge">底图用于定位 · 卫星影像与 GEDI 数据</span></div>
         <div class="basemap-switch" id="basemapSwitch"><button class="active" data-basemap="standard">标准地图</button><button data-basemap="satellite">卫星底图</button></div>
         <div id="drawHint" class="draw-hint" hidden>按顺序点击地图放置顶点，点击第一个点完成。Esc 取消。</div>
-        <section id="jobPanel" class="job-panel" hidden aria-live="polite"><div class="job-heading"><div><span id="jobStatus" class="job-status">正在下载</span><strong id="jobTitle">下载队列</strong></div><button id="closeJobPanel" class="icon-button" title="收起下载记录" aria-label="收起下载记录" hidden><svg class="icon"><use href="#i-close"/></svg></button></div><p id="jobMessage">准备中…</p><div class="progress-track"><div id="jobProgress"></div></div><div class="job-meta"><span id="jobFraction">0%</span><button id="toggleJobLogs" class="inline-link">查看记录</button><button id="cancelJob" class="inline-link danger">取消任务</button></div><div id="jobSources" class="job-sources" hidden></div><div id="jobLogs" class="job-logs" hidden></div><div id="jobFiles" class="job-files" hidden></div><button id="retryDownload" type="button" class="button button-primary full-width" hidden>重试下载</button><p id="retryDownloadNote" hidden>沿用本任务的区域、产品、参数和保存位置；已完成影像经完整性核验后跳过。</p><button id="openResultFolder" class="button button-outline full-width" hidden><svg class="icon"><use href="#i-folder"/></svg>打开保存文件夹</button></section>
+        <section id="jobPanel" class="job-panel" hidden aria-live="polite">
+          <div class="job-heading"><div><span id="jobStatus" class="job-status">正在下载</span><strong id="jobTitle">下载队列</strong></div><button id="closeJobPanel" class="icon-button" title="收起下载记录" aria-label="收起下载记录" hidden><svg class="icon"><use href="#i-close"/></svg></button></div>
+          <p id="jobMessage">准备中…</p><p id="jobTransfer" class="field-note" hidden></p><div class="progress-track"><div id="jobProgress"></div></div>
+          <div class="job-meta"><span id="jobFraction">0%</span><button id="toggleJobLogs" class="inline-link">查看记录</button><button id="cancelJob" class="inline-link danger">取消任务</button></div>
+          <div id="jobSources" class="job-sources" hidden></div><div id="jobLogs" class="job-logs" hidden></div><div id="jobFiles" class="job-files" hidden></div>
+          <button id="retryDownload" type="button" class="button button-primary full-width" hidden>重试下载</button>
+          <p id="retryDownloadNote" hidden>沿用本任务的区域、产品、参数和保存位置；已完成影像经完整性核验后跳过。</p>
+          <button id="installUpdate" type="button" class="button button-primary full-width" hidden>开始安装</button>
+          <button id="openResultFolder" class="button button-outline full-width" hidden><svg class="icon"><use href="#i-folder"/></svg>打开保存文件夹</button>
+        </section>
       </div>
 
       <section id="resumeDownloads" class="resume-downloads" hidden aria-label="未完成下载"><strong>未完成的下载</strong><p>关闭软件后仍可继续原任务。已完成影像核验后跳过。</p><div id="resumeDownloadList"></div></section>
       <section class="scenes-panel">
-        <div class="scenes-heading"><div><h2>候选产品 <span id="sceneCount" class="count-badge">0</span></h2><p id="scenesSubtitle">每行一个源产品，区域拼接输出一份影像。</p></div><div class="scene-selection-actions"><button id="selectAll" class="inline-link" disabled>全选</button><span>·</span><button id="selectNone" class="inline-link" disabled>清空选择</button></div></div>
+        <div class="scenes-heading"><div><h2>候选产品 <span id="sceneCount" class="count-badge">0</span></h2><p id="scenesSubtitle">每行一个官方源产品，下载后保存同名完整 ZIP。</p></div><div class="scene-selection-actions"><button id="selectAll" class="inline-link" disabled>全选</button><span>·</span><button id="selectNone" class="inline-link" disabled>清空选择</button></div></div>
         <div id="monthlyResults" class="monthly-results" hidden><div class="monthly-results-heading"><strong id="monthlySelectionSummary"></strong><label>查看月份 <select id="monthResultSelect" data-lock></select></label></div><div id="monthlyResultTabs" class="monthly-result-tabs" aria-label="各月产品与下载选择"></div></div>
         <div id="batchResultTabs" class="batch-result-tabs" role="tablist" aria-label="主数据与附带数据结果" hidden></div>
         <div id="coveragePanel" class="coverage-panel" hidden>
@@ -348,8 +363,8 @@
     <div class="modal-heading"><h2 id="updateTitle">软件更新</h2><button type="button" class="icon-button" data-close="updateDialog" aria-label="关闭软件更新"><svg class="icon"><use href="#i-close"/></svg></button></div>
     <p id="updateCurrent" class="section-description"></p>
     <p id="updateMessage" class="update-message" role="status"></p>
-    <p id="updateNote" class="section-description" hidden>下载前请结束正在运行的影像任务。安装包不会自动运行；校验完成后，请关闭软件并手动安装。</p>
-    <div class="modal-footer"><button id="retryUpdate" type="button" class="button button-outline" hidden>重新检查</button><button id="openUpdateRelease" type="button" class="button button-outline" hidden>GitHub 发布页 ↗</button><button id="downloadUpdate" type="button" class="button button-primary" hidden><svg class="icon"><use href="#i-download"/></svg>下载并校验</button></div>
+    <p id="updateNote" class="section-description" hidden>下载并校验完成后自动打开安装程序，按提示完成更新；账号与设置会保留。</p>
+    <div class="modal-footer"><button id="retryUpdate" type="button" class="button button-outline" hidden>重新检查</button><button id="openUpdateRelease" type="button" class="button button-outline" hidden>GitHub 发布页 ↗</button><button id="downloadUpdate" type="button" class="button button-primary" hidden><svg class="icon"><use href="#i-download"/></svg>下载并安装</button></div>
   </dialog>
 
   <dialog id="downloadDialog" class="modal download-modal"><div class="modal-heading"><div><span class="eyebrow">READY TO DOWNLOAD</span><h2>确认下载计划</h2></div><button class="icon-button" data-close="downloadDialog" aria-label="关闭下载计划"><svg class="icon"><use href="#i-close"/></svg></button></div><div class="download-plan-scroll"><div id="planDetails" class="plan-details"></div><div class="plan-folder-actions"><button type="button" class="inline-link" id="changePlanFolder"><svg class="icon"><use href="#i-folder"/></svg>更改保存目录</button></div><p id="planNote" class="plan-note">处理量为估算；实际额度以官方服务为准。区域外及无效像元以 NoData 或透明显示。参数和目录来源一致的完整文件会自动跳过。</p></div><div class="modal-footer"><button class="button button-outline" data-close="downloadDialog">返回调整</button><button id="confirmDownload" class="button button-primary"><svg class="icon"><use href="#i-download"/></svg>开始下载</button></div></dialog>

@@ -55,7 +55,8 @@ from .open_sen3 import DEFAULT_COLLECTION as SEN3_DEFAULT, SEN3_PUBLIC, sen3_col
 from .open_sen3 import public_collections as sen3_collections
 from .open_slc import S1_SLC, SLC_COLLECTION, SLC_FIRST, search_slc
 from .sen3_download import download_sen3
-from .updates import UpdateClient, packaged_repository, version_key
+from .updates import InstallerLaunchError, UpdateClient, packaged_repository, version_key
+from .safe_zip import PROFILE as S2_ZIP, build_zip_plan, search_zip
 
 S2_PROCESS = "s2-process"
 ORIGINAL = "cdse-original"
@@ -64,7 +65,7 @@ NATIVE_OPEN = {S1_PUBLIC: (S1_CATALOGUE, "public"), S2_L1C_OPEN: (L1C_COLLECTION
                S5P_PUBLIC: (None, "public"), SEN3_PUBLIC: (None, "public"), S1_SLC: (SLC_COLLECTION, "public"),
                **{profile: (profile, "public") for profile in WORLD_COVER},
                **{profile: (profile, "pc-public") for profile in MODIS}}
-PROFILE_IDS = (S2_PROCESS, S2_PUBLIC, S2_NATIVE, *NATIVE_OPEN, S1_RTC, DEM_30, DEM_90, GEDI, ORIGINAL)
+PROFILE_IDS = (S2_ZIP, S2_PROCESS, S2_PUBLIC, S2_NATIVE, *NATIVE_OPEN, S1_RTC, DEM_30, DEM_90, GEDI, ORIGINAL)
 RADAR_MODES = ("", "IW", "EW", "SM", "WV")
 
 
@@ -207,6 +208,7 @@ class Service:
         self.updates = UpdateClient(packaged_repository())
         self._update_check_lock = threading.Lock()
         self._update_release = None
+        self._downloaded_update = None
         self.accounts = Accounts(root, self.auth, self.raw_auth, self.s3_auth, self.earthdata_auth)
         self.accounts.start()
 
@@ -446,7 +448,8 @@ class Service:
                         empty = sum(g["status"] in ("empty", "not_selected") for g in groups)
                         job.data["message"] = f"联合下载 · {completed} 个来源完成 · {empty} 个来源无选择或无匹配 · {failed} 个来源需重试"
                     elif kind == "update":
-                        job.data["message"] = "SHA-256 校验通过。请先关闭本软件，再从保存文件夹手动运行安装包。"
+                        job.data["message"] = ("安装程序已打开，请按提示完成更新。账号与设置会保留。"
+                                               if result.get("installer_launched") else result["install_error"])
                     else:
                         skipped = sum(file["status"] == "skipped" for file in result["files"])
                         saved = len(result["files"]) - skipped
@@ -496,6 +499,8 @@ class Service:
         kwargs = {"cancel": cancel, "progress": progress}
         if profile == ORIGINAL:
             scenes = search_original(geometry, criteria["collection"], start, end, radar_mode=criteria["radar_mode"], **kwargs)
+        elif profile == S2_ZIP:
+            scenes = search_zip(geometry, start, end, criteria["max_cloud"], **kwargs)
         elif profile == GEDI:
             scenes = search_gedi(geometry, criteria["collection"], start, end, **kwargs)
         elif profile in DEM:
@@ -601,6 +606,8 @@ class Service:
                 raise UserError("所选 ESA WorldCover 年度瓦片不可下载：" + unavailable["unavailable_reason"] + "。不会换用其他产品。")
         if profile == GEDI:
             options = gedi_options(supplied, query["collection"])
+        elif profile == S2_ZIP and supplied.get("mode", "original") == "original":
+            options = {"collection": "sentinel-2-l2a", "mode": "original", "transport": "odata", "archive_kind": "cdse-safe-zip"}
         elif profile == ORIGINAL or profile in NATIVE_OPEN:
             modes = ("original", "metadata", "asset", "assets") if profile in (ORIGINAL, SEN3_PUBLIC) or profile in MODIS else (
                 ("assets", "asset") if profile in (S2_L3_PUBLIC, S2_ANNUAL) else
@@ -642,8 +649,15 @@ class Service:
             options = normalize_options(supplied)
             if options["max_cloud"] != query["max_cloud"]:
                 raise UserError("云量上限已变化，请重新检索。")
-            if profile in (S2_PUBLIC, S2_NATIVE):
+            if profile in (S2_PUBLIC, S2_NATIVE, S2_ZIP):
                 options["profile"] = profile
+            if profile == S2_ZIP:
+                if options["layout"] != "mosaic":
+                    raise UserError("整景 ZIP 的本地处理输出一份拼接与裁剪影像；逐景保存请使用完整 ZIP 模式。")
+                options["monthly_pipeline"] = "download-scenes-mosaic-clip"
+                options.update(selection_start=query["start"], selection_end=query["end"])
+                if any(not scene["raw"]["available"] for scene in scenes):
+                    raise UserError("所选产品没有可用的官方整景 ZIP，无法开始本地处理。")
             if profile == S2_NATIVE:
                 if options["layout"] != "mosaic":
                     raise UserError("官方 S3 区域读取采用单份拼接；逐产品时间序列请使用现有区域通道。")
@@ -704,6 +718,8 @@ class Service:
         if options.get("monthly_pipeline") == "download-scenes-mosaic-clip":
             from .monthly_scenes import build_monthly_scene_plan
             planned = build_monthly_scene_plan(geometry, scenes, options, cancel=cancel)
+        elif profile == S2_ZIP:
+            planned = build_zip_plan(geometry, scenes, options)
         elif "transport" in options:
             planned = raw_plan(geometry, scenes, options)
         elif options.get("layout") == "mosaic":
@@ -733,7 +749,8 @@ class Service:
         if options.get("monthly_pipeline") == "download-scenes-mosaic-clip":
             from .monthly_scenes import download_monthly_scenes
             return download_monthly_scenes(geometry, scenes, options, output_dir, auth=self.auth,
-                                           s3_auth=self.s3_auth, cancel=cancel, progress=progress, planned=planned)
+                                           s3_auth=self.s3_auth, raw_auth=self.raw_auth,
+                                           cancel=cancel, progress=progress, planned=planned)
         if profile == S2_NATIVE:
             return download_native_mosaic(geometry, scenes, options, output_dir, self.s3_auth, cancel=cancel, progress=progress, planned=planned)
         if profile == GEDI:
@@ -768,7 +785,7 @@ class Service:
                 plan = {"kind": "pending", "fingerprint": None, "requires": []}
             if value.get("plan_fingerprint") is not None and value["plan_fingerprint"] != plan["fingerprint"]:
                 raise UserError("参数、拼接区块或优先级已变化，请重新确认下载计划。")
-            requires = list(plan.get("requires", [])) + (["sentinel-hub"] if profile == S2_PROCESS else ["cdse-s3"] if profile == S2_NATIVE else ["earthdata"] if profile == GEDI else [])
+            requires = list(plan.get("requires", [])) + (["sentinel-hub"] if profile == S2_PROCESS else ["cdse-s3"] if profile == S2_NATIVE else ["odata"] if profile == S2_ZIP else ["earthdata"] if profile == GEDI else [])
             self._check_access(requires)
             plan = {**plan, "requires": sorted(set(requires))}
             self.save_preferences({"output_dir": output_dir})
@@ -929,9 +946,30 @@ class Service:
         def operation(job):
             path = self.updates.download(release.installer, self.config_dir / "updates",
                                          cancel=job.cancel_event, progress=job.update)
-            return {"folder": str(path.parent), "files": [{"path": str(path), "status": "saved"}]}
+            with self.lock:
+                self._downloaded_update = release
+            return self._install_update_result(release, path, cancel=job.cancel_event)
 
         return self._start_job("update", operation)
+
+    def _install_update_result(self, release, path, *, cancel=None):
+        result = {"tag": release.tag, "folder": str(path.parent), "files": [{"path": str(path), "status": "saved"}],
+                  "installer_ready": True, "installer_launched": False}
+        try:
+            self.updates.install(release.installer, path, cancel=cancel)
+            result["installer_launched"] = True
+        except InstallerLaunchError as error:
+            result["install_error"] = str(error)
+        return result
+
+    def install_update(self, value):
+        with self.lock:
+            self._assert_idle()
+            release = self._downloaded_update
+            if release is None or value.get("tag") != release.tag:
+                raise UserError("请先下载并校验此版本的安装包，再开始安装。")
+            path = self.config_dir / "updates" / release.installer.name
+            return self._install_update_result(release, path)
 
     def open_link(self, value):
         name = value.get("name")

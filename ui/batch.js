@@ -76,7 +76,7 @@ const Batch = {
   recommendedAccount() {
     if ((isGedi() || this.checked.has("gedi-earthdata")) && !state.earthdataConnected) return "earthdata";
     if ((isProcess() || this.checked.has("s2-process")) && !state.connected) return "oauth";
-    if (isOfficial() || isNativeS3() || this.checked.has("cdse-original") || this.checked.has("s2-cdse-s3")) return "cdse";
+    if (isZip() || isOfficial() || isNativeS3() || this.checked.has("s2-cdse-zip") || this.checked.has("cdse-original") || this.checked.has("s2-cdse-s3")) return "cdse";
     return isProcess() ? "oauth" : "earthdata";
   },
   renderChoices() {
