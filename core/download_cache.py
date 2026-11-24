@@ -126,16 +126,13 @@ class RangeCache:
         self.object = {"schema": 1, "etag": etag, "size": size}
         save_json(self.root / "object.json", self.object)
 
-    def _page(self, index):
-        return self.root / fingerprint([self.object["etag"], self.object["size"], self.page_size]) / str(index)
+    def _page(self, index, page_size=None):
+        return self.root / fingerprint([self.object["etag"], self.object["size"], page_size or self.page_size]) / str(index)
 
-    def read(self, index):
-        if self.object is None:
-            return None
-        path = self._page(index)
+    @staticmethod
+    def _verified_page(path, expected):
         try:
             metadata = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
-            expected = min(self.page_size, self.object["size"] - index * self.page_size)
             if expected <= 0 or path.stat().st_size != expected or metadata.get("size") != expected:
                 return None
             data = path.read_bytes()
@@ -143,6 +140,27 @@ class RangeCache:
                 return data
         except (OSError, ValueError, TypeError):
             pass
+        return None
+
+    def read(self, index):
+        if self.object is None:
+            return None
+        expected = min(self.page_size, self.object["size"] - index * self.page_size)
+        if expected <= 0:
+            return None
+        data = self._verified_page(self._page(index), expected)
+        if data is not None:
+            return data
+        # Older regional downloads stored 1 MiB pages. Reuse a smaller slice
+        # only after verifying the entire old page against the same version.
+        legacy_size = 1024 ** 2
+        if self.page_size < legacy_size and legacy_size % self.page_size == 0:
+            start = index * self.page_size
+            legacy_index, offset = divmod(start, legacy_size)
+            legacy_expected = min(legacy_size, self.object["size"] - legacy_index * legacy_size)
+            legacy = self._verified_page(self._page(legacy_index, legacy_size), legacy_expected)
+            if legacy is not None:
+                return legacy[offset:offset + expected]
         return None
 
     def write(self, index, data):

@@ -19,7 +19,7 @@ import requests
 
 from .errors import Cancelled, UserError, TransientDownloadError
 from .download_cache import fingerprint, save_json
-from .http import HttpClient, check_cancel, wait_retry
+from .http import HttpClient, check_cancel, tls_error_kind, tls_error_message, wait_retry
 from .open_slc import check_slc_target, zip_type
 from .scene_identity import utc_text
 
@@ -155,12 +155,12 @@ def transfer_slc(item, partial, cancel, progress):
                             if position == end + 1:
                                 checkpoint(begin, position, sha, complete=True)
                                 break
-                        except requests.exceptions.SSLError:
-                            error = UserError("SLC 下载连接的证书校验失败，请检查网络或代理设置。")
-                            if recorded:
-                                error.download_progress_preserved = True
-                            raise error from None
                         except (TransientDownloadError, *BODY_ERRORS) as error:
+                            if isinstance(error, requests.exceptions.SSLError) and tls_error_kind(error) != "interrupted":
+                                failure = UserError(tls_error_message(error, "SLC 下载"))
+                                if recorded:
+                                    failure.download_progress_preserved = True
+                                raise failure from None
                             checkpoint(begin, position, sha)
                             # Preserve the prefix in this window; only retry the still-missing bytes, pinned to the same ETag.
                             if position == end + 1:

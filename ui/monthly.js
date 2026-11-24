@@ -13,10 +13,10 @@ const Monthly = {
     for(const id of ["startMonth","endMonth"]){$(id).min="2015-06";$(id).max=today;$(id).value=today;$(id).addEventListener("change",clearScenes);}
     $("timeMode").addEventListener("change",()=>{clearScenes();renderProfile();});
     $("monthResultSelect").addEventListener("change",()=>this.activate($("monthResultSelect").value));
-    $("monthlyResultTabs").addEventListener("click",event=>{const button=event.target.closest("[data-month]");if(button&&!state.busy)this.activate(button.dataset.month);});
+    $("monthlyResultTabs").addEventListener("click",event=>{const button=event.target.closest("[data-month]");if(button&&!selectionLocked())this.activate(button.dataset.month);});
     $("monthlyResultTabs").addEventListener("change",event=>{
       const month=event.target.dataset.includeMonth;
-      if(!month||state.busy)return;
+      if(!month||selectionLocked())return;
       this.capture();this.groups.get(month).include=event.target.checked;this.renderResults();schedulePlan();
     });
     this.render();
@@ -55,7 +55,7 @@ const Monthly = {
     const rows=[...this.groups.values()];
     $("monthlySelectionSummary").textContent=`${rows.filter(row=>row.include&&row.selected.size).length} 个月已选产品 · 每月一份拼接影像`;
     $("monthResultSelect").innerHTML=rows.map(row=>`<option value="${escapeHtml(row.month)}">${escapeHtml(row.month)} · ${row.scenes.length} 个候选${row.status==="failed"?" · 检索失败":""}</option>`).join("");$("monthResultSelect").value=this.active;
-    $("monthlyResultTabs").innerHTML=rows.map(row=>`<div class="monthly-month ${row.month===this.active?"active":""}"><label title="下载本月；无匹配月份不会生成文件"><input type="checkbox" data-include-month="${escapeHtml(row.month)}" aria-label="下载 ${escapeHtml(row.month)}" ${row.include?"checked":""} ${state.busy?"disabled":""}></label><button type="button" data-month="${escapeHtml(row.month)}" ${state.busy?"disabled":""}><strong>${escapeHtml(row.month)}</strong><span>${row.status==="failed"?"检索失败":row.scenes.length?`${row.selected.size} / ${row.scenes.length} 产品`:"无匹配"}</span></button></div>`).join("");
+    $("monthlyResultTabs").innerHTML=rows.map(row=>`<div class="monthly-month ${row.month===this.active?"active":""}"><label title="下载本月；无匹配月份不会生成文件"><input type="checkbox" data-include-month="${escapeHtml(row.month)}" aria-label="下载 ${escapeHtml(row.month)}" ${row.include?"checked":""} ${selectionLocked()?"disabled":""}></label><button type="button" data-month="${escapeHtml(row.month)}" ${selectionLocked()?"disabled":""}><strong>${escapeHtml(row.month)}</strong><span>${row.status==="failed"?"检索失败":row.scenes.length?`${row.selected.size} / ${row.scenes.length} 产品`:"无匹配"}</span></button></div>`).join("");
   },
   searchRequest() {return {...Cities.request(),profile:state.profile,start_month:$("startMonth").value,end_month:$("endMonth").value,max_cloud:Number($("maxCloud").value),options:{priority:"cloud"}};},
   request(base) {

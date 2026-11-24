@@ -61,7 +61,7 @@ def public_plan(geometry, scenes, options, *, cancel=None):
 def _open_source(stack, http, asset, cancel, rtc_access=None, *, cache_dir=None, status=None):
     settings = {}
     if cache_dir is not None:
-        settings.update(cache_dir=cache_dir, status=status, page_size=1024**2, cache_pages=8, coalesce_pages=4)
+        settings.update(cache_dir=cache_dir, status=status, page_size=256 * 1024, cache_pages=32, coalesce_pages=16)
     if rtc_access is not None:
         if asset.get("pc_scope") != "rtc":
             raise UserError("Sentinel-1 RTC 原始对象与裁剪路线不匹配。")

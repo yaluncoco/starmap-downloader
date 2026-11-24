@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import math
+import ssl
 import threading
 import time
 from email.utils import parsedate_to_datetime
@@ -18,6 +19,44 @@ CATALOGUE_URL = "https://catalogue.dataspace.copernicus.eu/odata/v1/Products"
 PROCESS_URL = "https://sh.dataspace.copernicus.eu/process/v1"
 SH_CATALOGUE_URL = "https://sh.dataspace.copernicus.eu/catalog/v1/search"
 USER_AGENT = f"CopernicusDownloader/{VERSION} (local desktop; documentation.dataspace.copernicus.eu)"
+
+
+def tls_error_kind(error):
+    """Recognize transport EOFs without retrying certificate or unknown TLS failures.
+
+    Requests/urllib3 can wrap the original SSL exception several times. Inspect
+    only exception links and their arguments; never expose these diagnostics,
+    which can contain proxy credentials or signed request URLs.
+    """
+    pending, seen, interrupted, unknown = [error], set(), False, False
+    while pending and len(seen) < 32:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, ssl.SSLCertVerificationError):
+            return "certificate"
+        if isinstance(current, ssl.SSLEOFError):
+            interrupted = True
+        reason = getattr(current, "reason", None)
+        if isinstance(current, ssl.SSLError) and reason not in (None, "UNEXPECTED_EOF_WHILE_READING"):
+            unknown = True
+        for value in (*getattr(current, "args", ()), reason,
+                      getattr(current, "__cause__", None), getattr(current, "__context__", None)):
+            if isinstance(value, BaseException):
+                pending.append(value)
+            elif isinstance(value, str):
+                if "[SSL: CERTIFICATE_VERIFY_FAILED]" in value or value == "CERTIFICATE_VERIFY_FAILED":
+                    return "certificate"
+                if "[SSL: UNEXPECTED_EOF_WHILE_READING]" in value or value == "UNEXPECTED_EOF_WHILE_READING":
+                    interrupted = True
+    return "interrupted" if interrupted and not unknown and not pending else "unknown"
+
+
+def tls_error_message(error, subject="下载"):
+    if tls_error_kind(error) == "certificate":
+        return f"{subject}连接的证书校验失败，请检查网络或代理设置后重试。"
+    return f"{subject}连接的 TLS 安全握手失败，请检查网络或代理设置后重试。"
 
 
 def check_cancel(event):
@@ -76,19 +115,16 @@ class HttpClient:
             check_cancel(cancel)
             try:
                 response = request_with_cancel(self.session, method, url, cancel=cancel, timeout=timeout, **kwargs)
-            except requests.exceptions.SSLError:
-                raise UserError("下载连接的证书校验失败，请检查网络或代理设置后重试。") from None
-            except (requests.ConnectionError, requests.Timeout):
+            except (requests.ConnectionError, requests.Timeout) as error:
+                check_cancel(cancel)
+                if isinstance(error, requests.exceptions.SSLError) and tls_error_kind(error) != "interrupted":
+                    raise UserError(tls_error_message(error)) from None
                 if attempt == attempts - 1:
                     raise TransientDownloadError("连接数据服务失败，已保留下载进度，可检查网络后继续。") from None
                 delay = min(2 ** (attempt + 1), 16)
                 if status:
                     status(f"网络连接中断，{delay} 秒后重试（{attempt + 1}/{attempts - 1}）")
-                if cancel is not None:
-                    if cancel.wait(delay):
-                        raise Cancelled()
-                else:
-                    time.sleep(delay)
+                wait_retry(attempt, cancel)
                 continue
             if response.status_code in (429, 500, 502, 503, 504):
                 delay = retry_seconds(response, attempt, sentinel_hub=sentinel_hub)

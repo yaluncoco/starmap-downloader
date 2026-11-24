@@ -210,7 +210,7 @@ def test_range_retry_budget_is_shared_by_headers_and_body_and_tls_fails_immediat
             raise requests.exceptions.SSLError("private proxy diagnostic")
         monkeypatch.setattr(http.session, "request", bad_tls)
         before = len(calls)
-        with pytest.raises(UserError, match="证书") as error:
+        with pytest.raises(UserError, match="TLS") as error:
             RangeFile(http, "https://example.test/object")
         assert len(calls) == before + 1 and "private" not in str(error.value)
     finally:
@@ -263,6 +263,53 @@ def test_real_tcp_ranges_resume_without_retransmitting_verified_pages(monkeypatc
         server.shutdown()
         thread.join(3)
         server.server_close()
+
+
+def test_smaller_pages_reuse_verified_old_ranges_and_refetch_corruption_without_accepting_new_versions(tmp_path):
+    from core.download_cache import RangeCache
+
+    page = 1024 ** 2
+    payload = bytes(range(256)) * (8192 + 4)
+    requests, changed = [], [False]
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+        def do_GET(self):
+            first, last = map(int, re.fullmatch(r"bytes=(\d+)-(\d+)", self.headers["Range"]).groups())
+            last = min(last, len(payload) - 1)
+            requests.append((first, last, self.headers.get("If-Match")))
+            self.send_response(206)
+            self.send_header("Content-Range", f"bytes {first}-{last}/{len(payload)}")
+            self.send_header("Content-Length", str(last - first + 1))
+            self.send_header("ETag", '"changed"' if changed[0] else '"same-source"')
+            self.end_headers(); self.wfile.write(payload[first:last + 1]); self.wfile.flush()
+            self.close_connection = True
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+    http = HttpClient()
+    url = f"http://127.0.0.1:{server.server_port}/source"
+    try:
+        with RangeFile(http, url, page_size=page, cache_pages=2, cache_dir=tmp_path) as old:
+            assert old.read(2 * page) == payload[:2 * page]
+        count = len(requests)
+        with RangeFile(http, url, page_size=page // 4, cache_pages=32, coalesce_pages=16, cache_dir=tmp_path) as current:
+            assert current.read(2 * page) == payload[:2 * page]
+            assert current.requests == 0 and current.cached_pages == 8
+        assert len(requests) == count
+        old_cache = RangeCache(tmp_path, url, page)
+        path = old_cache._page(0)
+        path.write_bytes(b"x" + path.read_bytes()[1:])
+        with RangeFile(http, url, page_size=page // 4, cache_pages=32, coalesce_pages=16, cache_dir=tmp_path) as recovered:
+            assert recovered.read(2 * page) == payload[:2 * page]
+            assert recovered.requests == 2 and recovered.bytes_received == page
+            assert all(tag == '"same-source"' for _, _, tag in requests[count:])
+            changed[0] = True
+            recovered.seek(2 * page)
+            with pytest.raises(UserError, match="版本不一致"):
+                recovered.read(1)
+        assert RangeCache(tmp_path, url, page // 4).read(8) is None
+    finally:
+        http.close(); server.shutdown(); thread.join(3); server.server_close()
 
 
 def test_coalesced_tcp_reads_reduce_requests_and_reuse_individual_checked_pages(tmp_path):

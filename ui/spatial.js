@@ -79,7 +79,7 @@ const Spatial = {
       this.renderFootprints(current);$("coveragePanel").hidden=true;$("mapFootprintLegend").hidden=true;return;
     }
     this.renderFootprints(current);this.renderAllocation(this.summary);this.renderSummary(current,this.summary);
-    if(this.summary||state.busy||state.aoiPending)return;
+    if(this.summary||selectionLocked())return;
     const version=this.version, generation=this.generation;
     this.timer=setTimeout(async()=>{
       try {
@@ -136,7 +136,7 @@ const Spatial = {
           if(!product.footprint)continue;
           const layer=L.geoJSON(product.footprint,{pane:"footprintPane",interactive:true,style:()=>this.style(scene,current)});
           layer.bindTooltip(`${escapeHtml(scene.tiles?.join(" / "))} · ${escapeHtml(scene.date)} ${escapeHtml(scene.time)} UTC · 云量 ${cloudLabel(scene.cloud_max)}`,{sticky:true});
-          layer.on("click",event=>{if(state.busy||state.editing||state.aoiPending)return;L.DomEvent.stopPropagation(event);this.openAt(event.latlng);});
+          layer.on("click",event=>{if(selectionLocked())return;L.DomEvent.stopPropagation(event);this.openAt(event.latlng);});
           layer.addTo(group);
         }
         this.layers.set(scene.key,group);
@@ -157,7 +157,7 @@ const Spatial = {
         let layer=this.groupLayers.get(layerKey);
         if(!layer) {
           layer=L.geoJSON(geometry,{pane:"footprintPane",interactive:true});
-          layer.on("click",event=>{if(state.busy||state.editing||state.aoiPending)return;L.DomEvent.stopPropagation(event);this.openAt(event.latlng);});
+          layer.on("click",event=>{if(selectionLocked())return;L.DomEvent.stopPropagation(event);this.openAt(event.latlng);});
           this.groupLayers.set(layerKey,layer);
         }
         layer.setStyle({color:colors.get(group.date)||this.colors[0],dashArray:"6,5",weight:selected?2:1.2,
@@ -204,7 +204,7 @@ const Spatial = {
     const keys=summary?.ordered_keys||[...current.selected];
     $("coverageBlockList").innerHTML=keys.map((key,index)=>{
       const scene=current.scenes.find(s=>s.key===key), block=summary?.blocks.find(b=>b.key===key);if(!scene)return "";
-      return `<div class="coverage-block"><span><strong>${index+1}. ${escapeHtml(scene.tiles?.join(" / "))} · ${escapeHtml(scene.date)}</strong><small>${escapeHtml(scene.time)} UTC · 云量 ${cloudLabel(scene.cloud_max)}${block?` · 优先分配 ${block.contribution_percent.toFixed(2)}%`:""}</small></span><button type="button" class="inline-link" data-spatial-key="${escapeHtml(key)}" data-move="-1" aria-label="提高 ${escapeHtml(scene.tiles?.join('/'))} ${escapeHtml(scene.date)} 的优先级" ${index===0||state.busy?"disabled":""}>↑</button><button type="button" class="inline-link" data-spatial-key="${escapeHtml(key)}" data-move="1" aria-label="降低 ${escapeHtml(scene.tiles?.join('/'))} ${escapeHtml(scene.date)} 的优先级" ${index===keys.length-1||state.busy?"disabled":""}>↓</button><button type="button" class="inline-link danger" data-spatial-key="${escapeHtml(key)}" ${state.busy?"disabled":""}>取消</button></div>`;
+      return `<div class="coverage-block"><span><strong>${index+1}. ${escapeHtml(scene.tiles?.join(" / "))} · ${escapeHtml(scene.date)}</strong><small>${escapeHtml(scene.time)} UTC · 云量 ${cloudLabel(scene.cloud_max)}${block?` · 优先分配 ${block.contribution_percent.toFixed(2)}%`:""}</small></span><button type="button" class="inline-link" data-spatial-key="${escapeHtml(key)}" data-move="-1" aria-label="提高 ${escapeHtml(scene.tiles?.join('/'))} ${escapeHtml(scene.date)} 的优先级">↑</button><button type="button" class="inline-link" data-spatial-key="${escapeHtml(key)}" data-move="1" aria-label="降低 ${escapeHtml(scene.tiles?.join('/'))} ${escapeHtml(scene.date)} 的优先级">↓</button><button type="button" class="inline-link danger" data-spatial-key="${escapeHtml(key)}">取消</button></div>`;
     }).join("")||'<span class="field-note">切换全部候选点击影像范围，或勾选下方产品。</span>';
     const regional=["s2-process","s2-earth-search","s2-cdse-s3"].includes(current.profile);
     $("coverageDetails").hidden=!regional;
@@ -214,12 +214,18 @@ const Spatial = {
     this.availability();
   },
   availability() {
-    const locked=state.busy||state.connecting||state.editing||state.aoiPending;
-    $("recommendCoverage").disabled=locked||!this.current().query;
+    const locked=selectionLocked(), current=this.current();
+    $("recommendCoverage").disabled=locked||!current.query;
     $("fitFootprints").disabled=locked||!map||!footprintLayer?.getLayers().length;
     for(const id of ["mapFootprintScope","mapFootprintDetail","mapFootprintDate","mapAllocation"])$(id).disabled=locked||!map||!this.current().query;
     $("spatialPriority").disabled=locked;
-    $("coverageBlockList").querySelectorAll("button").forEach(button=>{if(locked)button.disabled=true;});
+    const blocks=[...$("coverageBlockList").children];
+    blocks.forEach((block,index)=>block.querySelectorAll("button").forEach(button=>{
+      button.disabled=locked||button.dataset.move==="-1"&&index===0||button.dataset.move==="1"&&index===blocks.length-1;
+    }));
+    this.popup?.getElement()?.querySelectorAll("[data-map-key]").forEach(input=>{
+      const scene=current.scenes.find(s=>s.key===input.dataset.mapKey);input.disabled=locked||!scene||!this.available(scene);
+    });
   },
   assign(current,keys) {
     if(current.id==="primary")state.selected=new Set(keys);else Batch.results.get(current.id).selected=new Set(keys);
@@ -230,7 +236,7 @@ const Spatial = {
     if(this.popup&&this.point)this.updatePopup();
   },
   toggle(key) {
-    if(state.busy||state.editing||state.aoiPending)return;
+    if(selectionLocked())return;
     const current=this.current(), scene=current.scenes.find(s=>s.key===key);if(!scene||!this.available(scene))return;
     if(current.selected.has(key))current.selected.delete(key);else current.selected.add(key);
     this.changed(current);
@@ -238,8 +244,8 @@ const Spatial = {
     row?.scrollIntoView({block:"nearest"});
   },
   move(key,direction) {
-    if(state.busy||state.editing||state.aoiPending)return;
-    const current=this.current(), keys=this.summary?.ordered_keys||[...current.selected], index=keys.indexOf(key), target=index+direction;
+    if(selectionLocked())return;
+    const current=this.current(), keys=[...(this.summary?.ordered_keys||current.selected)], index=keys.indexOf(key), target=index+direction;
     if(index<0||target<0||target>=keys.length)return;
     [keys[index],keys[target]]=[keys[target],keys[index]];this.assign(current,keys);
     const group=Batch.results.get(current.id);
@@ -247,11 +253,11 @@ const Spatial = {
     this.changed(this.current());
   },
   async recommend(id=Batch.active,automatic=false) {
-    const current=this.current(id);if(!state.aoi||!current.query||state.busy||state.aoiPending)return;
+    const current=this.current(id);if(!state.aoi||!current.query||selectionLocked())return;
     const generation=this.generation, query=current.query.id, version=this.version;
     try {
       const summary=await api("coverage",this.request(current));
-      if(state.busy)return;
+      if(selectionLocked())return;
       if(generation!==this.generation||this.current(id).query?.id!==query||(automatic?this.touched.has(current.id):version!==this.version))return;
       if(summary.recommended_keys.length>500){if(!automatic)toast("推荐结果超过 500 个区块，请缩小日期或研究区后分批下载。",true);return;}
       this.assign(this.current(id),summary.recommended_keys);
@@ -294,7 +300,7 @@ const Spatial = {
     if(!this.popup||!this.point)return;
     const current=this.current(), scenes=this.pointScenes(this.point);
     const content=document.createElement("div");content.className="footprint-popup";
-    content.innerHTML=`<strong>此处覆盖 ${scenes.length} 个产品</strong><p>已选 ${scenes.filter(s=>current.selected.has(s.key)).length} 个；可勾选其他日期补云。地图与列表同步。</p>`+scenes.map(scene=>`<label><input type="checkbox" data-map-key="${escapeHtml(scene.key)}" aria-label="地图选择 ${escapeHtml(scene.tiles?.join('/'))} ${escapeHtml(scene.date)}" ${current.selected.has(scene.key)?"checked":""} ${!this.available(scene)||state.busy?"disabled":""}><span><b>${escapeHtml(scene.tiles?.join(" / "))} · ${escapeHtml(scene.date)}</b><small>${escapeHtml(scene.time)} UTC · 云量 ${cloudLabel(scene.cloud_max)}${this.available(scene)?"":" · 无可用入口"}</small></span></label>`).join("");
+    content.innerHTML=`<strong>此处覆盖 ${scenes.length} 个产品</strong><p>已选 ${scenes.filter(s=>current.selected.has(s.key)).length} 个；可勾选其他日期补云。地图与列表同步。</p>`+scenes.map(scene=>`<label><input type="checkbox" data-map-key="${escapeHtml(scene.key)}" aria-label="地图选择 ${escapeHtml(scene.tiles?.join('/'))} ${escapeHtml(scene.date)}" ${current.selected.has(scene.key)?"checked":""} ${!this.available(scene)||selectionLocked()?"disabled":""}><span><b>${escapeHtml(scene.tiles?.join(" / "))} · ${escapeHtml(scene.date)}</b><small>${escapeHtml(scene.time)} UTC · 云量 ${cloudLabel(scene.cloud_max)}${this.available(scene)?"":" · 无可用入口"}</small></span></label>`).join("");
     content.addEventListener("change",event=>{if(event.target.dataset.mapKey)this.toggle(event.target.dataset.mapKey);});
     L.DomEvent.disableClickPropagation(content);L.DomEvent.disableScrollPropagation(content);this.popup.setContent(content);
   },

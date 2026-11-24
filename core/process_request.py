@@ -10,7 +10,7 @@ import tarfile
 import requests
 
 from .errors import UserError, TransientDownloadError
-from .http import PROCESS_URL, check_cancel, wait_retry
+from .http import PROCESS_URL, check_cancel, tls_error_kind, tls_error_message, wait_retry
 from .scene_identity import SAFE_ID, expected_products, utc_text, utc_time
 from .research_bundle import is_research, transfer_options
 
@@ -226,9 +226,10 @@ def fetch_tile(http, auth, payload, target, *, options, products, cancel=None, s
                 check_cancel(cancel)
                 metadata = _read_archive(archive, target, max_bytes, products)
                 return {"processing_units": response.headers.get("X-ProcessingUnits-Spent"), **metadata}
-            except requests.exceptions.SSLError:
-                raise UserError("影像处理连接的证书校验失败，请检查网络或代理设置。") from None
             except (TransientDownloadError, requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError, requests.exceptions.ContentDecodingError) as error:
+                check_cancel(cancel)
+                if isinstance(error, requests.exceptions.SSLError) and tls_error_kind(error) != "interrupted":
+                    raise UserError(tls_error_message(error, "影像处理")) from None
                 transfer_failures += 1
                 if transfer_failures >= 3:
                     raise TransientDownloadError("影像传输多次中断，可继续原任务；已校验影像和区块进度已保留。") from None

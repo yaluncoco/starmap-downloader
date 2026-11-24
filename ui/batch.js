@@ -260,7 +260,7 @@ const Batch = {
   },
   changeResult(event) {
     const group = this.results.get(this.active), input = event.target;
-    if (!group || state.busy) return;
+    if (!group || selectionLocked()) return;
     Spatial.touched.add(group.id);
     if (input.hasAttribute("data-companion-scene")) {
       const key = input.dataset.companionScene;
@@ -274,6 +274,7 @@ const Batch = {
   selectAll(clear = false) {
     const group = this.results.get(this.active);
     if (!group) return false;
+    if (selectionLocked()) return true;
     group.selected = clear ? new Set() : new Set(group.scenes.filter(scene => Spatial.available(scene)).map(scene => scene.key));
     this.renderResults(); schedulePlan(); Spatial.refresh(); return true;
   },

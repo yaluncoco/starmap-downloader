@@ -2,7 +2,7 @@
 
 const $ = (id) => document.getElementById(id);
 const appToken = document.querySelector('meta[name="app-token"]').content;
-const state = {profile:"s2-process",collection:"",collections:[],gediCollections:[],gediFieldCollection:"",earthdataConnected:false,loadingCollections:false,rawConnected:false,s3Connected:false,connected:false,connecting:false,nativeDialogs:false,aoi:null,aoiPending:false,aoiVersion:0,scenes:[],selected:new Set(),pickedFiles:new Set(),fileScene:"",busy:false,jobId:null,plan:null,planVersion:0,resultFolder:"",places:[],editing:false,query:null};
+const state = {profile:"s2-process",collection:"",collections:[],gediCollections:[],gediFieldCollection:"",earthdataConnected:false,loadingCollections:false,rawConnected:false,s3Connected:false,connected:false,connecting:false,nativeDialogs:false,aoi:null,aoiPending:false,aoiVersion:0,scenes:[],selected:new Set(),pickedFiles:new Set(),fileScene:"",busy:false,planning:false,planCancelId:null,jobId:null,plan:null,planVersion:0,resultFolder:"",places:[],editing:false,query:null};
 const updates = {configured:false, checking:false, working:false, release:null};
 const downloads = {retryId:null, tasks:[]};
 let map, aoiLayer, footprintLayer, baseLayer, drawHandler, editHandler, planTimer;
@@ -71,6 +71,7 @@ const transportLabel = id => ({odata:"CDSE OData","cdse-s3":"CDSE S3",earthdata:
 const missingAccess = () => (state.plan?.requires || []).filter(id => id === "odata" ? !state.rawConnected : id === "cdse-s3" ? !state.s3Connected : id === "earthdata" ? !state.earthdataConnected : id === "sentinel-hub" ? !state.connected : true);
 const hasDownloadAccess = () => state.plan?.kind === "batch" ? missingAccess().length === 0 : isProcess() ? state.connected : missingAccess().length === 0;
 const selectable = (scene) => scene.native ? scene.native.available === true : isGedi() ? scene.gedi?.available === true : !isRaw() || scene.raw?.available === true;
+const selectionLocked = () => state.busy&&!state.planning||state.connecting||state.editing||state.aoiPending;
 const allBands = ["B01","B02","B03","B04","B05","B06","B07","B08","B8A","B09","B11","B12"];
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const cloudLabel = (value, unknown="未知") => value==null?unknown:Number(value).toFixed(2)+"%";
@@ -410,18 +411,18 @@ function updateAvailability() {
   }
   $("searchScenes").disabled=!canSearch();
   const companion=Batch.results.get(Batch.active), count=Monthly.enabled()&&Monthly.query?Monthly.count():Batch.query?Batch.totalSelected():state.selected.size;
-  $("selectAll").disabled=!(companion?companion.scenes.length:state.scenes.some(selectable))||state.busy;
-  $("selectNone").disabled=!(companion?companion.selected.size:state.selected.size)||state.busy;
+  $("selectAll").disabled=!(companion?companion.scenes.length:state.scenes.some(selectable))||selectionLocked();
+  $("selectNone").disabled=!(companion?companion.selected.size:state.selected.size)||selectionLocked();
   $("downloadSelected").disabled=!hasDownloadAccess()||!state.aoi||!count||state.busy||state.connecting||state.editing||state.aoiPending||!state.plan;
   Batch.availability();
-  document.querySelectorAll("#companionResults input").forEach(element=>element.disabled=state.busy||element.dataset.unavailable==="1");
-  document.querySelectorAll("#scenesBody input").forEach(element=>element.disabled=state.busy||element.dataset.unavailable==="1");
+  document.querySelectorAll("#companionResults input").forEach(element=>element.disabled=selectionLocked()||element.dataset.unavailable==="1");
+  document.querySelectorAll("#scenesBody input").forEach(element=>element.disabled=selectionLocked()||element.dataset.unavailable==="1");
   updateButtons();
   Accounts.render();
   Spatial.availability();
   Cities.describe();
-  $("monthResultSelect").disabled=state.busy||state.connecting;
-  document.querySelectorAll("#monthlyResultTabs button,#monthlyResultTabs input").forEach(element=>element.disabled=state.busy||state.connecting);
+  $("monthResultSelect").disabled=selectionLocked();
+  document.querySelectorAll("#monthlyResultTabs button,#monthlyResultTabs input").forEach(element=>element.disabled=selectionLocked());
   $("retryDownload").disabled=state.busy||state.connecting;
   document.querySelectorAll("[data-retry-download]").forEach(button=>button.disabled=state.busy||state.connecting);
   document.querySelectorAll("[data-abandon-download]").forEach(button=>button.disabled=state.busy||state.connecting);
@@ -676,19 +677,28 @@ function renderEstimate() {
   }
   updateAvailability();
 }
+async function cancelStalePlan() {
+  const id=state.jobId;
+  if(!state.planning||!id||state.planCancelId===id)return;
+  state.planCancelId=id;
+  try {await api("cancel",{job_id:id});}
+  catch(error) {if(state.jobId===id)toast(error.message,true);}
+}
 function schedulePlan() {
   clearTimeout(planTimer);state.plan=null;renderEstimate();
   const version=++state.planVersion;
   $("retryPlan").hidden=true;
-  if(!state.aoi||state.aoiPending||state.editing||!(Monthly.enabled()&&Monthly.query?Monthly.count():Batch.query?Batch.totalSelected():state.selected.size)||state.busy||(isRtc()&&rtcPolarizations().issue))return;
+  if(state.busy){if(state.planning)cancelStalePlan();return;}
+  if(!state.aoi||state.aoiPending||state.editing||!(Monthly.enabled()&&Monthly.query?Monthly.count():Batch.query?Batch.totalSelected():state.selected.size)||(isRtc()&&rtcPolarizations().issue))return;
   planTimer=setTimeout(async()=>{
     if(version!==state.planVersion||state.busy)return;
-    setBusy(true);showTaskbar("检查下载计划","正在规划研究区、月份和源产品…",false);
+    state.planning=true;state.planCancelId=null;setBusy(true);showTaskbar("检查下载计划","正在规划研究区、月份和源产品…",false);
     try{
       const result=await api("prepare-plan",downloadRequest());state.jobId=result.job_id;
-      showTaskbar("检查下载计划","正在规划，可取消后调整选择",true);pollJob(result.job_id,version);
+      if(version!==state.planVersion)cancelStalePlan();
+      showTaskbar("检查下载计划","正在规划，可继续选片和调整优先级",true);pollJob(result.job_id,version);
     }
-    catch(error){setBusy(false);$("taskbar").hidden=true;if(version!==state.planVersion){schedulePlan();return;}$("downloadEstimate").querySelector("span").textContent=error.message;$("retryPlan").hidden=false;updateAvailability();}
+    catch(error){state.planning=false;state.planCancelId=null;setBusy(false);$("taskbar").hidden=true;if(version!==state.planVersion){schedulePlan();return;}$("downloadEstimate").querySelector("span").textContent=error.message;$("retryPlan").hidden=false;updateAvailability();}
   },180);
 }
 async function searchScenes() {
@@ -847,7 +857,7 @@ async function pollJob(id,planVersion=state.planVersion) {
         if(job.detail?.folder)state.resultFolder=job.detail.folder;
       }
       if(job.status==="running"||job.status==="cancelling"){if(job.status==="cancelling"){const button=$(searching?"cancelSearch":"cancelJob");button.disabled=true;button.textContent="正在取消…";}setTimeout(poll,900);return;}
-      state.jobId=null;setBusy(false);$("taskbar").hidden=true;
+      state.jobId=null;state.planning=false;state.planCancelId=null;setBusy(false);$("taskbar").hidden=true;
       if(planning){
         if(planVersion!==state.planVersion){schedulePlan();return;}
         if(job.status==="completed"){
@@ -1078,7 +1088,7 @@ async function initialize() {
     if(isOfficial()||Batch.checked.has("cdse-original"))loadCollections().then(()=>Batch.renderSettings());
     if(data.monthly)Monthly.accept(data.monthly,true);
     else if(data.query){state.scenes=data.scenes||[];state.selected=firstSelection();renderScenes();Spatial.autoSelect();}
-    if(data.active_job){state.jobId=data.active_job.id;setBusy(true);if(["search","batch-search","monthly-search"].includes(data.active_job.kind))showSearchProgress(true);else if(data.active_job.kind==="plan")showTaskbar("检查下载计划",data.active_job.message,true);else showDownloadProgress(data.active_job.kind);pollJob(state.jobId);}
+    if(data.active_job){state.jobId=data.active_job.id;state.planning=data.active_job.kind==="plan";setBusy(true);if(["search","batch-search","monthly-search"].includes(data.active_job.kind))showSearchProgress(true);else if(data.active_job.kind==="plan")showTaskbar("检查下载计划",data.active_job.message,true);else showDownloadProgress(data.active_job.kind);pollJob(state.jobId);}
     await Accounts.startup(data.accounts);
   }catch(error){toast(error.message,true);}
   updateAvailability();

@@ -26,7 +26,7 @@ from .download import _save_json
 from .errors import Cancelled, UserError, TransientDownloadError, DownloadAccessError, keep_download_result
 from .download_cache import PartialDownload
 from .local_paths import io_path
-from .http import CATALOGUE_URL, HttpClient, check_cancel, wait_retry
+from .http import CATALOGUE_URL, HttpClient, check_cancel, tls_error_kind, tls_error_message, wait_retry
 from .integrity import publish_file
 from .native_catalogue import DOWNLOAD_ROOT, _json, download_asset, product_stem
 from .open_l2a import check_l2a_target, verify_l2a_index, verify_l2a_xml
@@ -453,12 +453,12 @@ def _stream(http, auth, item, partial, cancel, progress, *, s3_auth=None, pc_aut
                         "transfer_attempts": attempt + 1, "resumed_bytes": resumed, "aws_single_part_md5": aws_md5, "azure_blob_md5": blob_md5}
             checkpoint.checkpoint(written, total, tag, transfer=transfer, force=True)
             return transfer
-        except requests.exceptions.SSLError:
-            error = UserError("原始产品连接的证书校验失败，请检查网络或代理设置。")
-            if checkpoint.state:
-                error.download_progress_preserved = True
-            raise error from None
         except (TransientDownloadError, *TRANSFER_ERRORS) as error:
+            if isinstance(error, requests.exceptions.SSLError) and tls_error_kind(error) != "interrupted":
+                failure = UserError(tls_error_message(error, "原始产品"))
+                if checkpoint.state:
+                    failure.download_progress_preserved = True
+                raise failure from None
             checkpoint.checkpoint(written, total, tag, transfer={"content_type": content_type, "azure_blob_md5": blob_md5}, force=True)
             if attempt == 2:
                 raise TransientDownloadError("原始产品传输多次中断；已保留校验通过的进度，可继续下载。") from None

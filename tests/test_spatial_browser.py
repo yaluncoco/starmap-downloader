@@ -12,6 +12,7 @@ from shapely.geometry import box
 from shapely.ops import unary_union
 
 from core.geometry import save_aoi
+from core.http import check_cancel
 from scripts.browser_flow import open_data_page
 from conftest import D1, P1, P2, feature
 
@@ -28,6 +29,53 @@ def map_click(page, longitude, latitude):
     point = page.evaluate("([lon,lat]) => {const p=map.latLngToContainerPoint([lat,lon]); return {x:p.x,y:p.y};}", [longitude, latitude])
     frame = page.locator("#map").bounding_box()
     page.mouse.click(frame["x"] + point["x"], frame["y"] + point["y"])
+
+
+@pytest.mark.browser
+def test_sorting_during_background_planning_cancels_the_stale_plan_and_keeps_the_latest_selection(server, client, provider, monkeypatch):
+    pw = pytest.importorskip("playwright.sync_api")
+    provider.catalogue = [feature(P1, D1, 1, box(116.350, 39.900, 116.353, 39.905)),
+                          feature(P2, "2024-06-05T03:16:50Z", 9, box(116.353, 39.900, 116.356, 39.905))]
+    client.search("116.350,39.900,116.356,39.905", cloud=100)
+    started, blocked = threading.Event(), {}
+    original = server.service.plan
+    requests = []
+
+    def delayed(value, *, cancel=None):
+        requests.append(list(value["scene_keys"]))
+        if len(value["scene_keys"]) == 2 and not started.is_set():
+            blocked.update(id=server.service.active_job().id, keys=list(value["scene_keys"]))
+            started.set()
+            assert cancel.wait(10), "Changing the selection must cancel the stale preview"
+            check_cancel(cancel)
+        return original(value, cancel=cancel)
+
+    monkeypatch.setattr(server.service, "plan", delayed)
+    errors = []
+    with pw.sync_playwright() as driver:
+        browser, page = browser_page(driver, server)
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        assert started.wait(3)
+        page.wait_for_function("()=>state.busy && state.jobId && Spatial.summary?.selected_count===2")
+        pw.expect(page.locator("#sourceProfile")).to_be_disabled()
+        pw.expect(page.locator("#downloadSelected")).to_be_disabled()
+        page.locator("#coverageDetails summary").click()
+        down = page.locator("#coverageBlockList [data-move='1']").first
+        pw.expect(down).to_be_enabled()
+        down.click()
+        pw.expect(page.locator("#spatialPriority")).to_have_value("selection")
+        page.wait_for_function("()=>!state.busy && !!state.plan")
+        assert server.service.jobs[blocked["id"]].snapshot()["status"] == "cancelled"
+        assert requests[-1] == list(reversed(blocked["keys"]))
+        assert page.evaluate("[...state.selected]") == requests[-1]
+        pw.expect(page.locator("#coverageBlockList [data-move='-1']").first).to_be_disabled()
+        pw.expect(page.locator("#coverageBlockList [data-move='1']").last).to_be_disabled()
+        pw.expect(down).to_be_enabled()
+        down.click()
+        page.wait_for_function("()=>!state.busy && !!state.plan")
+        assert requests[-1] == blocked["keys"]
+        assert not errors
+        browser.close()
 
 
 @pytest.mark.browser

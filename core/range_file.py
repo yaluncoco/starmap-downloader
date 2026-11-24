@@ -10,7 +10,7 @@ from collections import OrderedDict
 import requests
 
 from .errors import UserError, TransientDownloadError
-from .http import check_cancel, wait_retry
+from .http import check_cancel, tls_error_kind, tls_error_message, wait_retry
 from .raw_download import BYTE_RANGE, _strong_tag
 from .download_cache import RangeCache
 
@@ -149,9 +149,10 @@ class RangeFile(io.RawIOBase):
                     if len(digest) != 16 or hashlib.md5(data, usedforsecurity=False).digest() != digest:
                         raise UserError("Azure 字节区间的 MD5 缺失或不符，未使用该影像数据。")
                     self.verified_range_md5 += 1
-            except requests.exceptions.SSLError:
-                raise UserError("公开源连接的证书校验失败，请检查网络或代理设置。") from None
             except (TransientDownloadError, requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError, requests.exceptions.ContentDecodingError) as error:
+                check_cancel(self.cancel)
+                if isinstance(error, requests.exceptions.SSLError) and tls_error_kind(error) != "interrupted":
+                    raise UserError(tls_error_message(error, "公开源")) from None
                 self.range_failures += 1
                 if attempt == 2:
                     raise TransientDownloadError("公开源字节传输多次中断，已保留校验通过的区块，可继续下载。") from None

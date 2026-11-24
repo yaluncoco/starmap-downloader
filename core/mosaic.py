@@ -210,11 +210,17 @@ class _PublicReader:
     def __init__(self, http, plan, options, cancel, cache_dir=None, report=None):
         self.http, self.plan, self.options, self.cancel = http, plan, _raw_options(options), cancel
         self.cache_dir, self.report = cache_dir, report
-        self.opened, self.versions, self.transport = OrderedDict(), {}, {}
+        self.opened, self.versions, self.transport, self.timing = OrderedDict(), {}, {}, {}
 
     def _close(self, key):
-        stack, sources = self.opened.pop(key)
+        group = self.opened.pop(key)
+        sources = group.sources
         try:
+            old_timing = self.timing.get(key, {})
+            self.timing[key] = {"source_open_seconds": old_timing.get("source_open_seconds", 0) + group.open_seconds,
+                                "source_read_seconds": old_timing.get("source_read_seconds", 0) + group.read_seconds,
+                                "open_count": old_timing.get("open_count", 0) + 1,
+                                "band_workers": len(group.threads)}
             records = self.transport.setdefault(key, {})
             for band, src in sources.items():
                 stream = src[1]
@@ -226,34 +232,32 @@ class _PublicReader:
                                  "range_failures": old.get("range_failures", 0) + stream.range_failures,
                                  "coalesced_fallbacks": old.get("coalesced_fallbacks", 0) + stream.coalesced_fallbacks}
         finally:
-            stack.close()
+            group.close()
 
     def read(self, scene, tile, inside):
-        from .public_download import _open_source, read_on_grid
+        from .public_sources import PublicSources
 
         key = scene["key"]
         assets = {band: scene["public"]["assets"][band] for band in self.options["bands"] + ["SCL"]}
         if key not in self.opened:
             while len(self.opened) >= 2:
                 self._close(next(iter(self.opened)))
-            stack = ExitStack()
+            group = PublicSources(assets, self.cancel, cache_dir=self.cache_dir, status=self.report)
             try:
-                sources = {band: _open_source(stack, self.http, asset, self.cancel, cache_dir=self.cache_dir,
-                                             status=self.report) for band, asset in assets.items()}
-                for band, src in sources.items():
+                for band, src in group.sources.items():
                     version = (src[1].etag, src[1].size)
                     if (key, band) in self.versions and self.versions[key, band] != version:
                         raise UserError("拼接期间源对象版本变化，已停止发布影像。")
                     self.versions[key, band] = version
-                self.opened[key] = stack, sources
+                self.opened[key] = group
             except BaseException:
-                stack.close()
+                group.close()
                 raise
         self.opened.move_to_end(key)
-        sources = self.opened[key][1]
+        group = self.opened[key]
+        sources = group.sources
         grid = from_origin(tile.bounds[0], tile.bounds[3], self.plan["resolution"], self.plan["resolution"])
-        inputs = {band: read_on_grid(src, tile.bounds, grid, f"EPSG:{self.plan['epsg']}", tile.height, tile.width,
-                                     self.cancel, preserve_nodata=band == "SCL") for band, src in sources.items()}
+        inputs = group.read(tile.bounds, grid, f"EPSG:{self.plan['epsg']}", tile.height, tile.width)
         blocks, _ = public_block(inputs, inside, self.options)
         return blocks["unmasked"], blocks["scl"][0], {
             "sources": [{"catalogue_id": scene["public"]["source_id"], "match": "safe_id"}], "assets": assets,
@@ -581,6 +585,8 @@ def download_mosaic(geometry, scenes, options, output_dir, *, auth=None, cancel=
         reader.close()
         if hasattr(reader, "transport"):
             record["transport"] = reader.transport
+        if hasattr(reader, "timing"):
+            record["source_read_timing"] = reader.timing
         if hasattr(reader, "evidence"):
             record["native_sources"] = reader.evidence
         if not public and record["blocks"] and not any(matches.values()):
@@ -632,6 +638,8 @@ def download_mosaic(geometry, scenes, options, output_dir, *, auth=None, cancel=
                 reader.close()
                 if hasattr(reader, "transport"):
                     record["transport"] = reader.transport
+                if hasattr(reader, "timing"):
+                    record["source_read_timing"] = reader.timing
                 if hasattr(reader, "evidence"):
                     record["native_sources"] = reader.evidence
             record["reused_blocks"] = blocks_cache.reused
