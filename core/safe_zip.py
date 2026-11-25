@@ -28,6 +28,17 @@ PROFILE = "s2-cdse-zip"
 ARCHIVE_KIND = "cdse-safe-zip"
 
 
+def download_options(options=None):
+    supplied = options or {}
+    engine = supplied.get("download_engine", "auto")
+    workers = supplied.get("download_workers", 2)
+    if engine not in ("auto", "edge", "http", "http-direct"):
+        raise UserError("请选择自动、Edge、标准或直连下载。")
+    if type(workers) is not int or not 1 <= workers <= 4:
+        raise UserError("完整产品同时下载数应为 1～4，不能超过官方连接配额。")
+    return {"download_engine": engine, "download_workers": workers}
+
+
 def check_zip_target(target):
     proof = target.get("identity") or {}
     name = target.get("name", "")
@@ -69,8 +80,9 @@ def search_zip(geometry, start, end, max_cloud, *, cancel=None, progress=None):
 
 
 def build_zip_plan(geometry, scenes, options=None):
-    options = {"collection": "sentinel-2-l2a", "mode": "original", "transport": "odata",
-               "archive_kind": ARCHIVE_KIND}
+    original_options = {"collection": "sentinel-2-l2a", "mode": "original", "transport": "odata",
+                        "archive_kind": ARCHIVE_KIND}
+    options = {**original_options, **download_options(options)}
     plan = raw_plan(geometry, scenes, options)
     for target in plan["targets"]:
         target["name"] = target["key"].removesuffix(".SAFE") + ".SAFE"
@@ -79,20 +91,35 @@ def build_zip_plan(geometry, scenes, options=None):
     # Published JP2/member sizes are an estimate of the archive, not a ZIP Content-Length.
     estimated = sum(asset.get("bytes") or 0 for scene in scenes for asset in scene["raw"]["assets"])
     covered = geometry.intersection(unary_union([footprint(scene) for scene in scenes]))
-    signature = {"schema": 1, "geometry": mapping(normalize(geometry)), "targets": plan["targets"], "options": options}
+    signature = {"schema": 1, "geometry": mapping(normalize(geometry)), "targets": plan["targets"], "options": original_options}
+    # Execution choices belong to the frozen task, while the output/cache path
+    # remains compatible with already verified 1.9.0 products.
+    storage_id = hashlib.sha256(json.dumps(signature, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:16]
+    signature["options"] = options
     fingerprint = hashlib.sha256(json.dumps(signature, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:16]
-    plan.update(fingerprint=fingerprint, folder_name="S2_SAFE_ZIP_" + fingerprint,
+    plan.update(fingerprint=fingerprint, folder_name="S2_SAFE_ZIP_" + storage_id,
                 source="Copernicus Browser / CDSE official whole-product ZIP", requires=["odata"],
                 estimated_bytes=estimated or None, size_estimated=True,
                 native_source_bytes=estimated, source_count=len(scenes),
                 archive_count=len(scenes), pipeline="download-zip",
+                download_engine=options["download_engine"], download_workers=min(options["download_workers"], len(scenes)),
                 coverage={"coverage_percent": min(100., 100 * polygon_area(covered) / polygon_area(geometry))},
                 source_note="逐产品下载与官网相同的完整 SAFE ZIP，保留全部波段、质量图层与元数据。")
     return plan
 
 
 def zip_source_plan(scene, options):
-    return build_zip_plan(footprint(scene), [scene])
+    return build_zip_plan(footprint(scene), [scene], options)
+
+
+def storage_plan(plan):
+    """Restore the content contract used by 1.9.0 for existing output reuse."""
+    value = copy.deepcopy(plan)
+    for key in ("download_engine", "download_workers"):
+        value.pop(key, None)
+        value["options"].pop(key, None)
+    value["fingerprint"] = value["folder_name"].removeprefix("S2_SAFE_ZIP_")
+    return value
 
 
 def verify_safe_archive(path, target, cancel=None):

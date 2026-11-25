@@ -25,6 +25,7 @@ from . import VERSION
 from .download import _save_json
 from .errors import Cancelled, UserError, TransientDownloadError, DownloadAccessError, keep_download_result
 from .download_cache import PartialDownload
+from .download_queue import ProductProgress, TransferSpeed, run_product_queue
 from .local_paths import io_path
 from .http import CATALOGUE_URL, HttpClient, check_cancel, tls_error_kind, tls_error_message, wait_retry
 from .integrity import publish_file
@@ -57,6 +58,8 @@ CACHED_EVIDENCE_FIELDS = (
     "l3_index_etag", "l3_index_sha256", "reflectance_scale", "s5p_validation", "modis_validation", "asf_zip_md5", "slc_validation",
     "worldcover_upload_part_bytes", "worldcover_grid_sha256",
     "safe_zip_validation",
+    "transport_engine", "network_seconds", "reused_complete_transfer",
+    "native_resume_attempts",
     "resumed_bytes", "reused_range_windows", "range_windows", "range_workers",
 )
 SOURCE_CHECKSUM_FIELDS = (("SHA-256", "provider_sha256", 64), ("SHA3-256", "provider_sha3_256", 64), ("MD5", "provider_md5", 32))
@@ -790,7 +793,76 @@ def _basename(item):
     return f"{title}_{identity}"
 
 
-def download_original(geometry, plan, output_dir, auth, *, s3_auth=None, cancel=None, progress=None):
+def download_original(geometry, plan, output_dir, auth, *, s3_auth=None, cancel=None, progress=None, browser=None):
+    safe = bool(plan["targets"]) and all((item.get("identity") or {}).get("kind") == "cdse-safe-zip" for item in plan["targets"])
+    if safe:
+        from .safe_zip import check_zip_target, download_options
+        for item in plan["targets"]:
+            check_zip_target(item)
+        if len({item["uuid"] for item in plan["targets"]}) != len(plan["targets"]):
+            raise UserError("完整产品下载队列包含重复 UUID，请只选择一个相同版本。")
+        settings = download_options(plan["options"])
+        return _download_zip_queue(geometry, plan, output_dir, auth, cancel, progress, browser, settings)
+    return _download_original_serial(geometry, plan, output_dir, auth, s3_auth=s3_auth,
+                                     cancel=cancel, progress=progress, browser=browser)
+
+
+def _download_zip_queue(geometry, plan, output_dir, auth, cancel, progress, browser, settings):
+    base = io_path(output_dir)
+    if not base.is_absolute():
+        raise UserError("请选择本地绝对输出目录。")
+    folder = base / plan["folder_name"]
+    folder.mkdir(parents=True, exist_ok=True)
+    _save_json(folder / "研究区.geojson", {"type": "Feature", "properties": {}, "geometry": mapping(geometry)})
+    record_path = folder / f"下载记录_{uuid4().hex[:10]}.json"
+    workers = min(settings["download_workers"], len(plan["targets"]))
+    meter = ProductProgress([item["name"] for item in plan["targets"]], progress, folder=str(folder), workers=workers)
+    manifest = {"software": VERSION, "source": plan["source"], "created_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                "collection": plan["options"]["collection"], "status": "running", "download_workers": workers,
+                "download_engine": settings["download_engine"],
+                "items": [{"product": item["key"], "uuid": item["uuid"], "asset": item["asset"],
+                           "url": item["url"], "transport": item["transport"], "status": "queued"} for item in plan["targets"]]}
+    results = {}
+    _save_json(record_path, manifest)
+
+    def worker(index, item, signal):
+        single = {**plan, "targets": [item], "requests": 1, "scene_count": 1}
+        return _download_original_serial(geometry, single, output_dir, auth, cancel=signal,
+                    progress=lambda message, fraction=0, detail=None: meter.update(index, message, fraction, detail),
+                    browser=browser, write_area=False)
+
+    def finished(index, value, error):
+        partial_result = value or getattr(error, "download_result", None)
+        if partial_result:
+            results[index] = partial_result
+            child = json.loads(Path(partial_result["manifest"]).read_text(encoding="utf-8"))
+            if child["items"]:
+                manifest["items"][index] = {**child["items"][0], "product_manifest": partial_result["manifest"]}
+        else:
+            manifest["items"][index]["status"] = "cancelled" if isinstance(error, Cancelled) else "failed"
+        _save_json(record_path, manifest)
+        meter.complete(index, value, error)
+
+    def output():
+        return [file for index in sorted(results) for file in results[index]["files"]]
+
+    try:
+        run_product_queue(plan["targets"], worker, workers, cancel=cancel, on_result=finished)
+        manifest["status"] = "completed"
+        return {"files": output(), "folder": str(folder), "manifest": str(record_path), "plan": plan, "empty_scenes": []}
+    except BaseException as error:
+        manifest["status"] = "cancelled" if isinstance(error, Cancelled) else "failed"
+        keep_download_result(error, output(), folder, record_path, plan)
+        raise
+    finally:
+        for row in manifest["items"]:
+            if row["status"] == "queued":
+                row["status"] = "cancelled" if manifest["status"] == "cancelled" else "not_started"
+        _save_json(record_path, manifest)
+
+
+def _download_original_serial(geometry, plan, output_dir, auth, *, s3_auth=None, cancel=None, progress=None,
+                              browser=None, write_area=True):
     base = io_path(output_dir)
     if not base.is_absolute():
         raise UserError("请选择本地绝对输出目录。")
@@ -798,11 +870,15 @@ def download_original(geometry, plan, output_dir, auth, *, s3_auth=None, cancel=
     folder.mkdir(parents=True, exist_ok=True)
     uid = uuid4().hex[:10]
     record_path = folder / f"下载记录_{uid}.json"
-    _save_json(folder / "研究区.geojson", {"type": "Feature", "properties": {}, "geometry": mapping(geometry)})
+    if write_area:
+        _save_json(folder / "研究区.geojson", {"type": "Feature", "properties": {}, "geometry": mapping(geometry)})
     manifest = {"software": VERSION, "source": plan["source"], "created_at": dt.datetime.now(dt.timezone.utc).isoformat(),
                 "collection": plan["options"]["collection"], "status": "running", "items": []}
     _save_json(record_path, manifest)
     http, result = HttpClient(), []
+    engine = plan["options"].get("download_engine", "auto")
+    if engine == "http-direct":
+        http.session.trust_env = False
     pc_auth = PlanetaryAccess(http, cancel)
     modis_access = {scope: PlanetaryAccess(http, cancel, scope=scope) for scope in ("modis-cog", "modis-source")} if any(
         is_modis(file) for file in plan["targets"]) else {}
@@ -814,6 +890,14 @@ def download_original(geometry, plan, output_dir, auth, *, s3_auth=None, cancel=
             name = _basename(item)
             receipt = folder / f"{name}.starmap.json"
             partial = folder / ".download-cache" / "raw" / source_fingerprint(item) / "payload.part"
+            if (item.get("identity") or {}).get("kind") == "cdse-safe-zip":
+                # Native Chromium expects a Win32 path. Keep its staging path
+                # short even when monthly output folders and SAFE names are long;
+                # existing 1.9.0 checkpoints keep their original location.
+                existing = partial.is_file() or any(partial.with_name(partial.name + suffix).is_file()
+                                                   for suffix in (".resume.json", ".browser.json"))
+                if not existing:
+                    partial = base / ".download-cache" / "zip" / (source_fingerprint(item) + ".part")
             partial.parent.mkdir(parents=True, exist_ok=True)
             preserve_partial = False
             row = {"product": item["key"], "uuid": item["uuid"], "asset": item["asset"], "url": item["url"],
@@ -825,7 +909,8 @@ def download_original(geometry, plan, output_dir, auth, *, s3_auth=None, cancel=
             wc = _is_worldcover(item)
             modis = is_modis(item)
             slc = is_slc(item)
-            meter = {"received": None, "when": 0., "speed": 0.}
+            meter = TransferSpeed()
+            transport_engine = "http-direct" if engine == "http-direct" else "http"
 
             def report(message, received, size):
                 if progress:
@@ -833,14 +918,11 @@ def download_original(geometry, plan, output_dir, auth, *, s3_auth=None, cancel=
                     receiving = message in ("接收原始产品", "接收完整 ZIP") and received is not None
                     speed = 0.
                     if receiving:
-                        now = time.monotonic()
-                        if meter["received"] is not None and received >= meter["received"] and now > meter["when"]:
-                            instant = (received - meter["received"]) / (now - meter["when"])
-                            speed = instant if not meter["speed"] else .35 * instant + .65 * meter["speed"]
-                        meter.update(received=received, when=now, speed=speed)
+                        speed = meter.update(received)
                     progress(f"{index + 1}/{total} · {item['name']} · {message}", (index + extra)/total,
                              {"folder": str(folder), "received_bytes": received, "total_bytes": size,
                               "transfer_phase": "download" if receiving else "verify", "bytes_per_second": speed,
+                              "transport_engine": transport_engine,
                               "eta_seconds": max(0., (size - received) / speed) if size and speed else None,
                               "completed_scenes": index, "total_scenes": total})
 
@@ -969,7 +1051,29 @@ def download_original(geometry, plan, output_dir, auth, *, s3_auth=None, cancel=
                         verify_l3_listing(http, item, cancel)
                         archive_tag = pin_l3_object(http, item, cancel)
                     report("准备下载", None, None)
-                    if slc:
+                    complete_browser = None
+                    if proof.get("kind") == "cdse-safe-zip":
+                        from .browser_download import BrowserUnavailable, completed_transfer
+                        complete_browser = completed_transfer(item, partial)
+                    if complete_browser:
+                        transfer = complete_browser
+                        transport_engine = transfer["transport_engine"]
+                    elif (proof.get("kind") == "cdse-safe-zip" and engine in ("auto", "edge")
+                          and not partial.with_name(partial.name + ".resume.json").is_file()):
+                        if browser is None and engine == "edge":
+                            raise BrowserUnavailable("当前运行方式没有 Edge 下载引擎，请选择标准下载或打开桌面版。")
+                        try:
+                            if browser is None:
+                                raise BrowserUnavailable("当前运行方式使用标准下载。")
+                            transport_engine = "edge-webview2"
+                            transfer = browser.download(item, partial, auth, cancel, report)
+                        except BrowserUnavailable:
+                            if engine == "edge":
+                                raise
+                            transport_engine = "http"
+                            report("使用标准下载引擎", None, None)
+                            transfer = _stream(http, auth, item, partial, cancel, report)
+                    elif slc:
                         transfer = transfer_slc(item, partial, cancel, report)
                     elif archive_tag:
                         transfer = _stream(http, auth, item, partial, cancel, report, s3_auth=s3_auth, pc_auth=pc_auth,
@@ -979,6 +1083,7 @@ def download_original(geometry, plan, output_dir, auth, *, s3_auth=None, cancel=
                                            pinned_etag=modis_pin["etag"], pinned_md5=modis_pin["md5"])
                     else:
                         transfer = _stream(http, auth, item, partial, cancel, report, s3_auth=s3_auth, pc_auth=pc_auth)
+                    transfer.setdefault("transport_engine", transport_engine)
                     if tile_tag and not l2a:
                         transfer["l1c_index_etag"] = _verify_l1c_index(http, item, cancel, tile_tag)
                         transfer["safe_product"] = proof["product"]
@@ -1079,11 +1184,14 @@ def download_original(geometry, plan, output_dir, auth, *, s3_auth=None, cancel=
                 raise
             finally:
                 has_checkpoint = (partial.with_name(partial.name + ".resume.json").is_file()
-                                  or partial.with_name(partial.name + ".ranges.json").is_file())
+                                  or partial.with_name(partial.name + ".ranges.json").is_file()
+                                  or partial.with_name(partial.name + ".browser.json").is_file())
                 if not preserve_partial or not has_checkpoint:
                     partial.unlink(missing_ok=True)
+                    partial.with_name(partial.name + ".crdownload").unlink(missing_ok=True)
                     partial.with_name(partial.name + ".resume.json").unlink(missing_ok=True)
                     partial.with_name(partial.name + ".ranges.json").unlink(missing_ok=True)
+                    partial.with_name(partial.name + ".browser.json").unlink(missing_ok=True)
         manifest["status"] = "completed"
         return {"files": result, "folder": str(folder), "manifest": str(record_path), "plan": plan, "empty_scenes": []}
     except Cancelled as error:

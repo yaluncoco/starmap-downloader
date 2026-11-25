@@ -185,7 +185,7 @@ def test_default_zip_saves_exact_one_product_file_and_never_starts_local_process
     monkeypatch.setattr(monthly_scenes, "prepare_zip_source", forbidden)
     route = "monthly-download" if monthly else "download"
     saved = client.wait(client.post(route, request)["job_id"])["result"]
-    assert len(saved["files"]) == 2 and zip_provider.archive_gets == list(UUIDS)
+    assert len(saved["files"]) == 2 and sorted(zip_provider.archive_gets) == sorted(UUIDS)
     for file, identifier, product in zip(saved["files"], UUIDS, (P1, P2), strict=True):
         path = Path(file["path"])
         assert path.name == product + ".zip" and path.read_bytes() == zip_provider.payloads[identifier]
@@ -213,7 +213,7 @@ def test_all_selected_zip_downloads_finish_before_offline_native_calibration_and
     for name in ("prepare_zip_source", "download_mosaic"):
         original = getattr(monthly_scenes, name)
         def offline(*args, _original=original, _name=name, **kwargs):
-            assert zip_provider.archive_gets == list(UUIDS)
+            assert sorted(zip_provider.archive_gets) == sorted(UUIDS)
             stages.append(_name)
             with monkeypatch.context() as scope:
                 scope.setattr(HttpClient, "request", lambda *a, **k: pytest.fail("Local SAFE processing made an HTTP request"))
@@ -282,7 +282,12 @@ def test_crc_correct_but_false_safe_manifest_hash_is_rejected_before_publication
     members[name] = bytes(changed)
     zip_provider.payloads[UUIDS[0]] = archive(members)  # Repacking updates ZIP CRC; original SAFE checksum stays.
     result = client.wait(client.post("download", request)["job_id"], "failed")
-    assert "清单校验" in result["error"] and not list(Path(request["output_dir"]).rglob("*.zip"))
+    assert "清单校验" in result["error"]
+    assert not list(Path(request["output_dir"]).rglob(P1 + ".zip"))
+    # Another concurrent product may finish first. Keep that verified result.
+    for file in result["result"]["files"]:
+        assert file["scene"] == P2
+        assert Path(file["path"]).read_bytes() == zip_provider.payloads[UUIDS[1]]
 
 
 def test_cancel_local_extraction_keeps_all_zips_and_retry_needs_no_remote_data(
@@ -299,7 +304,7 @@ def test_cancel_local_extraction_keeps_all_zips_and_retry_needs_no_remote_data(
     monkeypatch.setattr(safe_zip, "_copy_member", cancel_extract)
     identifier = client.post("download", request)["job_id"]
     client.wait(identifier, "cancelled")
-    assert zip_provider.archive_gets == list(UUIDS)
+    assert sorted(zip_provider.archive_gets) == sorted(UUIDS)
     assert len(list(Path(request["output_dir"]).rglob("*.zip"))) == 2
     assert not list(Path(request["output_dir"]).rglob("*.tif"))
     assert not list(Path(request["output_dir"]).rglob("*.part"))
@@ -350,13 +355,15 @@ def test_official_zipper_redirect_keeps_exact_product_and_filename(client, zip_p
     _, (request, _) = zip_search(client, tmp_path)
     zip_provider.redirect = True
     result = client.wait(client.post("download", request)["job_id"])["result"]
-    assert len(result["files"]) == 2 and zip_provider.archive_gets == list(UUIDS)
+    assert len(result["files"]) == 2 and sorted(zip_provider.archive_gets) == sorted(UUIDS)
 
 
 @pytest.mark.parametrize("changed_version", [False, True])
 def test_cancelled_zip_resumes_frozen_selection_after_server_restart_and_rejects_changed_version(
         client, server, zip_provider, tmp_path, changed_version):
     _, (request, _) = zip_search(client, tmp_path)
+    request["options"]["download_workers"] = 1
+    request["plan_fingerprint"] = client.post("plan", request)["fingerprint"]
     zip_provider.pause = True
     identifier = client.post("download", request)["job_id"]
     assert zip_provider.started.wait(4)
@@ -400,6 +407,10 @@ def test_fresh_edge_defaults_to_whole_zip_and_can_switch_local_analysis_and_mont
         open_data_page(page, server.origin)
         pw.expect(page.locator("#sourceProfile")).to_have_value(PROFILE)
         pw.expect(page.locator("#zipProcessing")).to_have_value("original")
+        pw.expect(page.locator("#zipEngine")).to_have_value("auto")
+        pw.expect(page.locator("#zipWorkers")).to_have_value("2")
+        pw.expect(page.locator('#zipEngine option[value="edge"]')).to_be_disabled()
+        page.locator("#zipEngine").select_option("http")
         page.locator('[data-tab="coordinates"]').click()
         page.locator("#coordinates").fill("116.350,39.900,116.355,39.905")
         page.locator("#applyCoordinates").click()
@@ -409,18 +420,34 @@ def test_fresh_edge_defaults_to_whole_zip_and_can_switch_local_analysis_and_mont
         page.locator("#outputDirectory").fill(str(tmp_path / "browser-zips"))
         page.locator("#searchScenes").click()
         page.wait_for_function("()=>!state.busy&&state.plan?.pipeline==='download-zip'", timeout=15000)
+        page.locator("#selectAll").click()
+        page.wait_for_function("()=>!state.busy&&state.plan?.scene_count===2", timeout=15000)
         page.locator("#downloadSelected").click()
         pw.expect(page.locator("#planDetails")).to_contain_text("完整原始 SAFE ZIP")
+        pw.expect(page.locator("#planDetails")).to_contain_text("标准下载 · 系统网络")
+        pw.expect(page.locator("#planDetails")).to_contain_text("最多 2 个完整产品")
         pw.expect(page.locator("#planNote")).to_contain_text("SAFE 清单成员校验值")
         assert "预计请求数量" not in page.locator("#planDetails").inner_text()
+        zip_provider.pause = True
         page.locator("#confirmDownload").click()
+        pw.expect(page.locator("#jobProductQueue .product-transfer")).to_have_count(2, timeout=15000)
+        pw.expect(page.locator("#zipEngine")).to_be_disabled()
+        pw.expect(page.locator("#zipWorkers")).to_be_disabled()
+        page.locator("#cancelJob").click()
+        pw.expect(page.locator("#jobStatus")).to_have_text("已取消", timeout=15000)
+        zip_provider.pause = False
+        page.locator("#retryDownload").click()
         pw.expect(page.locator("#jobStatus")).to_have_text("下载完成", timeout=15000)
+        page.locator("#zipEngine").select_option("http-direct")
+        page.locator("#zipWorkers").select_option("4")
         page.locator("#zipProcessing").select_option("analysis")
-        page.wait_for_function("()=>!state.busy&&state.plan?.kind==='monthly-scenes'", timeout=15000)
+        page.wait_for_function("()=>!state.busy&&state.plan?.kind==='monthly-scenes'&&state.plan.options.download_workers===4", timeout=15000)
         pw.expect(page.locator("#downloadEstimate")).to_contain_text("在本地处理")
         assert "次请求" not in page.locator("#downloadEstimate").inner_text()
         page.locator("#downloadSelected").click()
         pw.expect(page.locator("#planDetails")).to_contain_text("本地完整拼接")
+        pw.expect(page.locator("#planDetails")).to_contain_text("标准下载 · 直连")
+        pw.expect(page.locator("#planDetails")).to_contain_text("最多 4 个完整产品")
         assert "预计请求数量" not in page.locator("#planDetails").inner_text()
         page.locator("#downloadDialog [data-close]").first.click()
         page.locator("#zipProcessing").select_option("original")
@@ -433,5 +460,8 @@ def test_fresh_edge_defaults_to_whole_zip_and_can_switch_local_analysis_and_mont
         assert "每月一份拼接影像" not in page.locator("#downloadEstimate").inner_text()
         page.locator("#downloadSelected").click()
         pw.expect(page.locator("#planDetails")).to_contain_text("个完整 ZIP")
+        pw.expect(page.locator("#planDetails")).to_contain_text("标准下载 · 直连")
+        pw.expect(page.locator("#planDetails")).to_contain_text("最多 4 个完整产品")
+        assert page.evaluate("state.plan.months.filter(row=>row.plan).every(row=>row.options.download_engine==='http-direct'&&row.options.download_workers===4)")
         assert not errors, errors
         browser.close()

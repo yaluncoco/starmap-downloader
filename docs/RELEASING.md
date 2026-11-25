@@ -16,6 +16,8 @@ $asset = ".\dist\StarmapDownloader-Setup-$version-win-x64.exe"
 
 当前构建脚本会强制检查 GEDI、联合下载、统一账号界面、研究包说明、月度流程、默认官方完整 ZIP 与图标资源（`--require-gedi --require-batch --require-accounts --require-monthly --require-safe-zip`）。1.5.0 起还检查空间选择脚本与官方 S3 拼接入口。打包后还应验证同一区域与共同日期的真实联网流程：
 
+1.10.0 起，完整 ZIP 包检查还要求下载方式、1～4 产品设置、产品队列和官网入口；服务模式应报告没有原生 Edge 引擎，真实桌面模式应实际绑定 WebView2。使用 `live_browser_safe.py --out verification/edge-safe --products 1 --workers 1` 验证原生 Edge 完整传输、CRC、清单与 SHA-256，随后切换方式复用同包。`--prefix-mib 32 --products 2 --workers 2` 只验证有限前缀与取消，不能替代完整产品验收。原生中断恢复只承诺浏览器当前操作标记为可恢复的情况，跨重启续传另按强源版本条件验收。
+
 ```powershell
 .\.venv\Scripts\python.exe -X utf8 scripts\check_package.py .\dist\StarmapDownloader\StarmapDownloader.exe --require-version $version --require-gedi --require-batch --require-accounts --require-monthly --require-safe-zip --require-update-repository $repo
 .\.venv\Scripts\python.exe -X utf8 scripts\live_batch.py --exe .\dist\StarmapDownloader\StarmapDownloader.exe --output .\verification\batch\packaged-live

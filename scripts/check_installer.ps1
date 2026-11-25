@@ -147,6 +147,14 @@ try {
     $headers=@{'X-App-Token'=$Matches[1]}
     $bootstrap=Invoke-RestMethod -Uri "$origin/api/bootstrap" -Headers $headers -TimeoutSec 5
     if (!$bootstrap.native_dialogs -or $bootstrap.version -ne $check.RegisteredVersion) { throw 'Installed native API mismatch' }
+    if ([version]$check.RegisteredVersion -ge [version]'1.10.0') {
+        for ($i=0; $i -lt 40 -and !$bootstrap.edge_download_ready; $i++) {
+            Start-Sleep -Milliseconds 250
+            $bootstrap=Invoke-RestMethod -Uri "$origin/api/bootstrap" -Headers $headers -TimeoutSec 5
+        }
+        if (!$bootstrap.edge_download_ready) { throw 'Installed native Edge download engine did not bind' }
+        $check.NativeEdgeDownloadEngine=$true
+    }
     if ($UpdateRepository -and $bootstrap.update_repository -ne $UpdateRepository) { throw 'Installed native API update channel mismatch' }
     if ($bootstrap.PSObject.Properties.Name -contains 'gedi_collections') {
         if ($bootstrap.gedi_collections.Count -ne 13 -or $bootstrap.gedi_default -ne 'gedi02-a-003') { throw 'Installed GEDI collections mismatch' }

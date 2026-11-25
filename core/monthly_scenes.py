@@ -26,6 +26,7 @@ from shapely.ops import unary_union
 from . import VERSION
 from .batch_workflow import _safe_error, _write_json
 from .download import download_scenes
+from .download_queue import ProductProgress, run_product_queue
 from .errors import Cancelled, UserError, keep_download_result
 from .http import check_cancel
 from .local_paths import io_path
@@ -36,7 +37,7 @@ from .public_download import read_on_grid
 from .raw_download import download_original, raw_plan
 from .research_bundle import NODATA, SCL_NODATA, bundle_paths
 from .scene_identity import expected_products
-from .safe_zip import PROFILE as ZIP, prepare_zip_source, zip_source_plan
+from .safe_zip import PROFILE as ZIP, download_options as zip_download_options, prepare_zip_source, storage_plan as zip_storage_plan, zip_source_plan
 from .spatial_selection import footprint, polygon_area
 
 PIPELINE = "download-scenes-mosaic-clip"
@@ -132,9 +133,16 @@ def build_monthly_scene_plan(geometry, scenes, options, *, cancel=None):
                  "source_plans": [entry[0] if isinstance(entry, tuple) else entry for entry in source_plans]}
     fingerprint = hashlib.sha256(json.dumps(signature, sort_keys=True, separators=(",", ":"),
                                              allow_nan=False).encode()).hexdigest()[:16]
+    storage_id = fingerprint
+    if options["profile"] == ZIP:
+        storage_signature = {**signature, "options": {k: v for k, v in options.items() if k not in ("download_engine", "download_workers")},
+                             "source_plans": [zip_storage_plan(entry) for entry in source_plans]}
+        storage_id = hashlib.sha256(json.dumps(storage_signature, sort_keys=True, separators=(",", ":"),
+                                              allow_nan=False).encode()).hexdigest()[:16]
     plan = {**city[0], "kind": "monthly-scenes", "fingerprint": fingerprint,
             "pipeline": PIPELINE, "pipeline_schema": SCHEMA,
-            "folder_name": "S2_monthly_" + fingerprint, "source_count": len(rows),
+            "folder_name": "S2_monthly_" + storage_id, "source_count": len(rows),
+            **({"storage_fingerprint": storage_id} if options["profile"] == ZIP else {}),
             "product_keys": [row["key"] for row in rows],
             "dates": sorted({row["date"] for row in rows}), "coverage": {"coverage_percent": coverage},
             "estimated_pu": pu if options["profile"] == "s2-process" else None,
@@ -318,7 +326,7 @@ class _MonthMosaicReader:
 
 
 def download_monthly_scenes(geometry, scenes, options, output_dir, *, auth=None, s3_auth=None,
-                            raw_auth=None, cancel=None, progress=None, planned=None):
+                            raw_auth=None, cancel=None, progress=None, planned=None, browser=None):
     plan, inputs = planned or build_monthly_scene_plan(geometry, scenes, options, cancel=cancel)
     rows = copy.deepcopy(inputs["rows"])
     folder = io_path(output_dir) / plan["folder_name"]
@@ -369,29 +377,34 @@ def download_monthly_scenes(geometry, scenes, options, output_dir, *, auth=None,
         if shutil.disk_usage(folder).free < plan["staging_required_bytes"]:
             raise UserError(f"整景、整月拼接与裁剪的输出及临时空间预计至少需要 {plan['staging_required_bytes'] / 1024**3:.1f} GB。请选择空间足够的输出目录。")
         start(0)
-        for index, (scene, source_plan) in enumerate(zip(rows, inputs["source_plans"], strict=True)):
-            check_cancel(cancel)
-            source_progress = lambda message, fraction=0, detail=None: report(
+        zip_workers = min(zip_download_options(options)["download_workers"], len(rows)) if options["profile"] == ZIP else 1
+        zip_meter = ProductProgress([scene["title"] for scene in rows], report, folder=str(folder), workers=zip_workers)
+        downloaded_sources = {}
+
+        def receive(index, pair, signal):
+            scene, source_plan = pair
+            check_cancel(signal)
+            source_progress = (lambda message, fraction=0, detail=None: zip_meter.update(index, message, fraction, detail)) if options["profile"] == ZIP else lambda message, fraction=0, detail=None: report(
                 f"{index + 1}/{len(rows)} 景 · {scene['tiles'][0]} · {scene['date']} · {message}",
                 (index + fraction) / len(rows), detail)
             metadata, matches = {}, ["safe_id"]
             if options["profile"] == ZIP:
                 downloaded = download_original(footprint(scene), source_plan, str(folder / "原始ZIP"), raw_auth,
-                                               cancel=cancel, progress=source_progress)
+                                               cancel=signal, progress=source_progress, browser=browser)
                 paths = {}
             elif options["profile"] in (PUBLIC, NATIVE):
                 downloaded = download_original(footprint(scene), source_plan, str(folder / "原始影像"), None,
-                                               s3_auth=s3_auth, cancel=cancel, progress=source_progress)
+                                               s3_auth=s3_auth, cancel=signal, progress=source_progress)
                 paths = {target["asset"]: Path(file["path"]) for target, file in
                          zip(source_plan["targets"], downloaded["files"], strict=True)}
                 if options["profile"] == NATIVE:
-                    metadata = native_metadata(paths, source_plan["targets"], scene, cancel)
+                    metadata = native_metadata(paths, source_plan["targets"], scene, signal)
                     paths = {band: paths[f"{band}_{NATIVE_RESOLUTION[band]}m"] for band in options["bands"] + ["SCL"]}
                 else:
                     paths = {band: paths[band] for band in options["bands"] + ["SCL"]}
             else:
                 downloaded = download_scenes(footprint(scene), [scene], inputs["export_options"],
-                    str(folder / "整景导出"), auth, cancel=cancel, progress=source_progress, planned=source_plan)
+                    str(folder / "整景导出"), auth, cancel=signal, progress=source_progress, planned=source_plan)
                 if downloaded["files"]:
                     entry = downloaded["files"][0]
                     paths = {"unmasked": Path(entry["bundle"]["unmasked"]), "SCL": Path(entry["bundle"]["scl"])}
@@ -399,10 +412,29 @@ def download_monthly_scenes(geometry, scenes, options, output_dir, *, auth=None,
                     matches = table["sources"][0]["observed_matches"]
                 else:
                     paths, matches = {}, []
-            records[scene["key"]] = {"paths": paths, "result": downloaded, "metadata": metadata, "matches": matches}
-            document["sources"].append({"product": _product_id(scene), "status": "verified",
-                                        "manifest": downloaded["manifest"], "files": downloaded["files"]})
+            return {"paths": paths, "result": downloaded, "metadata": metadata, "matches": matches}
+
+        def received(index, record, error):
+            scene = rows[index]
+            if record is not None:
+                records[scene["key"]] = record
+                downloaded_sources[index] = {"product": _product_id(scene), "status": "verified",
+                                             "manifest": record["result"]["manifest"], "files": record["result"]["files"]}
+            elif getattr(error, "download_result", None):
+                partial = error.download_result
+                downloaded_sources[index] = {"product": _product_id(scene), "status": "cancelled" if isinstance(error, Cancelled) else "failed",
+                                             "manifest": partial["manifest"], "files": partial["files"]}
+            document["sources"] = [downloaded_sources[i] for i in sorted(downloaded_sources)]
             _write_json(manifest, document)
+            if options["profile"] == ZIP:
+                zip_meter.complete(index, record, error)
+
+        source_items = list(zip(rows, inputs["source_plans"], strict=True))
+        if options["profile"] == ZIP:
+            run_product_queue(source_items, receive, zip_workers, cancel=cancel, on_result=received)
+        else:
+            for index, pair in enumerate(source_items):
+                received(index, receive(index, pair, cancel), None)
         if len(records) != len(rows):
             raise UserError("本月未完成全部所选影像的下载和校验，不能拼接。")
         finish({"selected_scene_products": len(rows), "verified_scene_products": len(records)})

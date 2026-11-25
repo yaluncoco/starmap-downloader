@@ -126,7 +126,13 @@
           <div id="zipOptions" hidden>
             <label for="zipProcessing">下载完成后的操作</label>
             <select id="zipProcessing" data-lock><option value="original">保存完整 ZIP · 与网页下载一致（默认）</option><option value="analysis">保留 ZIP，再本地拼接和裁剪研究区</option></select>
-            <p class="field-note">每个选中产品保存一份官方 SAFE ZIP，使用官网产品编号与原始文件名。包含全部波段、质量图层和元数据；支持中断继续。检索无需登录，下载使用已保存的 CDSE 账号。</p>
+            <label for="zipEngine">下载方式</label>
+            <select id="zipEngine" data-lock><option value="auto">自动 · 优先使用 Edge 下载</option><option value="edge">Edge 浏览器引擎</option><option value="http">标准下载 · 系统网络</option><option value="http-direct">标准下载 · 直连</option></select>
+            <label for="zipWorkers">同时下载的产品</label>
+            <select id="zipWorkers" data-lock><option value="2">2 个（默认）</option><option value="1">1 个</option><option value="3">3 个</option><option value="4">4 个（官方上限）</option></select>
+            <p class="field-note" id="zipEngineNote">Edge 直接接收原始文件并写入磁盘。已完成产品校验后复用；有源版本记录的中断文件用标准下载续传。多个产品可同时下载，单景速度取决于官方服务和网络。</p>
+            <div class="account-help-links"><button id="zipBrowser" class="inline-link" type="button">打开 Copernicus Browser</button><button id="zipQuotas" class="inline-link" type="button">查看官方下载配额</button></div>
+            <p class="field-note">每个选中产品保存一份官方 SAFE ZIP，文件名与官网一致，包含全部波段、质量图层和元数据。下载使用已保存的 CDSE 账号；官网页面可以使用自己的登录会话。</p>
           </div>
           <div id="opticalOptions">
           <label for="imageMode">导出内容</label>
@@ -259,6 +265,7 @@
         <section id="jobPanel" class="job-panel" hidden aria-live="polite">
           <div class="job-heading"><div><span id="jobStatus" class="job-status">正在下载</span><strong id="jobTitle">下载队列</strong></div><button id="closeJobPanel" class="icon-button" title="收起下载记录" aria-label="收起下载记录" hidden><svg class="icon"><use href="#i-close"/></svg></button></div>
           <p id="jobMessage">准备中…</p><p id="jobTransfer" class="field-note" hidden></p><div class="progress-track"><div id="jobProgress"></div></div>
+          <div id="jobProductQueue" class="job-product-queue" hidden aria-label="完整产品下载队列"></div>
           <div class="job-meta"><span id="jobFraction">0%</span><button id="toggleJobLogs" class="inline-link">查看记录</button><button id="cancelJob" class="inline-link danger">取消任务</button></div>
           <div id="jobSources" class="job-sources" hidden></div><div id="jobLogs" class="job-logs" hidden></div><div id="jobFiles" class="job-files" hidden></div>
           <button id="retryDownload" type="button" class="button button-primary full-width" hidden>重试下载</button>

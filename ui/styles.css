@@ -113,5 +113,6 @@
 .map-offline{pointer-events:none}
 
 .resume-downloads{padding:14px 18px;background:#f4f9f7;border-bottom:1px solid #dde9e4}.resume-downloads>strong{font-size:12px}.resume-downloads>p{font-size:11px;color:var(--muted);margin:6px 0 10px}.resume-download{display:flex;align-items:center;gap:12px;padding:8px 0}.resume-download>div{flex:1;min-width:0;display:grid;gap:4px}.resume-download strong{font-size:11px}.resume-download span,.resume-download small{font-size:10px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.resume-download .button{font-size:11px;white-space:nowrap}
+.job-product-queue{max-height:180px;overflow:auto;margin:10px 0}.product-transfer{padding:8px 0;border-bottom:1px solid #e7ecea}.product-transfer>div{display:grid;gap:4px;min-width:0}.product-transfer strong{font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.product-transfer span{font-size:11px;color:var(--muted)}.product-transfer progress{display:block;width:100%;height:5px;margin-top:6px;accent-color:var(--primary)}
 
 .resume-downloads{flex:none;max-height:170px;overflow:auto}.resume-downloads[hidden]{display:none}

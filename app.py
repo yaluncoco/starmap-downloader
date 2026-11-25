@@ -106,7 +106,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._respond(403, {"error": "请求校验失败，请重新打开软件。"})
         try:
             if path.path == "/api/bootstrap":
-                return self._respond(200, {**self.server.service.bootstrap(), "native_dialogs": self.server.dialogs is not None})
+                return self._respond(200, {**self.server.service.bootstrap(), "native_dialogs": self.server.dialogs is not None,
+                                          "edge_download": self.server.service.browser_download is not None,
+                                          "edge_download_ready": bool(getattr(self.server.service.browser_download, "available", False))})
             if path.path == "/api/accounts":
                 return self._respond(200, self.server.service.account_status())
             if path.path == "/api/cities":
@@ -262,10 +264,20 @@ def main():
     thread.start()
     window = webview.create_window("星图影像下载器", server.origin, width=1440, height=960, min_size=(1100, 740), background_color="#f5f7f8", text_select=True)
     dialogs.window = window
+    engine = None
+    if sys.platform == "win32":
+        from core.browser_download import EdgeDownload
+        download_window = webview.create_window("星图下载引擎", html="<html><body></body></html>",
+                                                hidden=True, width=300, height=200)
+        engine = EdgeDownload(download_window)
+        server.service.browser_download = engine
+        window.events.closed += engine.close
     try:
         webview.start(gui="edgechromium", debug=False, private_mode=True, icon=str(UI_ROOT / "assets" / "globe-orbit.ico"))
     finally:
         server.service.shutdown()
+        if engine:
+            engine.close()
         server.shutdown()
         server.server_close()
 

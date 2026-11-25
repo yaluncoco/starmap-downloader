@@ -56,7 +56,7 @@ from .open_sen3 import public_collections as sen3_collections
 from .open_slc import S1_SLC, SLC_COLLECTION, SLC_FIRST, search_slc
 from .sen3_download import download_sen3
 from .updates import InstallerLaunchError, UpdateClient, packaged_repository, version_key
-from .safe_zip import PROFILE as S2_ZIP, build_zip_plan, search_zip
+from .safe_zip import PROFILE as S2_ZIP, build_zip_plan, download_options as zip_download_options, search_zip
 
 S2_PROCESS = "s2-process"
 ORIGINAL = "cdse-original"
@@ -128,6 +128,7 @@ OFFICIAL_LINKS = {
     "auth": "https://documentation.dataspace.copernicus.eu/APIs/SentinelHub/Overview/Authentication.html",
     "docs": "https://documentation.dataspace.copernicus.eu/APIs/SentinelHub/Process/Examples/S2L2A.html",
     "quotas": "https://documentation.dataspace.copernicus.eu/Quotas.html",
+    "browser": "https://browser.dataspace.copernicus.eu/",
     "raw-auth": "https://documentation.dataspace.copernicus.eu/APIs/Token.html",
     "raw-catalogue": "https://documentation.dataspace.copernicus.eu/APIs/STAC.html",
     "s3-keys": "https://eodata-s3keysmanager.dataspace.copernicus.eu/",
@@ -179,6 +180,7 @@ class Service:
     def __init__(self, config_dir=None):
         self.auth = AuthManager()
         self.raw_auth = RawAuth()
+        self.browser_download = None
         self.s3_auth = CDSES3Auth()
         self.earthdata_auth = EarthdataAuth()
         self._collections_lock = threading.Lock()
@@ -607,7 +609,8 @@ class Service:
         if profile == GEDI:
             options = gedi_options(supplied, query["collection"])
         elif profile == S2_ZIP and supplied.get("mode", "original") == "original":
-            options = {"collection": "sentinel-2-l2a", "mode": "original", "transport": "odata", "archive_kind": "cdse-safe-zip"}
+            options = {"collection": "sentinel-2-l2a", "mode": "original", "transport": "odata", "archive_kind": "cdse-safe-zip",
+                       **zip_download_options(supplied)}
         elif profile == ORIGINAL or profile in NATIVE_OPEN:
             modes = ("original", "metadata", "asset", "assets") if profile in (ORIGINAL, SEN3_PUBLIC) or profile in MODIS else (
                 ("assets", "asset") if profile in (S2_L3_PUBLIC, S2_ANNUAL) else
@@ -652,6 +655,7 @@ class Service:
             if profile in (S2_PUBLIC, S2_NATIVE, S2_ZIP):
                 options["profile"] = profile
             if profile == S2_ZIP:
+                options.update(zip_download_options(supplied))
                 if options["layout"] != "mosaic":
                     raise UserError("整景 ZIP 的本地处理输出一份拼接与裁剪影像；逐景保存请使用完整 ZIP 模式。")
                 options["monthly_pipeline"] = "download-scenes-mosaic-clip"
@@ -744,13 +748,16 @@ class Service:
         planned = None
         if profile != GEDI and "transport" not in options:
             planned = self._planned_source(profile, geometry, options, scenes, None, cancel=cancel)
-            if plan.get("kind") != "pending" and planned[0]["fingerprint"] != plan["fingerprint"]:
+            compatible = {planned[0]["fingerprint"]}
+            if profile == S2_ZIP and not any(key in options for key in ("download_engine", "download_workers")):
+                compatible.add(planned[0].get("storage_fingerprint"))
+            if plan.get("kind") != "pending" and plan["fingerprint"] not in compatible:
                 raise UserError("原下载计划与当前软件的区域网格或产品身份不一致；请重新选择任务，已完成原件仍可复用。")
         if options.get("monthly_pipeline") == "download-scenes-mosaic-clip":
             from .monthly_scenes import download_monthly_scenes
             return download_monthly_scenes(geometry, scenes, options, output_dir, auth=self.auth,
                                            s3_auth=self.s3_auth, raw_auth=self.raw_auth,
-                                           cancel=cancel, progress=progress, planned=planned)
+                                           cancel=cancel, progress=progress, planned=planned, browser=self.browser_download)
         if profile == S2_NATIVE:
             return download_native_mosaic(geometry, scenes, options, output_dir, self.s3_auth, cancel=cancel, progress=progress, planned=planned)
         if profile == GEDI:
@@ -758,7 +765,8 @@ class Service:
         if "transport" in options:
             if profile == SEN3_PUBLIC:
                 return download_sen3(geometry, plan, output_dir, cancel=cancel, progress=progress)
-            return download_original(geometry, plan, output_dir, self.raw_auth, s3_auth=self.s3_auth, cancel=cancel, progress=progress)
+            return download_original(geometry, plan, output_dir, self.raw_auth, s3_auth=self.s3_auth,
+                                     cancel=cancel, progress=progress, browser=self.browser_download)
         if profile == S2_PROCESS:
             return download_scenes(geometry, scenes, options, output_dir, self.auth, cancel=cancel, progress=progress, planned=planned)
         return download_public(geometry, scenes, options, output_dir, cancel=cancel, progress=progress, planned=planned)

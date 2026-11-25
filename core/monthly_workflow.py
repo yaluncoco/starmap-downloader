@@ -234,6 +234,8 @@ class MonthlyWorkflow:
                 for key in ("pipeline", "pipeline_schema", "whole_mosaic_bytes", "staging_required_bytes"):
                     if key in plan:
                         compact[key] = plan[key]
+                if "storage_fingerprint" in plan:
+                    compact["storage_fingerprint"] = plan["storage_fingerprint"]
                 frozen["plan"] = compact
                 requirements.update(compact["requires"])
                 preview.update(plan=compact, estimated_bytes=(plan.get("estimated_bytes") or 0) if archive_only else plan["bytes_per_scene"],
@@ -247,6 +249,21 @@ class MonthlyWorkflow:
         fingerprint = _digest({"schema": SCHEMA, "geometry": mapping(normalize(geometry)), "profile": state["profile"],
                                "months": [{key: group[key] for key in ("month", "criteria", "scene_keys", "options", "status", "plan")}
                                           for group in selected]})
+        storage_id = fingerprint
+        if state["profile"] == "s2-cdse-zip":
+            from .safe_zip import storage_plan
+            storage_months = []
+            for group in selected:
+                stored = {key: copy.deepcopy(group[key]) for key in ("month", "criteria", "scene_keys", "options", "status", "plan")}
+                for key in ("download_engine", "download_workers"):
+                    stored["options"].pop(key, None)
+                if stored["plan"] is not None:
+                    if stored["plan"]["kind"] == "original":
+                        stored["plan"] = storage_plan(stored["plan"])
+                    elif "storage_fingerprint" in stored["plan"]:
+                        stored["plan"]["fingerprint"] = stored["plan"].pop("storage_fingerprint")
+                storage_months.append(stored)
+            storage_id = _digest({"schema": SCHEMA, "geometry": mapping(normalize(geometry)), "profile": state["profile"], "months": storage_months})
         region = state["aoi"].get("region", {})
         label = re.sub(r"[^\w\u3400-\u9fff.-]+", "_", state["aoi"]["name"])[:40]
         archive_only = all(not row["scenes"] or row["options"]["mode"] == "original" for row in selected)
@@ -262,7 +279,7 @@ class MonthlyWorkflow:
                 "archive_only": archive_only,
                 "estimated_pu": sum((row.get("plan") or {}).get("estimated_pu") or 0 for row in previews),
                 "boundary_name": state["aoi"]["name"], "region": region,
-                "folder_name": f"{label}_月度_{state['start_month']}_{state['end_month']}_{fingerprint}",
+                "folder_name": f"{label}_月度_{state['start_month']}_{state['end_month']}_{storage_id}",
                 "time_note": ("UTC 逐月保存本月全部已选官方完整 SAFE ZIP；产品版本和文件名与网页一致。"
                               if archive_only else "UTC 逐月处理；先下载本月全部已选整景，再本地整月拼接，最后按完整边界裁剪；只使用该月产品。")}
         check_cancel(cancel)

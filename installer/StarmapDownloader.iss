@@ -1,5 +1,5 @@
-#ifndef AppVersion
-#define AppVersion "1.9.0"
+﻿#ifndef AppVersion
+#define AppVersion "1.10.0"
 #endif
 #ifndef AppRoot
 #define AppRoot "..\dist\StarmapDownloader"

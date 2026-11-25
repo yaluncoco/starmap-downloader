@@ -63,6 +63,13 @@ def check_executable(executable, *, set_output=None, require_output=None, requir
                 assert 'id="zipProcessing"' in home.text and 'id="installUpdate"' in home.text
                 app_script = session.get(origin + "/app.js", timeout=3).text
                 assert 'profile:"s2-cdse-zip"' in app_script and 'api("install-update"' in app_script
+                if tuple(map(int, version.split("."))) >= (1, 10, 0):
+                    for identifier in ("zipEngine", "zipWorkers", "zipBrowser", "jobProductQueue"):
+                        assert f'id="{identifier}"' in home.text
+                    assert 'value="http-direct"' in home.text and 'value="4"' in home.text
+                    assert bootstrap.get("edge_download") is False  # --server has no native view.
+                    assert bootstrap.get("edge_download_ready") is False
+                    assert bootstrap["links"]["browser"] == "https://browser.dataspace.copernicus.eu/"
                 rejected = session.post(origin + "/api/install-update", json={"tag": "v99.9.0"}, timeout=4)
                 assert rejected.status_code == 400 and "先下载并校验" in rejected.json()["error"]
             boundary = {"type": "Polygon", "coordinates": [[[444430, 4416850], [444870, 4416850],

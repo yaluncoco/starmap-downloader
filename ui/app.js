@@ -184,13 +184,38 @@ function criteria() {
   return {...result,max_cloud:Number($("maxCloud").value)};
 }
 function options() {
-  if(isZipOnly())return {mode:"original",transport:"odata"};
+  const zipSettings=isZip()?{download_engine:$("zipEngine").value,download_workers:Number($("zipWorkers").value)}:{};
+  if(isZipOnly())return {mode:"original",transport:"odata",...zipSettings};
   if(isGedi())return {mode:$("gediMode").value,fields:[...document.querySelectorAll("#gediFields input:checked")].map(input=>input.value),beams:[...document.querySelectorAll("#gediBeams input:checked")].map(input=>input.value),quality:$("gediQuality").value,nondegraded:$("gediNondegraded").checked,min_sensitivity:Number($("gediSensitivity").value),resolution:Number($("gediResolution").value),reference_path:$("gediReference").value.trim(),sample_reference:$("gediSampleReference").checked};
   if(isS5p()||isWorldCoverSingle()||isSlc())return {mode:"original",transport:"public"};
   if(isRaw())return {mode:$("rawMode").value,asset:$("rawAsset").value,assets:[...state.pickedFiles].sort(),transport:rawRoute()};
   if(isDem())return {mode:$("demMode").value};
   if(isRtc())return {mode:"rtc",resolution:Number($("rtcResolution").value),bands:rtcInputs().filter(input=>input.checked).map(input=>input.value)};
-  return {mode:$("imageMode").value,resolution:Number($("resolution").value),max_cloud:Number($("maxCloud").value),mask_clouds:$("maskClouds").checked,bands:[...document.querySelectorAll("#customBands input:checked")].map(input=>input.value),layout:isNativeS3()||isZip()?"mosaic":$("imageLayout").value,priority:Spatial.priorityFor("primary"),fill_gaps:$("mosaicFallback").checked};
+  return {mode:$("imageMode").value,resolution:Number($("resolution").value),max_cloud:Number($("maxCloud").value),mask_clouds:$("maskClouds").checked,bands:[...document.querySelectorAll("#customBands input:checked")].map(input=>input.value),layout:isNativeS3()||isZip()?"mosaic":$("imageLayout").value,priority:Spatial.priorityFor("primary"),fill_gaps:$("mosaicFallback").checked,...zipSettings};
+}
+function renderZipEngine() {
+  const engine=$("zipEngine").value;
+  $("zipEngine").querySelector('option[value="edge"]').disabled=!state.edgeDownload;
+  const notes={
+    auto:state.edgeDownload?"优先用 Edge 直接接收并写入磁盘；引擎未就绪时使用标准下载。": "当前为本地网页服务，自动使用标准下载；桌面版可用 Edge 引擎。",
+    edge:"用桌面版 Edge 引擎直接接收官方完整产品并写入磁盘，使用 Windows 网络设置。",
+    http:"用标准下载引擎，沿用系统网络设置。有可靠的源版本记录时支持字节续传。",
+    "http-direct":"完整产品直连官方服务，下载连接不经过系统代理；账号授权和产品校验照常进行。"
+  };
+  $("zipEngineNote").textContent=(notes[engine]||notes.auto)+" 已完成产品校验后复用。并发用于多个产品；单景速度取决于官方服务、网络与账号配额。";
+}
+function zipEngineLabel(engine="auto") {
+  return {auto:"自动 · 优先使用 Edge 下载",edge:"Edge 浏览器引擎",http:"标准下载 · 系统网络","http-direct":"标准下载 · 直连"}[engine]||engine;
+}
+function zipPlanItems(settings={}) {
+  return [["下载方式",zipEngineLabel(settings.download_engine)],["同时下载",`最多 ${settings.download_workers??2} 个完整产品`]];
+}
+function renderProductQueue(rows) {
+  const box=$("jobProductQueue");
+  box.hidden=!rows?.length;
+  if(!rows?.length){box.innerHTML="";return;}
+  const labels={queued:"排队",downloading:"下载中",verifying:"校验中",completed:"已完成",cancelled:"已取消",failed:"失败"};
+  box.innerHTML=rows.map(row=>`<div class="product-transfer"><div><strong title="${escapeHtml(row.name)}">${escapeHtml(row.name)}</strong><span>${escapeHtml(labels[row.status]||row.status)}${row.received_bytes?" · "+sizeLabel(row.received_bytes):""}${row.total_bytes?" / "+sizeLabel(row.total_bytes):""}${row.bytes_per_second>0?" · "+sizeLabel(row.bytes_per_second)+"/s":""}</span></div><progress max="1" value="${Math.max(0,Math.min(1,row.progress||0))}" aria-label="${escapeHtml(row.name)}"></progress></div>`).join("");
 }
 function downloadRequest() {
   const result={...Cities.request(),profile:state.profile,criteria:criteria(),query_id:state.query?.id,scene_keys:[...state.selected],options:options(),output_dir:$("outputDirectory").value.trim()};
@@ -764,7 +789,7 @@ function showDownloadPlan() {
       renderPlanFolder();if(!$("downloadDialog").open)$("downloadDialog").showModal();return;
     }
     if(p.kind==="monthly-scenes"&&isZip()){
-      const rows=[["下载内容",`${p.source_count} 个官方完整 SAFE ZIP`],["下载后处理","本地完整拼接，再从保存文件裁剪研究区"],["裁剪网格",`${p.width.toLocaleString()} × ${p.height.toLocaleString()} · ${p.resolution} 米`],["输出内容",p.options.label],["坐标系",p.crs_label],["完整拼接中间影像",sizeLabel(p.whole_mosaic_bytes)],["输出及临时空间",`估算至少 ${sizeLabel(p.staging_required_bytes)}`]];
+      const rows=[["下载内容",`${p.source_count} 个官方完整 SAFE ZIP`],...zipPlanItems(p.options),["下载后处理","全部 ZIP 校验完成后，本地完整拼接，再裁剪研究区"],["裁剪网格",`${p.width.toLocaleString()} × ${p.height.toLocaleString()} · ${p.resolution} 米`],["输出内容",p.options.label],["坐标系",p.crs_label],["完整拼接中间影像",sizeLabel(p.whole_mosaic_bytes)],["输出及临时空间",`估算至少 ${sizeLabel(p.staging_required_bytes)}`]];
       $("planDetails").innerHTML=rows.map(([name,value])=>`<div class="plan-item"><span>${escapeHtml(name)}</span><strong>${escapeHtml(value)}</strong></div>`).join("")+`<div class="plan-item wide"><span>保存位置</span><strong id="planPreviewFolder" class="plan-path"></strong></div>`;
       $("planNote").textContent="先完成所有已选产品的官方完整 ZIP 下载和校验，再只读取本地文件拼接与裁剪。保留原始 ZIP、完整拼接影像和研究区成果；下载阶段显示文件字节和速度，本地处理分别显示进度。";
       renderPlanFolder();if(!$("downloadDialog").open)$("downloadDialog").showModal();return;
@@ -780,7 +805,8 @@ function showDownloadPlan() {
       ["文件形式",p.options.mode==="original"?(isDem()?"完整 DSM GeoTIFF":isModis()?"原始 HDF4":isZip()||isSlc()?"完整原始 SAFE ZIP":"官方整包或单主文件"):p.options.mode==="metadata"?"目录元数据":"目录所列原始资产"]]:
       [["影像数量",`${p.scene_count} 景`],["输出网格",`${p.width.toLocaleString()} × ${p.height.toLocaleString()} 像元`],["像元大小",`${p.resolution} 米`],["输出内容",p.options.label],["坐标系",`${p.crs_label} · EPSG:${p.epsg}`],["预计文件体积",`${sizeLabel(p.bytes_per_scene*p.scene_count)}（未压缩）`],
        [native?"官方原件缓存":pub?"需读取的公开源":"预计请求数量",native?`${p.source_objects} 个原件 · 约 ${sizeLabel(p.native_source_bytes)}${p.native_size_unknown?"，部分体积下载时确定":""}`:pub?`${p.source_objects} 个源文件`:`最多 ${p.requests} 次 · 每景 ${p.tiles_per_scene} 区块`],["处理额度",pub||native?"无需 Sentinel Hub 额度":`约 ${p.estimated_pu} PU`]];
-    items.push(["下载队列","按产品依次处理 · 完整性校验后继续"],["保存格式","保留来源原始文件；区域分析输出 GeoTIFF 及配套记录"]);
+    if(isZip())items.push(...zipPlanItems(p.options));
+    items.push(["下载队列",isZip()?"按所选并发下载；每个产品单独校验，已完成 ZIP 保留":"按产品依次处理 · 完整性校验后继续"],["保存格式","保留来源原始文件；区域分析输出 GeoTIFF 及配套记录"]);
     const rows=items.map(([name,value])=>`<div class="plan-item"><span>${escapeHtml(name)}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
     const mosaicRows=p.kind==="mosaic"?[["拼接产品",`${p.source_count} 个区块 / 1 份区域输出`],["选中采集日期（UTC）",p.dates.join(" / ")],["产品边界覆盖",`${p.coverage.coverage_percent.toFixed(2)}% · 未覆盖 ${p.coverage.uncovered_percent.toFixed(2)}%`],["交叠优先级",p.coverage.priority_label]].map(([name,value])=>`<div class="plan-item"><span>${escapeHtml(name)}</span><strong>${escapeHtml(value)}</strong></div>`).join(""):"";
     const files=raw||gedi? p.targets.map(t=>t.name).slice(0,6).join(" / ")+(p.targets.length>6?`（另 ${p.targets.length-6} 项）`:"") :p.options.output_bands.join(" / ");
@@ -824,6 +850,7 @@ function showDownloadProgress(kind="download") {
   downloads.retryId=null;$("retryDownload").hidden=true;$("retryDownloadNote").hidden=true;
   $("installUpdate").hidden=true;
   $("jobTransfer").hidden=true;
+  renderProductQueue([]);
   state.resultFolder="";
   $("jobTitle").textContent=kind==="update"?"软件更新":kind==="monthly-download"?"按月影像下载":Batch.query?"主数据及附带数据":isGedi()?"GEDI 数据下载":"下载队列";
   Batch.progress([]);
@@ -882,8 +909,9 @@ async function pollJob(id,planVersion=state.planVersion) {
         $("jobTransfer").hidden=!receiving;
         if(receiving){
           const total=transfer.total_bytes, speed=transfer.bytes_per_second, eta=transfer.eta_seconds;
-          $("jobTransfer").textContent=`已接收 ${sizeLabel(transfer.received_bytes||0)}${total?" / "+sizeLabel(total):""}${speed>0?" · "+sizeLabel(speed)+"/s":""}${eta>0?" · 预计剩余 "+(eta<60?Math.ceil(eta)+" 秒":Math.ceil(eta/60)+" 分钟"):""}`;
+          $("jobTransfer").textContent=`已接收 ${sizeLabel(transfer.received_bytes||0)}${total?" / "+sizeLabel(total):""}${speed>0?" · "+sizeLabel(speed)+"/s":""}${eta>0?" · 预计剩余 "+(eta<60?Math.ceil(eta)+" 秒":Math.ceil(eta/60)+" 分钟"):""}${transfer.download_workers?" · 同时下载 "+transfer.active_downloads+"/"+transfer.download_workers:""}`;
         }
+        renderProductQueue(transfer.product_queue);
         $("jobLogs").innerHTML=job.logs.map(log=>`<div class="job-log"><time>${new Date(log.time*1000).toLocaleTimeString("zh-CN",{hour12:false})}</time><span>${escapeHtml(log.message)}</span></div>`).join("");
         $("jobLogs").scrollTop=$("jobLogs").scrollHeight;
         Batch.progress(job.detail?.batch_groups);
@@ -945,6 +973,10 @@ function bindEvents() {
   $("downloadUpdate").addEventListener("click",()=>updateAction(true));
   $("installUpdate").addEventListener("click",installDownloadedUpdate);
   $("zipProcessing").addEventListener("change",()=>{renderProfile();renderScenes();schedulePlan();});
+  $("zipWorkers").addEventListener("change",()=>{schedulePlan();});
+  $("zipEngine").addEventListener("change",()=>{renderZipEngine();schedulePlan();});
+  $("zipBrowser").addEventListener("click",()=>api("open-link",{name:"browser"}).catch(e=>toast(e.message,true)));
+  $("zipQuotas").addEventListener("click",()=>api("open-link",{name:"quotas"}).catch(e=>toast(e.message,true)));
   let datesBeforeWorldCover;
   $("sourceProfile").addEventListener("change",()=>{
     const wasWorldCover=isWorldCover();
@@ -1100,7 +1132,7 @@ async function initialize() {
   try{configureMap();}catch(error){try{map?.remove();}catch{}map=null;aoiLayer=null;footprintLayer=null;MapView.notice("地图初始化失败，仍可按城市或导入 SHP 设置区域，并通过任务栏下载和取消。");}
   bindEvents();Spatial.initialize();Accounts.initialize();Monthly.initialize();Cities.initialize();
   try{
-    const data=await api("bootstrap");state.connected=data.connected;state.rawConnected=data.raw_connected;state.s3Connected=data.s3_connected;state.earthdataConnected=Boolean(data.earthdata_connected);state.gediCollections=data.gedi_collections||[];state.nativeDialogs=data.native_dialogs;
+    const data=await api("bootstrap");state.connected=data.connected;state.rawConnected=data.raw_connected;state.s3Connected=data.s3_connected;state.earthdataConnected=Boolean(data.earthdata_connected);state.gediCollections=data.gedi_collections||[];state.nativeDialogs=data.native_dialogs;state.edgeDownload=Boolean(data.edge_download);renderZipEngine();
     Batch.initialize(data.batch_sources||[]);
     renderResumableDownloads(data.resumable_downloads||[]);
     updates.configured=Boolean(data.update_repository);

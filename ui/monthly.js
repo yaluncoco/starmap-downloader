@@ -68,7 +68,11 @@ const Monthly = {
   spatialRequest(current) {return {...Cities.request(),profile:state.profile,monthly_id:this.query.id,month:this.active,query_id:current.query.id,criteria:current.criteria,scene_keys:[...current.selected],options:{priority:this.current().priority}};},
   planHtml(plan) {
     const zip=plan.archive_only;
-    const rows=[["研究区域",plan.boundary_name+" · "+(plan.region?.scope||"完整所选边界")],["月份范围",`${plan.start_month} — ${plan.end_month} (UTC)`],["输出数量",zip?`${plan.scene_count} 个完整 ZIP · ${plan.output_count} 个月`:`${plan.output_count} 个月 · 每月一份城市裁剪影像`],["时间与来源",plan.time_note],["下载顺序",zip?"逐月保存全部已选原始 ZIP；已完成文件经校验后复用，中断后可继续。":"按月份依次处理；每月先下载全部已选整景，再本地拼接，最后裁剪。各阶段可继续，已完成文件核验后复用"]];
+    const rows=[["研究区域",plan.boundary_name+" · "+(plan.region?.scope||"完整所选边界")],["月份范围",`${plan.start_month} — ${plan.end_month} (UTC)`],["输出数量",zip?`${plan.scene_count} 个完整 ZIP · ${plan.output_count} 个月`:`${plan.output_count} 个月 · 每月一份城市裁剪影像`],["时间与来源",plan.time_note],["下载顺序",zip?"按月份依次执行，每月按所选并发下载全部 ZIP；已完成文件经校验后复用。":isZip()?"按月份依次执行，每月并发下载并校验全部 ZIP，再本地拼接与裁剪；各阶段可继续。":"按月份依次处理；每月先下载全部已选整景，再本地拼接，最后裁剪。各阶段可继续，已完成文件核验后复用"]];
+    if(isZip()){
+      const choices=plan.months.filter(row=>row.plan).map(row=>row.options);
+      rows.push(["下载方式",[...new Set(choices.map(o=>zipEngineLabel(o.download_engine)))].join(" / ")],["同时下载",[...new Set(choices.map(o=>`最多 ${o.download_workers??2} 个完整产品`))].join(" / ")]);
+    }
     if(!zip)rows.splice(3,0,["城市裁剪成果",`${sizeLabel(plan.estimated_bytes)}（未压缩，含配套图层）`]);
     if(plan.native_source_bytes)rows.push([state.profile==="s2-process"?"整景导出":isZip()?"完整 ZIP 体积估算":"整景原件",`约 ${sizeLabel(plan.native_source_bytes)}，下载后保留并可复用`]);
     if(plan.whole_mosaic_bytes)rows.push(["整月中间影像",`${sizeLabel(plan.whole_mosaic_bytes)}（未压缩，拼接后保留）`]);
