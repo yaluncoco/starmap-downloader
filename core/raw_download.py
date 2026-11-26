@@ -13,6 +13,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 import zlib
 from pathlib import Path, PurePosixPath
+from contextlib import nullcontext
 from urllib.parse import urljoin
 from uuid import uuid4
 
@@ -793,7 +794,8 @@ def _basename(item):
     return f"{title}_{identity}"
 
 
-def download_original(geometry, plan, output_dir, auth, *, s3_auth=None, cancel=None, progress=None, browser=None):
+def download_original(geometry, plan, output_dir, auth, *, s3_auth=None, cancel=None, progress=None, browser=None,
+                      download_slots=None):
     safe = bool(plan["targets"]) and all((item.get("identity") or {}).get("kind") == "cdse-safe-zip" for item in plan["targets"])
     if safe:
         from .safe_zip import check_zip_target, download_options
@@ -802,12 +804,12 @@ def download_original(geometry, plan, output_dir, auth, *, s3_auth=None, cancel=
         if len({item["uuid"] for item in plan["targets"]}) != len(plan["targets"]):
             raise UserError("完整产品下载队列包含重复 UUID，请只选择一个相同版本。")
         settings = download_options(plan["options"])
-        return _download_zip_queue(geometry, plan, output_dir, auth, cancel, progress, browser, settings)
+        return _download_zip_queue(geometry, plan, output_dir, auth, cancel, progress, browser, settings, download_slots)
     return _download_original_serial(geometry, plan, output_dir, auth, s3_auth=s3_auth,
                                      cancel=cancel, progress=progress, browser=browser)
 
 
-def _download_zip_queue(geometry, plan, output_dir, auth, cancel, progress, browser, settings):
+def _download_zip_queue(geometry, plan, output_dir, auth, cancel, progress, browser, settings, download_slots=None):
     base = io_path(output_dir)
     if not base.is_absolute():
         raise UserError("请选择本地绝对输出目录。")
@@ -827,9 +829,10 @@ def _download_zip_queue(geometry, plan, output_dir, auth, cancel, progress, brow
 
     def worker(index, item, signal):
         single = {**plan, "targets": [item], "requests": 1, "scene_count": 1}
-        return _download_original_serial(geometry, single, output_dir, auth, cancel=signal,
-                    progress=lambda message, fraction=0, detail=None: meter.update(index, message, fraction, detail),
-                    browser=browser, write_area=False)
+        with download_slots.acquire(signal) if download_slots is not None else nullcontext():
+            return _download_original_serial(geometry, single, output_dir, auth, cancel=signal,
+                        progress=lambda message, fraction=0, detail=None: meter.update(index, message, fraction, detail),
+                        browser=browser, write_area=False)
 
     def finished(index, value, error):
         partial_result = value or getattr(error, "download_result", None)

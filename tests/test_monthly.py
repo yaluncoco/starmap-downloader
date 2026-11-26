@@ -146,7 +146,12 @@ def test_cancel_and_cold_task_store_resume_original_months_after_ui_boundary_cha
     assert provider.trap_started.wait(5)
     client.post("cancel", {"job_id": first})
     cancelled = client.wait(first, status="cancelled")["result"]
-    original = Path(cancelled["files"][0]["path"])
+    assert cancelled["files"] == []  # No city mosaic is published before all downloads finish.
+    downloaded = cancelled["months"][0]["result"]
+    assert cancelled["months"][0]["status"] == "downloaded"
+    assert downloaded["stages"][0]["status"] == "completed"
+    assert downloaded["stages"][1]["status"] == "pending"
+    original = Path(downloaded["downloaded_source_files"][0]["path"])
     before = original.stat().st_mtime_ns
     cold = DownloadTasks(server.service.config_dir)
     kind, definition = cold.load(first)
@@ -166,7 +171,8 @@ def test_cancel_and_cold_task_store_resume_original_months_after_ui_boundary_cha
     provider.block_number = None
     second = client.post("retry-download", {"job_id": first})["job_id"]
     result = client.wait(second)["result"]
-    assert result["months"][0]["result"]["files"][0]["status"] == "skipped"
+    assert result["months"][0]["result"]["downloaded_source_files"][0]["status"] == "skipped"
+    assert result["months"][0]["result"]["files"][0]["status"] == "completed"
     assert original.stat().st_mtime_ns == before
     assert Path(result["folder"]) == Path(cancelled["folder"])
     assert load_aoi(Path(result["folder"]) / "研究区.shp").equals(shape(aoi["geometry"]))

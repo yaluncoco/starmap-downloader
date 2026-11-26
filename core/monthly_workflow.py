@@ -1,4 +1,4 @@
-"""Frozen, sequential Sentinel-2 mosaics, with an independent UTC month per output."""
+"""Download selected months first, then create independent offline UTC mosaics."""
 from __future__ import annotations
 
 import copy
@@ -6,6 +6,7 @@ import datetime as dt
 import hashlib
 import json
 import re
+import threading
 import time
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from shapely.geometry import mapping
 from . import VERSION
 from .batch_workflow import _safe_error, _write_json
 from .errors import Cancelled, UserError
+from .download_queue import DownloadSlots, run_product_queue
 from .geometry import load_aoi, save_aoi
 from .http import check_cancel
 from .integrity import sha256_file
@@ -246,10 +248,11 @@ class MonthlyWorkflow:
             previews.append(preview)
         if not any(row["scenes"] for row in selected):
             raise UserError("至少选择一个有可用产品的月份；无匹配月份不会生成影像。")
-        fingerprint = _digest({"schema": SCHEMA, "geometry": mapping(normalize(geometry)), "profile": state["profile"],
-                               "months": [{key: group[key] for key in ("month", "criteria", "scene_keys", "options", "status", "plan")}
-                                          for group in selected]})
-        storage_id = fingerprint
+        content = {"schema": SCHEMA, "geometry": mapping(normalize(geometry)), "profile": state["profile"],
+                   "months": [{key: group[key] for key in ("month", "criteria", "scene_keys", "options", "status", "plan")}
+                              for group in selected]}
+        fingerprint = _digest({**content, "execution": {"schema": 1, "download_scope": "all-selected-months"}})
+        storage_id = _digest(content)
         if state["profile"] == "s2-cdse-zip":
             from .safe_zip import storage_plan
             storage_months = []
@@ -276,12 +279,15 @@ class MonthlyWorkflow:
                 "whole_mosaic_bytes": sum(row.get("whole_mosaic_bytes", 0) for row in previews),
                 "staging_required_bytes": sum(row.get("staging_required_bytes", 0) for row in previews),
                 "pipeline": "download-zip" if archive_only else "download-scenes-mosaic-clip",
+                "download_scope": "all-selected-months", "execution_schema": 1,
+                "download_workers": max((group["options"].get("download_workers", 2) for group in selected if group["scenes"]),
+                                        default=1) if state["profile"] == "s2-cdse-zip" else 1,
                 "archive_only": archive_only,
                 "estimated_pu": sum((row.get("plan") or {}).get("estimated_pu") or 0 for row in previews),
                 "boundary_name": state["aoi"]["name"], "region": region,
                 "folder_name": f"{label}_月度_{state['start_month']}_{state['end_month']}_{storage_id}",
-                "time_note": ("UTC 逐月保存本月全部已选官方完整 SAFE ZIP；产品版本和文件名与网页一致。"
-                              if archive_only else "UTC 逐月处理；先下载本月全部已选整景，再本地整月拼接，最后按完整边界裁剪；只使用该月产品。")}
+                "time_note": ("先下载全部已选月份的完整 SAFE ZIP；下载并发跨月份衔接，每月分别保存。产品版本和文件名与网页一致。"
+                              if archive_only else "先下载全部已选月份的整景；全部下载结束后，再按 UTC 月份只读本地文件拼接、裁剪完整边界；只使用各月自己的产品。")}
         check_cancel(cancel)
         with self.service.lock:
             if not self.state or self.state["id"] != state["id"]:
@@ -345,55 +351,156 @@ class MonthlyWorkflow:
 
         def result(status):
             return {"status": status, "plan": plan, "months": copy.deepcopy(records), "folder": str(folder),
+                    "phases": copy.deepcopy(phases),
                     "manifest": str(manifest), "files": [item for row in records for item in (row["result"] or {}).get("files", [])],
                     "empty_scenes": []}
 
-        def report(index, message, fraction=0, detail=None):
-            if detail and detail.get("month_stage"):
-                records[index]["stage"] = detail["month_stage"]
-            job.update(f"{index + 1}/{len(groups)} · {groups[index]['month']} · {message}",
-                       (index + fraction) / len(groups),
-                       {"folder": str(folder), "monthly_groups": [{"id": row["month"], "month": row["month"],
-                          "title": row["month"], "status": row["status"], "stage": row.get("stage"),
-                          "error": row["error"]} for row in records]})
+        from .monthly_scenes import DownloadedScenes
+        from .safe_zip import download_options as zip_options
 
-        _write_json(manifest, document)
-        try:
-            for index, group in enumerate(groups):
-                check_cancel(job.cancel_event)
-                row = records[index]
-                if not group["scenes"]:
-                    report(index, "本月没有匹配产品" if row["status"] == "empty" else "本月未选择产品" if row["status"] == "not_selected" else row["error"], 1)
-                    continue
-                row["status"] = "running"
-                report(index, "核验该月计划与已有文件")
+        lock = threading.RLock()
+        selected = [index for index, group in enumerate(groups) if group["scenes"]]
+        staged = {}
+        download_fraction = {index: 0. for index in selected}
+        local_fraction = {index: 0. for index in selected}
+        transfers = {}
+        phase = 0
+        phases = [{"id": "download_sources", "title": "下载所有已选月份", "status": "running",
+                   "started_at": dt.datetime.now(dt.timezone.utc).isoformat()}]
+        if any(groups[index]["options"].get("monthly_pipeline") for index in selected):
+            phases.append({"id": "process_local", "title": "逐月本地拼接与裁剪", "status": "pending"})
+        document["phases"] = phases
+        workers = max(zip_options(groups[index]["options"])["download_workers"] for index in selected) if definition["profile"] == "s2-cdse-zip" else 1
+        slots = DownloadSlots(workers) if definition["profile"] == "s2-cdse-zip" else None
+        if slots is not None:
+            transfers.update({index: {"product_queue": [
+                {"name": scene["title"], "status": "queued", "progress": 0., "received_bytes": 0,
+                 "total_bytes": None, "bytes_per_second": 0.}
+                for scene in groups[index]["scenes"]]} for index in selected})
+
+        def save():
+            with lock:
                 _write_json(manifest, document)
-                try:
-                    row["result"] = self.service._run_source(definition["profile"], geometry, group["options"], group["scenes"],
-                                                              group["plan"], str(folder / group["month"]),
-                                                              cancel=job.cancel_event,
-                                                              progress=lambda message, fraction=0, detail=None: report(index, message, fraction, detail))
-                    if any(date[:7] != group["month"] for date in row["result"].get("used_dates", [])):
-                        raise UserError("输出来源日期不属于本月，已停止本任务；请检查来源记录。")
-                    row["status"] = "completed" if row["result"]["files"] else "no_valid_pixels"
-                except Cancelled as error:
+
+        def report(index, message, fraction=0, detail=None):
+            detail = detail or {}
+            with lock:
+                if detail.get("month_stage"):
+                    records[index]["stage"] = detail["month_stage"]
+                fraction = min(1., max(0., fraction or 0.))
+                has_stages = groups[index]["options"].get("monthly_pipeline") == "download-scenes-mosaic-clip"
+                if phase == 0:
+                    download_fraction[index] = min(1., fraction * 3) if has_stages else fraction
+                    if detail.get("product_queue"):
+                        transfers[index] = copy.deepcopy(detail)
+                    completed = sum(download_fraction.values()) / len(selected)
+                else:
+                    local_fraction[index] = min(1., max(0., (fraction * 3 - 1) / 2)) if has_stages else fraction
+                    completed = sum(local_fraction[i] for i in staged) / len(staged)
+                queue = [{**item, "month": groups[i]["month"], "name": groups[i]["month"] + " · " + item["name"]}
+                         for i in sorted(transfers) for item in transfers[i].get("product_queue", [])]
+                active = [item for item in queue if item["status"] in ("downloading", "verifying")]
+                speed = sum((item.get("bytes_per_second") or 0) for item in active) if phase == 0 else 0.
+                total = sum(item["total_bytes"] for item in queue) if queue and len(queue) == sum(len(groups[i]["scenes"]) for i in selected) and all(item.get("total_bytes") for item in queue) else None
+                received = sum(item.get("received_bytes") or 0 for item in queue)
+                payload = {"folder": str(folder), "workflow_stage": phases[phase]["id"],
+                           "workflow_stage_title": phases[phase]["title"],
+                           "monthly_groups": [{"id": row["month"], "month": row["month"], "title": row["month"],
+                                "status": row["status"], "stage": row.get("stage"), "error": row["error"]}
+                               for row in records], "product_queue": queue,
+                           "download_workers": workers, "active_downloads": len(active) if phase == 0 else 0,
+                           "received_bytes": received, "total_bytes": total, "bytes_per_second": speed,
+                           "eta_seconds": max(0., (total - received) / speed) if total and speed > 0 else None,
+                           "transfer_phase": "download" if phase == 0 and any(item["status"] == "downloading" for item in active) else "local" if phase else "verify",
+                           "month_stage": "download_scenes" if phase == 0 else detail.get("month_stage", "local_mosaic")}
+                overall = (phase + completed) / len(phases)
+            job.update(f"{phase + 1}/{len(phases)} · {phases[phase]['title']} · {groups[index]['month']} · {message}", overall, payload)
+
+        def receive_month(_, index, signal):
+            group, row = groups[index], records[index]
+            with lock:
+                row.update(status="running", stage="download_scenes")
+            report(index, "核验冻结计划并下载整景")
+            save()
+            try:
+                downloaded = self.service._run_source(definition["profile"], geometry, group["options"], group["scenes"],
+                    group["plan"], str(folder / group["month"]), cancel=signal,
+                    progress=lambda message, fraction=0, detail=None: report(index, message, fraction, detail),
+                    download_only=True, download_slots=slots)
+                with lock:
+                    if isinstance(downloaded, DownloadedScenes):
+                        staged[index] = downloaded
+                        row.update(status="downloaded", result=downloaded.preview())
+                    else:
+                        # Archive-only outputs, and older frozen workflows without
+                        # separate scene stages, are already complete here.
+                        row["result"] = downloaded
+                        if any(date[:7] != group["month"] for date in downloaded.get("used_dates", [])):
+                            raise UserError("输出来源日期不属于本月，已停止本任务；请检查来源记录。")
+                        row["status"] = "completed" if downloaded["files"] else "no_valid_pixels"
+            except Cancelled as error:
+                with lock:
                     row.update(status="cancelled", result=getattr(error, "download_result", None))
-                    raise
-                except Exception as error:
+                raise
+            except Exception as error:
+                with lock:
                     row.update(status="failed", error=_safe_error(error), result=getattr(error, "download_result", row["result"]))
-                finally:
-                    _write_json(manifest, document)
-                report(index, row["error"] or ("本月下载完成" if row["status"] == "completed" else "本月没有有效输出"), 1)
+            finally:
+                save()
+            report(index, row["error"] or "本月下载结束", 1 / 3 if group["options"].get("monthly_pipeline") else 1)
+            return index
+
+        save()
+        try:
+            # Independent month queues share one product limit. A month with one
+            # product can use the next month's work to fill the remaining slot.
+            run_product_queue(selected, receive_month, min(workers, len(selected)), cancel=job.cancel_event)
+            check_cancel(job.cancel_event)
+            phases[0].update(status="partial" if any(row["status"] in ("failed", "search_failed") for row in records) else "completed",
+                             completed_at=dt.datetime.now(dt.timezone.utc).isoformat())
+            save()
+            if staged:
+                phase = 1
+                phases[phase].update(status="running", started_at=dt.datetime.now(dt.timezone.utc).isoformat())
+                save()
+                for index in sorted(staged):
+                    check_cancel(job.cancel_event)
+                    group, row = groups[index], records[index]
+                    row.update(status="running", stage="local_mosaic")
+                    report(index, "全部月份下载已结束，开始只读本地文件处理", 1 / 3)
+                    save()
+                    try:
+                        row["result"] = self.service._run_source(definition["profile"], geometry, group["options"], group["scenes"],
+                            group["plan"], str(folder / group["month"]), cancel=job.cancel_event,
+                            progress=lambda message, fraction=0, detail=None: report(index, message, fraction, detail),
+                            staged=staged[index])
+                        if any(date[:7] != group["month"] for date in row["result"].get("used_dates", [])):
+                            raise UserError("输出来源日期不属于本月，已停止本任务；请检查来源记录。")
+                        row["status"] = "completed" if row["result"]["files"] else "no_valid_pixels"
+                    except Cancelled as error:
+                        row.update(status="cancelled", result=getattr(error, "download_result", None))
+                        raise
+                    except Exception as error:
+                        row.update(status="failed", error=_safe_error(error), result=getattr(error, "download_result", row["result"]))
+                    finally:
+                        save()
+                    report(index, row["error"] or ("本月处理完成" if row["status"] == "completed" else "本月没有有效输出"), 1)
+                phases[phase].update(status="partial" if any(records[i]["status"] == "failed" for i in staged) else "completed",
+                                     completed_at=dt.datetime.now(dt.timezone.utc).isoformat())
+            elif len(phases) > 1:
+                phases[1]["status"] = "not_started"
             check_cancel(job.cancel_event)
             document["status"] = "partial" if any(row["status"] in ("failed", "search_failed") for row in records) else "completed"
             return result(document["status"])
         except Cancelled as error:
+            phases[phase].update(status="cancelled", stopped_at=dt.datetime.now(dt.timezone.utc).isoformat())
             document["status"] = "cancelled"
             error.download_result = result("cancelled")
             raise
         except Exception as error:
+            phases[phase].update(status="failed", stopped_at=dt.datetime.now(dt.timezone.utc).isoformat())
             document["status"] = "failed"
             error.download_result = result("failed")
             raise
         finally:
-            _write_json(manifest, document)
+            save()

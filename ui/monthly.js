@@ -27,12 +27,12 @@ const Monthly = {
     if(!supported)$("timeMode").value="dates";
     const enabled=this.enabled();
     $("timeMode").querySelector('option[value="monthly"]').textContent=isZipOnly()?"按月下载 · 保存全部已选 ZIP":"按月下载 · 每月一份拼接影像";
-    $("monthlyFields").querySelector("p").textContent=isZipOnly()?"支持跨年；每月独立选择产品，保存该月全部已选完整 ZIP。无匹配月份不生成文件。":"支持跨年；每个月独立选择来源，先下载整景，再本地拼接并裁剪完整研究区。无匹配月份不生成文件。";
+    $("monthlyFields").querySelector("p").textContent=isZipOnly()?"支持跨年；每月独立选择产品，保存该月全部已选完整 ZIP。无匹配月份不生成文件。":"支持跨年；先下载全部已选月份的整景，再逐月本地拼接并裁剪完整研究区。无匹配月份不生成文件。";
     $("monthlyFields").hidden=!enabled;$("dateFields").hidden=enabled||!dateEnabled();
     $("companionSection").hidden=enabled;
     $("imageLayout").hidden=enabled||isNativeS3()||isZip();document.querySelector('label[for="imageLayout"]').hidden=enabled||isNativeS3()||isZip();
     if(enabled){$("imageLayout").value="mosaic";$("mosaicFallbackField").hidden=false;}
-    $("mosaicDescription").textContent=enabled?"先下载本月全部已选整景，再本地拼接整月影像，最后按完整研究区裁剪。整景和整月影像保留；重叠位置默认云量较低优先，可在该月地图和列表中调整。":"在地图上选择影像块。交叠处默认云量较低优先；像元来源图保留实际产品和日期。未被选中影像覆盖的位置为 NoData。";
+    $("mosaicDescription").textContent=enabled?"先下载全部已选月份的整景，下载结束后逐月本地拼接，再按完整研究区裁剪。整景和整月影像保留；重叠位置默认云量较低优先，可在该月地图和列表中调整。":"在地图上选择影像块。交叠处默认云量较低优先；像元来源图保留实际产品和日期。未被选中影像覆盖的位置为 NoData。";
     if(enabled){$("searchScenes").querySelector("span").textContent="按月查找覆盖影像";$("downloadSelected").querySelector("span").textContent="下载已选月份";}
     this.renderResults();updateAvailability();
   },
@@ -68,7 +68,7 @@ const Monthly = {
   spatialRequest(current) {return {...Cities.request(),profile:state.profile,monthly_id:this.query.id,month:this.active,query_id:current.query.id,criteria:current.criteria,scene_keys:[...current.selected],options:{priority:this.current().priority}};},
   planHtml(plan) {
     const zip=plan.archive_only;
-    const rows=[["研究区域",plan.boundary_name+" · "+(plan.region?.scope||"完整所选边界")],["月份范围",`${plan.start_month} — ${plan.end_month} (UTC)`],["输出数量",zip?`${plan.scene_count} 个完整 ZIP · ${plan.output_count} 个月`:`${plan.output_count} 个月 · 每月一份城市裁剪影像`],["时间与来源",plan.time_note],["下载顺序",zip?"按月份依次执行，每月按所选并发下载全部 ZIP；已完成文件经校验后复用。":isZip()?"按月份依次执行，每月并发下载并校验全部 ZIP，再本地拼接与裁剪；各阶段可继续。":"按月份依次处理；每月先下载全部已选整景，再本地拼接，最后裁剪。各阶段可继续，已完成文件核验后复用"]];
+    const rows=[["研究区域",plan.boundary_name+" · "+(plan.region?.scope||"完整所选边界")],["月份范围",`${plan.start_month} — ${plan.end_month} (UTC)`],["输出数量",zip?`${plan.scene_count} 个完整 ZIP · ${plan.output_count} 个月`:`${plan.output_count} 个月 · 每月一份城市裁剪影像`],["时间与来源",plan.time_note],["下载顺序",zip?"并发下载全部已选月份的完整 ZIP；各月共享总并发上限，已完成文件校验后复用。":isZip()?"先并发下载全部已选月份的完整 ZIP；全部下载结束后逐月本地拼接与裁剪，各阶段可继续。":"先下载全部已选月份的整景；下载结束后逐月只读本地文件拼接、裁剪，已完成文件核验后复用。"]];
     if(isZip()){
       const choices=plan.months.filter(row=>row.plan).map(row=>row.options);
       rows.push(["下载方式",[...new Set(choices.map(o=>zipEngineLabel(o.download_engine)))].join(" / ")],["同时下载",[...new Set(choices.map(o=>`最多 ${o.download_workers??2} 个完整产品`))].join(" / ")]);
@@ -83,7 +83,7 @@ const Monthly = {
   progress(groups=[]) {
     if(!groups.length)return;
     $("jobSources").hidden=false;
-    const labels={pending:"等待",searching:"检索中",ready:"可选择",running:"下载中",completed:"已完成",empty:"无匹配",not_selected:"未选择",no_valid_pixels:"无有效像元",failed:"失败",search_failed:"检索失败",cancelled:"已取消"};
+    const labels={pending:"等待",searching:"检索中",ready:"可选择",running:"处理中",downloaded:"已下载，等待本地处理",completed:"已完成",empty:"无匹配",not_selected:"未选择",no_valid_pixels:"无有效像元",failed:"失败",search_failed:"检索失败",cancelled:"已取消"};
     const stages={download_scenes:"下载全部整景",local_mosaic:"本地整月拼接",clip_region:"裁剪完整研究区"};
     $("jobSources").innerHTML=groups.map(row=>`<div class="job-source ${row.status==="failed"?"failed":""}"><strong>${escapeHtml(row.month||row.id)}</strong><span>${escapeHtml(row.status==="running"&&stages[row.stage]?stages[row.stage]:labels[row.status]||row.status)}</span>${row.error?`<small>${escapeHtml(row.error)}</small>`:""}</div>`).join("");
   }

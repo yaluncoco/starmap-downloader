@@ -77,6 +77,91 @@ def _parts(tile, reference_transform, plan, options, tile_file):
         raise UserError("官方返回的文件不是有效 GeoTIFF，请重试。") from None
 
 
+def _valid_block(values, options, metadata):
+    if options["mode"] == "rgb":
+        data = values[3] == 255
+        if np.any((values[3] != 0) & ~data) or np.any(values[:3, ~data]):
+            raise UserError("处理服务返回的透明通道和颜色内容不一致，未保存。")
+    else:
+        present = np.isfinite(values) & (values != options["nodata"])
+        data = np.all(present, axis=0)
+        if np.any(~np.isfinite(values)) or np.any(np.any(present, axis=0) != data):
+            raise UserError("处理服务返回无效数值或多波段有效范围不一致，未保存。")
+    valid = int(np.count_nonzero(data))
+    if valid and not metadata["sources"]:
+        raise UserError("处理服务返回未能对应所选过境的像元，已停止保存该景。")
+    return valid
+
+
+def _download_series_blocks(entries, records, tiles, plan, options, aoi_shape, folder, http, auth, cancel, report):
+    """Persist every required API block before opening the first output raster."""
+    from .research_bundle import output_specs
+
+    completed, downloaded, reused = 0, 0, 0
+    sources = {}
+    total = plan["requests"]
+    tile_file = folder / (".block_" + uuid.uuid4().hex + ".tif")
+    fill = 0 if options["nodata"] is None else options["nodata"]
+    record, stats = None, {}
+    try:
+        for scene_index, (scene, products, identity, target, receipt, expected, cached) in enumerate(entries):
+            record = records[scene_index]
+            stats = {"downloaded_blocks": 0, "reused_blocks": 0}
+            sources[scene["key"]] = stats
+            check_cancel(cancel)
+            if cached is not None:
+                record["status"] = "skipped"
+                completed += plan["tiles_per_scene"]
+                report("已有已校验影像，跳过源区块下载", .7 * completed / total, completed_scenes=scene_index)
+                continue
+            record["status"] = "downloading"
+            specs = output_specs(options) if is_research(options) else {"analysis": options}
+            cache = ArrayCache(folder / ".download-cache" / identity,
+                               {"schema": 1, "grid": plan["fingerprint"], "source": identity}, specs)
+            for tile in tiles:
+                check_cancel(cancel)
+                if not tile.intersects:
+                    continue
+                key = [tile.row, tile.col, tile.height, tile.width]
+                saved = cache.load(key, (tile.height, tile.width), cancel)
+                report(f"下载源区块 · {scene['date']} {scene['time']} UTC · {completed + 1}/{total}",
+                       .7 * completed / total, completed_scenes=scene_index)
+                if saved:
+                    arrays, detail = saved
+                    _valid_block(arrays["analysis"], options, detail["metadata"])
+                    reused += 1
+                    stats["reused_blocks"] += 1
+                else:
+                    metadata = fetch_tile(http, auth, process_payload(tile, plan, scene, options, products=products), tile_file,
+                                          options=options, products=products, cancel=cancel, status=report)
+                    reference = from_origin(tile.bounds[0], tile.bounds[3], plan["resolution"], plan["resolution"])
+                    values = _parts(tile, reference, plan, transfer_options(options), tile_file)
+                    inside = geometry_mask([aoi_shape], out_shape=(tile.height, tile.width), transform=reference, invert=True)
+                    if is_research(options):
+                        arrays, counts = process_block(values, inside, options, products, metadata)
+                    else:
+                        values[:, ~inside] = fill
+                        arrays, counts = {"analysis": values}, None
+                    _valid_block(arrays["analysis"], options, metadata)
+                    cache.save(key, arrays, {"metadata": metadata, "counts": counts}, cancel)
+                    downloaded += 1
+                    stats["downloaded_blocks"] += 1
+                    tile_file.unlink(missing_ok=True)
+                completed += 1
+                report(f"源区块已校验 {completed}/{total}", .7 * completed / total, completed_scenes=scene_index)
+            record.update(status="downloaded", **stats)
+        check_cancel(cancel)
+        return {"downloaded_requests": downloaded, "reused_requests": reused, "sources": sources}
+    except Exception as error:
+        if record is not None:
+            record.update(status="cancelled" if isinstance(error, Cancelled) else "failed", **stats)
+            if not isinstance(error, Cancelled):
+                record["note"] = str(error) if isinstance(error, UserError) else type(error).__name__
+        raise
+    finally:
+        tile_file.unlink(missing_ok=True)
+
+
 def download_scenes(geometry, scenes, options, output_dir, auth, *, cancel=None, progress=None, planned=None):
     if options.get("layout") == "mosaic":
         from .mosaic import download_mosaic
@@ -130,23 +215,46 @@ def download_scenes(geometry, scenes, options, output_dir, auth, *, cancel=None,
                          "目录 products 是请求白名单；区块 sources 是处理服务返回的可用瓦片，不代表每个像元的来源。") +
                         "safe_id 表示匹配完整产品标识，mgrs_and_utc 表示匹配唯一的 MGRS 瓦片和采集秒，后者无法区分目录未公开的处理版本。"),
     }
+    phases = [{"id": "download_sources", "title": "下载全部已选过境的源区块", "status": "running",
+               "started_at": dt.datetime.now(dt.timezone.utc).isoformat()},
+              {"id": "process_local", "title": "本地组装与校验时间序列", "status": "pending"}]
+    manifest["phases"] = phases
+    manifest["items"] = [{"scene": scene, "path": str(target), "source_fingerprint": identity, "status": "pending", "blocks": []}
+                         for scene, products, identity, target, receipt, expected, cached in entries]
     _save_json(manifest_path, manifest)
     total, completed = plan["requests"], 0
     results = []
     detail = {"folder": str(folder), "total_scenes": len(scenes)}
 
-    def report(message, **extra):
+    download_fraction = 0.
+
+    def report(message, fraction=None, **extra):
+        nonlocal download_fraction
+        phase = phases[0] if phases[0]["status"] == "running" else phases[1]
+        if phase["id"] == "download_sources":
+            if fraction is not None:
+                download_fraction = fraction
+            fraction = download_fraction
+        elif fraction is None:
+            fraction = .7 + .2 * completed / total
         if progress:
-            progress(message, completed / total, {**detail, **extra})
+            progress(message, fraction, {**detail, "workflow_stage": phase["id"], "workflow_stage_title": phase["title"],
+                                        "transfer_phase": "download" if phase["id"] == "download_sources" else "local", **extra})
 
     http = HttpClient()
     try:
-        report("输出目录已就绪，准备处理选中的过境影像")
+        report("输出目录已就绪，先下载全部选中影像的源区块")
+        downloaded = _download_series_blocks(entries, manifest["items"], tiles, plan, options, aoi_shape, folder, http, auth, cancel, report)
+        http.close()
+        phases[0].update(status="completed", completed_at=dt.datetime.now(dt.timezone.utc).isoformat(), **downloaded)
+        phases[1].update(status="running", started_at=dt.datetime.now(dt.timezone.utc).isoformat())
+        _save_json(manifest_path, manifest)
+        report("全部源区块已下载并校验，开始只读本地缓存组装影像", .7)
         for scene_index, (scene, products, identity, target, receipt, expected, cached) in enumerate(entries):
             check_cancel(cancel)
             label = f"{scene['platform']} · {scene['date']} {scene['time']} UTC"
-            record = {"scene": scene, "path": str(target), "source_fingerprint": identity, "status": "running", "blocks": []}
-            manifest["items"].append(record)
+            record = manifest["items"][scene_index]
+            record.update(status="running", **downloaded["sources"][scene["key"]])
             if cached is not None:
                 completed += plan["tiles_per_scene"]
                 record.update(status="skipped", **cached)
@@ -184,38 +292,15 @@ def download_scenes(geometry, scenes, options, output_dir, auth, *, cancel=None,
                             key = [tile.row, tile.col, tile.height, tile.width]
                             saved_block = blocks_cache.load(key, (tile.height, tile.width), cancel)
                             if saved_block:
-                                arrays, detail = saved_block
-                                metadata = detail["metadata"]
+                                arrays, cached_detail = saved_block
+                                metadata = cached_detail["metadata"]
                                 values = arrays["analysis"]
                                 if bundle:
-                                    blocks, counts = arrays, detail["counts"]
-                                report(f"复用已校验区块 {scene_blocks}/{plan['tiles_per_scene']}", completed_scenes=scene_index)
+                                    blocks, counts = arrays, cached_detail["counts"]
+                                report(f"读取已校验本地区块 {scene_blocks}/{plan['tiles_per_scene']}", completed_scenes=scene_index)
                             else:
-                                metadata = fetch_tile(http, auth, process_payload(tile, plan, scene, options, products=products), tile_file,
-                                                      options=options, products=products, cancel=cancel, status=report)
-                                reference_transform = from_origin(tile.bounds[0], tile.bounds[3], resolution, resolution)
-                                values = _parts(tile, reference_transform, plan, transfer_options(options), tile_file)
-                                inside = geometry_mask([aoi_shape], out_shape=(tile.height, tile.width), transform=reference_transform, invert=True)
-                                if bundle:
-                                    blocks, counts = process_block(values, inside, options, products, metadata)
-                                    values = blocks["analysis"]
-                                else:
-                                    values[:, ~inside] = fill
-                            if options["mode"] == "rgb":
-                                data = values[3] == 255
-                                if np.any((values[3] != 0) & ~data) or np.any(values[:3, ~data]):
-                                    raise UserError("处理服务返回的透明通道和颜色内容不一致，未保存。")
-                            else:
-                                present = np.isfinite(values) & (values != options["nodata"])
-                                data = np.all(present, axis=0)
-                                if np.any(~np.isfinite(values)) or np.any(np.any(present, axis=0) != data):
-                                    raise UserError("处理服务返回无效数值或多波段有效范围不一致，未保存。")
-                            valid = int(np.count_nonzero(data))
-                            if valid and not metadata["sources"]:
-                                raise UserError("处理服务返回未能对应所选过境的像元，已停止保存该景。")
-                            if not saved_block:
-                                blocks_cache.save(key, blocks if bundle else {"analysis": values},
-                                                  {"metadata": metadata, "counts": counts if bundle else None}, cancel)
+                                raise UserError("已下载的源区块缺失或校验失败，本地组装已停止；请继续任务重新校验下载。")
+                            valid = _valid_block(values, options, metadata)
                             valid_pixel_count += valid
                             matched_blocks += bool(metadata["sources"])
                             record["blocks"].append({"bounds": list(tile.bounds), "width": tile.width, "height": tile.height, "valid_pixels": valid,
@@ -253,7 +338,7 @@ def download_scenes(geometry, scenes, options, output_dir, auth, *, cancel=None,
                 if not _existing_matches(partial, plan, grid_transform, identity):
                     raise UserError("最终影像校验失败，临时文件未发布。")
                 report("检查最终 GeoTIFF 区块和 SHA-256", completed_scenes=scene_index)
-                record["reused_blocks"] = blocks_cache.reused
+                record["local_source_reads"] = blocks_cache.reused
                 if bundle:
                     observed = {product["id"]: set() for product in products}
                     for block in record["blocks"]:
@@ -297,8 +382,10 @@ def download_scenes(geometry, scenes, options, output_dir, auth, *, cancel=None,
                 if bundle:
                     bundle.cleanup()
         manifest["status"] = "completed" if results else "empty"
+        phases[1].update(status=manifest["status"], completed_at=dt.datetime.now(dt.timezone.utc).isoformat())
+        report("本地影像组装和完整性校验完成", 1.)
         return {"folder": str(folder), "files": results, "manifest": str(manifest_path), "plan": plan,
-                "empty_scenes": [item["scene"]["key"] for item in manifest["items"] if item["status"] == "empty"]}
+                "empty_scenes": [item["scene"]["key"] for item in manifest["items"] if item["status"] == "empty"], "phases": phases}
     except Cancelled as error:
         manifest["status"] = "cancelled"
         keep_download_result(error, results, folder, manifest_path, plan)
@@ -309,6 +396,14 @@ def download_scenes(geometry, scenes, options, output_dir, auth, *, cancel=None,
         raise
     finally:
         try:
+            for phase in phases:
+                if phase["status"] == "running":
+                    phase.update(status=manifest["status"], stopped_at=dt.datetime.now(dt.timezone.utc).isoformat())
+                elif phase["status"] == "pending":
+                    phase["status"] = "not_started"
+            for record in manifest["items"]:
+                if record["status"] == "pending":
+                    record["status"] = "not_started"
             _save_json(manifest_path, manifest)
         finally:
             http.close()

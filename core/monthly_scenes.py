@@ -9,6 +9,7 @@ import math
 import shutil
 from collections import OrderedDict
 from contextlib import ExitStack
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -29,6 +30,7 @@ from .download import download_scenes
 from .download_queue import ProductProgress, run_product_queue
 from .errors import Cancelled, UserError, keep_download_result
 from .http import check_cancel
+from .integrity import sha256_file
 from .local_paths import io_path
 from .mosaic import PUBLIC, NATIVE, _identities, _rows, build_mosaic_plan, download_mosaic
 from .native_mosaic import NATIVE_RESOLUTION, native_metadata, native_source_plan
@@ -43,6 +45,56 @@ from .spatial_selection import footprint, polygon_area
 PIPELINE = "download-scenes-mosaic-clip"
 SCHEMA = 1
 STAGES = (("download_scenes", "下载全部整景"), ("local_mosaic", "本地整月拼接"), ("clip_region", "裁剪完整研究区"))
+
+
+@dataclass
+class DownloadedScenes:
+    """Verified local inputs retained while the other selected months download."""
+
+    folder: Path
+    manifest: Path
+    plan: dict
+    records: dict
+    document: dict
+    seals: dict = field(default_factory=dict)
+
+    def verify(self, cancel=None):
+        for path, digest in self.seals.items():
+            check_cancel(cancel)
+            if sha256_file(path, cancel) != digest:
+                raise UserError("已下载的本地原件或校验记录在等待处理期间发生变化，未开始拼接。")
+
+    def preview(self):
+        return {"status": "downloaded", "folder": str(self.folder), "manifest": str(self.manifest),
+                "pipeline": PIPELINE, "plan": self.plan, "files": [], "empty_scenes": [],
+                "used_dates": [], "whole_mosaic": None, "stages": copy.deepcopy(self.document["stages"]),
+                "downloaded_source_files": [item for source in self.document["sources"] for item in source["files"]],
+                "original_scene_manifests": [record["result"]["manifest"] for record in self.records.values()]}
+
+
+def _seal_downloads(records, cancel=None):
+    """Freeze hashes already recorded by the completed download, including bundles."""
+    seals = {}
+    for record in records.values():
+        manifest = Path(record["result"]["manifest"])
+        seals[manifest] = sha256_file(manifest, cancel)
+        for item in record["result"]["files"]:
+            path = io_path(item["path"])
+            receipt = path.with_suffix(".starmap.json")
+            metadata = json.loads(receipt.read_text(encoding="utf-8"))
+            seals[receipt] = sha256_file(receipt, cancel)
+            digest = metadata.get("sha256")
+            if not isinstance(digest, str) or len(digest) != 64:
+                raise UserError("已下载整景缺少完整的本地 SHA-256 记录，不能等待后续拼接。")
+            seals[path] = digest
+            if item.get("bundle"):
+                for role in ("unmasked", "scl", "source", "sources"):
+                    component = io_path(item["bundle"][role])
+                    proof = metadata["bundle"][role]
+                    if component.name != proof["file"]:
+                        raise UserError("整景导出的配套文件与校验记录不一致。")
+                    seals[component] = proof["sha256"]
+    return seals
 
 
 def _product_id(scene):
@@ -326,7 +378,8 @@ class _MonthMosaicReader:
 
 
 def download_monthly_scenes(geometry, scenes, options, output_dir, *, auth=None, s3_auth=None,
-                            raw_auth=None, cancel=None, progress=None, planned=None, browser=None):
+                            raw_auth=None, cancel=None, progress=None, planned=None, browser=None,
+                            download_only=False, staged=None, download_slots=None):
     plan, inputs = planned or build_monthly_scene_plan(geometry, scenes, options, cancel=cancel)
     rows = copy.deepcopy(inputs["rows"])
     folder = io_path(output_dir) / plan["folder_name"]
@@ -338,6 +391,16 @@ def download_monthly_scenes(geometry, scenes, options, output_dir, *, auth=None,
                 "fingerprint": plan["fingerprint"], "status": "running", "plan": plan,
                 "selected_products": [_product_id(row) for row in rows],
                 "stages": stages, "sources": [], "whole_mosaic": None, "clipped_result": None}
+    if staged is not None:
+        if (not isinstance(staged, DownloadedScenes) or staged.plan["fingerprint"] != plan["fingerprint"]
+                or staged.folder != folder or staged.manifest != manifest
+                or staged.document["selected_products"] != document["selected_products"]
+                or set(staged.records) != {scene["key"] for scene in rows}
+                or staged.document["stages"][0]["status"] != "completed"):
+            raise UserError("本地处理的已下载产品与冻结计划不一致，不能开始拼接。")
+        records, document = copy.deepcopy(staged.records), copy.deepcopy(staged.document)
+        stages = document["stages"]
+        document["status"] = "running"
     phase = 0
 
     def now():
@@ -370,10 +433,11 @@ def download_monthly_scenes(geometry, scenes, options, output_dir, *, auth=None,
                 "plan": plan, "files": files, "empty_scenes": [] if files else ["mosaic"],
                 "used_dates": (document["clipped_result"] or {}).get("used_dates", []),
                 "whole_mosaic": document["whole_mosaic"], "stages": stages,
+                "downloaded_source_files": [item for source in document["sources"] for item in source["files"]],
                 "original_scene_manifests": [record["result"]["manifest"] for record in records.values()]}
 
     _write_json(manifest, document)
-    try:
+    def receive_sources():
         if shutil.disk_usage(folder).free < plan["staging_required_bytes"]:
             raise UserError(f"整景、整月拼接与裁剪的输出及临时空间预计至少需要 {plan['staging_required_bytes'] / 1024**3:.1f} GB。请选择空间足够的输出目录。")
         start(0)
@@ -390,7 +454,8 @@ def download_monthly_scenes(geometry, scenes, options, output_dir, *, auth=None,
             metadata, matches = {}, ["safe_id"]
             if options["profile"] == ZIP:
                 downloaded = download_original(footprint(scene), source_plan, str(folder / "原始ZIP"), raw_auth,
-                                               cancel=signal, progress=source_progress, browser=browser)
+                                               cancel=signal, progress=source_progress, browser=browser,
+                                               download_slots=download_slots)
                 paths = {}
             elif options["profile"] in (PUBLIC, NATIVE):
                 downloaded = download_original(footprint(scene), source_plan, str(folder / "原始影像"), None,
@@ -439,7 +504,17 @@ def download_monthly_scenes(geometry, scenes, options, output_dir, *, auth=None,
             raise UserError("本月未完成全部所选影像的下载和校验，不能拼接。")
         finish({"selected_scene_products": len(rows), "verified_scene_products": len(records)})
 
+    try:
+        if staged is None:
+            receive_sources()
+        if download_only:
+            document.update(status="downloaded", downloaded_at=now())
+            report("全部所选整景下载并校验完成，等待其他月份下载", 1)
+            return DownloadedScenes(folder, manifest, plan, records, document, _seal_downloads(records, cancel))
         start(1)
+        if staged is not None:
+            report("核验等待期间保存的本地原件")
+            staged.verify(cancel)
         if options["profile"] == ZIP:
             for index, scene in enumerate(rows):
                 record = prepare_zip_source(scene, records[scene["key"]]["result"], options,

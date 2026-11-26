@@ -732,6 +732,7 @@ class Service:
             planned = public_plan(geometry, scenes, options, cancel=cancel)
         else:
             planned = build_plan(geometry, options, len(scenes), cancel=cancel)
+            planned[0].update(download_scope="all-selected-source-blocks", execution_order=["download_sources", "process_local"])
         check_cancel(cancel)
         with self._plans_lock:
             self._source_plans[key] = planned
@@ -744,7 +745,8 @@ class Service:
         planned = self._planned_source(profile, geometry, options, scenes, criteria, cancel=cancel)
         return planned[0] if isinstance(planned, tuple) else planned
 
-    def _run_source(self, profile, geometry, options, scenes, plan, output_dir, *, cancel=None, progress=None):
+    def _run_source(self, profile, geometry, options, scenes, plan, output_dir, *, cancel=None, progress=None,
+                    download_only=False, staged=None, download_slots=None):
         planned = None
         if profile != GEDI and "transport" not in options:
             planned = self._planned_source(profile, geometry, options, scenes, None, cancel=cancel)
@@ -757,7 +759,8 @@ class Service:
             from .monthly_scenes import download_monthly_scenes
             return download_monthly_scenes(geometry, scenes, options, output_dir, auth=self.auth,
                                            s3_auth=self.s3_auth, raw_auth=self.raw_auth,
-                                           cancel=cancel, progress=progress, planned=planned, browser=self.browser_download)
+                                           cancel=cancel, progress=progress, planned=planned, browser=self.browser_download,
+                                           download_only=download_only, staged=staged, download_slots=download_slots)
         if profile == S2_NATIVE:
             return download_native_mosaic(geometry, scenes, options, output_dir, self.s3_auth, cancel=cancel, progress=progress, planned=planned)
         if profile == GEDI:
@@ -766,7 +769,8 @@ class Service:
             if profile == SEN3_PUBLIC:
                 return download_sen3(geometry, plan, output_dir, cancel=cancel, progress=progress)
             return download_original(geometry, plan, output_dir, self.raw_auth, s3_auth=self.s3_auth,
-                                     cancel=cancel, progress=progress, browser=self.browser_download)
+                                     cancel=cancel, progress=progress, browser=self.browser_download,
+                                     download_slots=download_slots)
         if profile == S2_PROCESS:
             return download_scenes(geometry, scenes, options, output_dir, self.auth, cancel=cancel, progress=progress, planned=planned)
         return download_public(geometry, scenes, options, output_dir, cancel=cancel, progress=progress, planned=planned)

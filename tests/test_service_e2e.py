@@ -100,7 +100,7 @@ def test_all_masked_scene_is_skipped_not_saved(client, tmp_path, provider):
     assert not list(Path(result["folder"]).glob("*.tif"))
 
 
-def test_cancellation_preserves_completed_scene_and_cleans_current(client, tmp_path, provider):
+def test_cancellation_preserves_downloaded_source_and_cleans_current(client, tmp_path, provider):
     provider.block_number = 2
     request = client.search()
     folder = tmp_path / "output"
@@ -110,10 +110,16 @@ def test_cancellation_preserves_completed_scene_and_cleans_current(client, tmp_p
     client.post("aoi", {"clear": True}, status=400)
     client.post("cancel", {"job_id": job_id})
     assert client.wait(job_id, "cancelled")["detail"]["folder"]
-    assert len(list(folder.rglob("*.tif"))) == 1
+    assert not list(folder.rglob("*.tif"))
+    assert len(list(folder.rglob("*.npz"))) == 1
     manifest = json.loads(next(folder.rglob("下载记录_*.json")).read_text(encoding="utf-8"))
     assert manifest["status"] == "cancelled"
-    assert [x["status"] for x in manifest["items"]] == ["completed", "cancelled"]
+    assert [x["status"] for x in manifest["items"]] == ["downloaded", "cancelled"]
+    assert [phase["status"] for phase in manifest["phases"]] == ["cancelled", "not_started"]
+    provider.block_number = None
+    resumed = client.wait(client.post("retry-download", {"job_id": job_id})["job_id"])["result"]
+    assert len(resumed["files"]) == 2 and resumed["phases"][0]["reused_requests"] == 1
+    assert len(provider.process_calls) == 3
 
 
 def test_native_dialog_route_is_available_only_for_desktop_and_does_not_relax_csp(client, server):

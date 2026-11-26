@@ -17,7 +17,7 @@ const modes = {
 };
 const profiles = {
   "s2-cdse-zip":["Sentinel-2 L2A","Copernicus 官方 · 完整 SAFE ZIP","通过与 Copernicus Browser 相同的产品整包接口下载，每景保存同名 ZIP。默认保留完整产品；可选择下载后在本地拼接与裁剪，下载期间不生成区域影像。"],
-  "s2-process":["Sentinel-2 L2A","Sentinel Hub · 区域裁剪","按产品区块选择，可将不同日期拼成一份研究区影像。使用 Sentinel Hub OAuth，消耗处理额度。"],
+  "s2-process":["Sentinel-2 L2A","Sentinel Hub · 区域裁剪","按产品区块选择，可将不同日期拼成一份研究区影像。Process API 按区块导出，使用 Sentinel Hub OAuth 并消耗处理额度；需要网页同款完整产品可选择官方 SAFE ZIP。"],
   "s2-earth-search":["Sentinel-2 L2A","Earth Search · 公开裁剪","选择 Collection‑1 产品区块，按研究区拼接或分别导出。无需凭据；仅使用勾选产品。"],
   "s2-cdse-s3":["Sentinel-2 L2A","CDSE S3 · 官方原始像元拼接","用官方 XML 核对真实边界、采集时间与云量，再校验原始波段并按研究区拼接。检索和下载需要 CDSE S3 密钥，不消耗 Sentinel Hub 额度。首次会保留较大的官方原件缓存。"],
   "s2-l2a-cog":["Sentinel-2 L2A","Earth Search / AWS · 整瓦片 COG","可选地表反射率、场景分类、云雪概率、水汽、气溶胶、真彩和元数据。研究区只筛选瓦片；保留原始 DN，不裁剪、不重新打包成 SAFE。"],
@@ -785,7 +785,7 @@ function showDownloadPlan() {
   try{
     const p=state.plan;
     if(p.kind==="monthly"){
-      $("planDetails").innerHTML=Monthly.planHtml(p);$("planNote").textContent=p.archive_only?"通过与官网相同的整景入口，按月份保存全部已选完整 SAFE ZIP。校验产品身份、全部 ZIP 成员 CRC 与 SAFE 清单成员校验值，记录本地 SHA-256；保留全部原始波段和元数据。体积为目录成员估算，实际大小由下载服务确定。":isZip()?"每月先下载并校验全部已选完整 SAFE ZIP，再读取本地波段拼接整月影像，最后从已保存文件裁剪完整城市。ZIP、整月影像和城市成果分别保留。几何覆盖率不代表无云。":"每月先下载全部已选整景，完成校验后本地拼成整月影像，最后按完整边界裁剪。保留整景、整月中间影像及城市裁剪成果；配套图层保留实际采集时间和像元来源，根目录保存完整研究区 SHP。完整原始波段不等于完整 SAFE；Sentinel Hub 使用整景导出。几何覆盖率不代表无云。";
+      $("planDetails").innerHTML=Monthly.planHtml(p);$("planNote").textContent=p.archive_only?"通过与官网相同的整景入口，先下载全部已选月份的完整 SAFE ZIP。各月共享总并发上限，分别保存原件。校验产品身份、全部 ZIP 成员 CRC 与 SAFE 清单成员校验值，记录本地 SHA-256；保留全部原始波段和元数据。体积为目录成员估算，实际大小由下载服务确定。":isZip()?"先下载并校验全部已选月份的完整 SAFE ZIP，再逐月读取本地波段拼接整月影像，最后从已保存文件裁剪完整城市。ZIP、整月影像和城市成果分别保留。几何覆盖率不代表无云。":"先下载全部已选月份的整景，完成校验后逐月本地拼成整月影像，最后按完整边界裁剪。保留整景、整月中间影像及城市裁剪成果；配套图层保留实际采集时间和像元来源，根目录保存完整研究区 SHP。完整原始波段不等于完整 SAFE；Sentinel Hub 使用整景导出。几何覆盖率不代表无云。";
       renderPlanFolder();if(!$("downloadDialog").open)$("downloadDialog").showModal();return;
     }
     if(p.kind==="monthly-scenes"&&isZip()){
@@ -806,7 +806,7 @@ function showDownloadPlan() {
       [["影像数量",`${p.scene_count} 景`],["输出网格",`${p.width.toLocaleString()} × ${p.height.toLocaleString()} 像元`],["像元大小",`${p.resolution} 米`],["输出内容",p.options.label],["坐标系",`${p.crs_label} · EPSG:${p.epsg}`],["预计文件体积",`${sizeLabel(p.bytes_per_scene*p.scene_count)}（未压缩）`],
        [native?"官方原件缓存":pub?"需读取的公开源":"预计请求数量",native?`${p.source_objects} 个原件 · 约 ${sizeLabel(p.native_source_bytes)}${p.native_size_unknown?"，部分体积下载时确定":""}`:pub?`${p.source_objects} 个源文件`:`最多 ${p.requests} 次 · 每景 ${p.tiles_per_scene} 区块`],["处理额度",pub||native?"无需 Sentinel Hub 额度":`约 ${p.estimated_pu} PU`]];
     if(isZip())items.push(...zipPlanItems(p.options));
-    items.push(["下载队列",isZip()?"按所选并发下载；每个产品单独校验，已完成 ZIP 保留":"按产品依次处理 · 完整性校验后继续"],["保存格式","保留来源原始文件；区域分析输出 GeoTIFF 及配套记录"]);
+    items.push(["下载队列",isZip()?"按所选并发下载；每个产品单独校验，已完成 ZIP 保留":isProcess()?"先收齐并校验所需源区块，再本地组装影像":"按产品依次处理 · 完整性校验后继续"],["保存格式","保留来源原始文件；区域分析输出 GeoTIFF 及配套记录"]);
     const rows=items.map(([name,value])=>`<div class="plan-item"><span>${escapeHtml(name)}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
     const mosaicRows=p.kind==="mosaic"?[["拼接产品",`${p.source_count} 个区块 / 1 份区域输出`],["选中采集日期（UTC）",p.dates.join(" / ")],["产品边界覆盖",`${p.coverage.coverage_percent.toFixed(2)}% · 未覆盖 ${p.coverage.uncovered_percent.toFixed(2)}%`],["交叠优先级",p.coverage.priority_label]].map(([name,value])=>`<div class="plan-item"><span>${escapeHtml(name)}</span><strong>${escapeHtml(value)}</strong></div>`).join(""):"";
     const files=raw||gedi? p.targets.map(t=>t.name).slice(0,6).join(" / ")+(p.targets.length>6?`（另 ${p.targets.length-6} 项）`:"") :p.options.output_bands.join(" / ");
@@ -823,7 +823,7 @@ function showDownloadPlan() {
       isRtc()?"导出线性 γ⁰（不转 dB）。各极化保留自己的 NoData；仅读取所需字节区间，校验每段后再裁剪。":
       p.options.mode==="research"?"保存分析影像、未掩膜 10 波段备份、SCL 和像元来源图及来源表。全云时仍保留备份；各文件必须网格一致并通过完整性校验才完成。20 米源波段的细节不会因输出 10 米而增加。完整角度与大气辅助层请使用 SAFE 整包。":
       "区域外及无效像元以 NoData 或透明显示。全空影像不保存；已有文件通过本地 SHA‑256 校验才跳过。";
-    $("planNote").textContent+=" 下载按产品排队，未完成的任务可重试或关闭软件后继续；已校验原件和裁剪区块可复用。请预留影像和下载缓存空间。";
+    $("planNote").textContent+=isProcess()?" 先下载并校验全部所需源区块，再关闭网络连接，只读取缓存合成或组装时间序列。云和缺测补齐按需取块，已有效的重叠区域不重复传输。未完成的任务可继续；请预留影像和下载缓存空间。":" 下载按产品排队，未完成的任务可重试或关闭软件后继续；已校验原件和裁剪区块可复用。请预留影像和下载缓存空间。";
     renderPlanFolder();$("downloadDialog").showModal();
   }catch(error){toast(error.message,true);}
 }

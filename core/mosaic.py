@@ -148,6 +148,9 @@ def build_mosaic_plan(geometry, scenes, options, *, tile_size=None, cancel=None,
         plan.update(requires=["cdse-s3"], native_source_bytes=native_bytes,
                     native_size_unknown=any(not target.get("bytes") for item in identities for target in item["assets"]),
                     native_source_note="先下载并校验完整原始波段和 XML；原件缓存可复用，不代表完整 SAFE。")
+    elif not public:
+        plan.update(download_scope="selected-source-blocks", execution_order=["download_sources", "process_local"],
+                    source_download_bytes=pixels * (len(options["bands"]) * 4 + 1))
     return plan, tiles, projected
 
 
@@ -181,16 +184,113 @@ def _analysis(raw, scl, options):
     return values, valid
 
 
+def _tile_centres(tile, plan, inverse, geometry):
+    shape = (tile.height, tile.width)
+    x = np.broadcast_to((tile.bounds[0] + (np.arange(tile.width) + .5) * plan["resolution"])[None], shape)
+    y = np.broadcast_to((tile.bounds[3] - (np.arange(tile.height) + .5) * plan["resolution"])[:, None], shape)
+    longitude, latitude = inverse.transform(x, y)
+    return longitude, latitude, contains_xy(geometry, longitude, latitude)
+
+
+def _source_requests(tile, rows, regions, geographic_regions, identities, longitude, latitude, inside,
+                     primary, raw, scl, options):
+    for index, (scene, region, geographic_region, identity) in enumerate(
+            zip(rows, regions, geographic_regions, identities, strict=True), 1):
+        if not tile.intersects or region.is_empty or not region.intersects(box(*tile.bounds)):
+            continue
+        covered = inside & contains_xy(geographic_region, longitude, latitude)
+        primary[covered & (primary == 0)] = index
+        needed = covered & (~_valid(raw, scl, options) if options.get("fill_gaps", True) else primary == index)
+        cropped = _crop(tile, needed, options["resolution"])
+        if cropped is not None:
+            request_tile, slices = cropped
+            yield index, scene, identity, request_tile, slices, needed[slices]
+
+
+def _request_key(scene, tile, keep):
+    return [scene["key"], tile.row, tile.col, tile.height, tile.width, hashlib.sha256(keep.tobytes()).hexdigest()]
+
+
+def _take_request(raw, scl, values, quality, slices, keep, options):
+    blocks, _ = make_block(values, quality, np.any(np.isfinite(values) & (values != NODATA), axis=0).astype(np.uint16),
+                           keep, _raw_options(options))
+    values, quality = blocks["unmasked"], blocks["scl"][0]
+    old, old_scl = raw[:, slices[0], slices[1]], scl[slices]
+    present, old_present = values != NODATA, old != NODATA
+    good, old_good = _valid(values, quality, options), _valid(old, old_scl, options)
+    take = keep & present.any(axis=0) & (~old_present.any(axis=0) | (good & ~old_good) |
+                                       (present.all(axis=0) & ~old_present.all(axis=0)))
+    old[:, take], old_scl[take] = values[:, take], quality[take]
+    return values, quality, take
+
+
+def _source_matches(metadata, identity):
+    methods = set()
+    for item in metadata.get("sources", []):
+        if item.get("catalogue_id") != identity["id"] or item.get("match") not in ("safe_id", "mgrs_and_utc"):
+            raise UserError("拼接服务返回了未选择的产品来源，未发布影像。")
+        methods.add(item["match"])
+    return methods
+
+
+def _download_process_blocks(geometry, rows, regions, geographic_regions, identities, tiles, plan, options,
+                             inverse, reader, request_cache, blocks_cache, cancel, report):
+    """Collect exact source blocks before opening any mosaic output.
+
+    A transient tile-sized quality probe determines which fallback pixels need
+    another request. It avoids downloading clear overlap again and is discarded;
+    source blocks are the only rasters persisted during this phase.
+    """
+    downloaded, reused, ready_tiles = 0, 0, 0
+    for number, tile in enumerate(tiles, 1):
+        check_cancel(cancel)
+        block_key = [tile.row, tile.col, tile.height, tile.width]
+        if blocks_cache.load(block_key, (tile.height, tile.width), cancel):
+            ready_tiles += 1
+            report(f"已有已校验本地区块 {number}/{len(tiles)}", .7 * number / len(tiles))
+            continue
+        longitude, latitude, inside = _tile_centres(tile, plan, inverse, geometry)
+        raw = np.full((len(options["bands"]), tile.height, tile.width), NODATA, dtype=np.float32)
+        scl = np.full((tile.height, tile.width), SCL_NODATA, dtype=np.uint8)
+        primary = np.zeros((tile.height, tile.width), dtype=np.uint16)
+        for index, scene, identity, request_tile, slices, keep in _source_requests(
+                tile, rows, regions, geographic_regions, identities, longitude, latitude, inside, primary, raw, scl, options):
+            check_cancel(cancel)
+            key = _request_key(scene, request_tile, keep)
+            saved = request_cache.load(key, (request_tile.height, request_tile.width), cancel)
+            report(f"下载源区块 {number}/{len(tiles)} · {scene['tiles'][0]} · {scene['date']} · 优先级 {index}",
+                   .7 * (number - 1) / len(tiles))
+            if saved:
+                arrays, detail = saved
+                values, quality, metadata = arrays["unmasked"], arrays["scl"][0], detail["metadata"]
+                reused += 1
+            else:
+                values, quality, metadata = reader.read(scene, request_tile, keep)
+                downloaded += 1
+            values, quality, take = _take_request(raw, scl, values, quality, slices, keep, options)
+            methods = _source_matches(metadata, identity)
+            if take.any() and not methods:
+                raise UserError("拼接像元没有可核对的产品来源，未发布影像。")
+            if not saved:
+                request_cache.save(key, {"unmasked": values, "scl": quality[None]}, {"metadata": metadata}, cancel)
+        report(f"源区块已收齐 {number}/{len(tiles)}", .7 * number / len(tiles))
+    check_cancel(cancel)
+    return {"downloaded_requests": downloaded, "reused_requests": reused, "ready_tiles": ready_tiles}
+
+
 class _ProcessReader:
     def __init__(self, http, auth, plan, options, folder, cancel, report):
         self.http, self.auth, self.plan, self.options = http, auth, plan, _raw_options(options)
         self.cancel, self.report = cancel, report
         self.path = folder / (".mosaic-request-" + uuid4().hex + ".tif")
+        self.offline = False
 
     def read(self, scene, tile, inside):
         from .download import _parts
         from .process_request import fetch_tile, process_payload
 
+        if self.offline:
+            raise UserError("已下载的源区块缺失或校验失败，本地拼接已停止；请继续任务重新校验下载。")
         products = expected_products(scene)
         try:
             meta = fetch_tile(self.http, self.auth, process_payload(tile, self.plan, scene, self.options, products=products),
@@ -384,6 +484,7 @@ def download_mosaic(geometry, scenes, options, output_dir, *, auth=None, cancel=
         raise UserError("请选择完整的输出文件夹路径。")
     public = options.get("profile") == PUBLIC
     native = options.get("profile") == NATIVE
+    process_download_first = reader is None and not public and not native
     if reader is None and not public and (auth is None or not auth.connected):
         raise UserError("请先连接 CDSE S3 密钥。" if native else "请先连接 Sentinel Hub OAuth 客户端凭据。")
     plan, tiles, projected = planned or build_mosaic_plan(geometry, scenes, options)
@@ -416,13 +517,27 @@ def download_mosaic(geometry, scenes, options, output_dir, *, auth=None, cancel=
     manifest = {"software": f"星图下载器 {VERSION}", "source": "CDSE S3 / exact native Sentinel-2 L2A objects" if native else "Element 84 Earth Search / Sentinel-2 C1 L2A" if public else "CDSE Sentinel Hub Process API / Sentinel-2 L2A",
                 "created_at": dt.datetime.now(dt.timezone.utc).isoformat(), "plan": plan, "aoi": mapping(geometry),
                 "status": "running", "items": [record], "source_note": plan["source_note"]}
+    phases = [{"id": "download_sources", "title": "下载所需源区块", "status": "pending"},
+              {"id": "process_local", "title": "本地拼接与校验", "status": "pending"}] if process_download_first else []
+    if phases:
+        manifest["phases"] = phases
     files, http = [], None
-    completed_tiles = 0
+    completed_tiles, download_fraction = 0, 0.
 
     def report(message, fraction=None, **extra):
+        nonlocal download_fraction
+        stage = next((phase for phase in phases if phase["status"] == "running"), None)
+        if stage and stage["id"] == "download_sources":
+            if fraction is not None:
+                download_fraction = fraction
+            fraction = download_fraction
+        elif fraction is None:
+            fraction = (.7 if phases else 0) + (.2 if phases else .9) * completed_tiles / max(1, len(tiles))
         if progress:
-            progress(message, .9 * completed_tiles / max(1, len(tiles)) if fraction is None else fraction,
-                     {"folder": str(folder), "total_scenes": 1, "completed_scenes": 0, **extra})
+            progress(message, fraction,
+                     {"folder": str(folder), "total_scenes": 1, "completed_scenes": 0,
+                      **({"workflow_stage": stage["id"], "workflow_stage_title": stage["title"],
+                          "transfer_phase": "download" if stage["id"] == "download_sources" else "local"} if stage else {}), **extra})
 
     try:
         if has_bundle_files(target):
@@ -439,10 +554,14 @@ def download_mosaic(geometry, scenes, options, output_dir, *, auth=None, cancel=
             used_dates = sorted({item["acquisition_utc"][:10] for item in table["sources"] if item.get("used_pixels", 0)})
             files.append({"path": str(target), "scene": "mosaic", "status": "skipped", "bundle": bundle.result_paths()})
             manifest["status"] = "completed"
-            return {"folder": str(folder), "files": files, "manifest": str(manifest_path), "plan": plan, "empty_scenes": [], "used_dates": used_dates}
+            for phase in phases:
+                phase.update(status="skipped", completed_at=dt.datetime.now(dt.timezone.utc).isoformat())
+            return {"folder": str(folder), "files": files, "manifest": str(manifest_path), "plan": plan, "empty_scenes": [], "used_dates": used_dates, "phases": phases}
         max_pixels = max(tile.width * tile.height for tile in tiles)
         required = plan["bytes_per_scene"] * 3.2 + max_pixels * (len(options["bands"]) * 16 + 48) + 16 * 1024**2
         required += plan.get("native_source_bytes", 0) * 1.1
+        if process_download_first:
+            required += plan.get("source_download_bytes", plan["max_requests"] * max_pixels * (len(options["bands"]) * 4 + 1)) * 1.1
         if shutil.disk_usage(folder).free < required:
             raise UserError(f"拼接输出及临时空间预计至少需要 {required / 1024**2:.0f} MB；请换一个输出文件夹或分区下载。")
         _save_json(folder / "研究区.geojson", {"type": "Feature", "properties": {}, "geometry": mapping(geometry)})
@@ -457,6 +576,22 @@ def download_mosaic(geometry, scenes, options, output_dir, *, auth=None, cancel=
             else:
                 http = HttpClient()
                 reader = _PublicReader(http, plan, options, cancel, cache_root / "ranges", report) if public else _ProcessReader(http, auth, plan, options, folder, cancel, report)
+        if process_download_first:
+            phases[0].update(status="running", started_at=dt.datetime.now(dt.timezone.utc).isoformat())
+            _save_json(manifest_path, manifest)
+            downloaded = _download_process_blocks(geometry, rows, regions, geographic_regions, identities, tiles, plan,
+                                                  options, inverse, reader, request_cache, blocks_cache, cancel, report)
+            reader.offline = True
+            reader.close()
+            http.close()
+            http = None
+            phases[0].update(status="completed", completed_at=dt.datetime.now(dt.timezone.utc).isoformat(), **downloaded)
+            record.update(downloaded_requests=downloaded["downloaded_requests"], reused_source_blocks=downloaded["reused_requests"])
+            # Validation reads in the transfer phase are not offline block reuse.
+            blocks_cache.reused = 0
+            phases[1].update(status="running", started_at=dt.datetime.now(dt.timezone.utc).isoformat())
+            _save_json(manifest_path, manifest)
+            report("源区块已全部下载并校验，开始只读本地缓存拼接", .7)
         used, valid_by_source = np.zeros(len(rows) + 1, dtype=np.int64), np.zeros(len(rows) + 1, dtype=np.int64)
         matches = {item["id"]: set() for item in identities}
         fallback_pixels, inside_pixels = 0, 0
@@ -500,29 +635,17 @@ def download_mosaic(geometry, scenes, options, output_dir, *, auth=None, cancel=
                     report(f"复用已校验拼接区块 {completed_tiles}/{len(tiles)}")
                     continue
                 start_blocks = len(record["blocks"])
-                x = np.broadcast_to((tile.bounds[0] + (np.arange(tile.width) + .5) * plan["resolution"])[None], (tile.height, tile.width))
-                y = np.broadcast_to((tile.bounds[3] - (np.arange(tile.height) + .5) * plan["resolution"])[:, None], (tile.height, tile.width))
-                longitude, latitude = inverse.transform(x, y)
-                inside = contains_xy(geometry, longitude, latitude)
+                longitude, latitude, inside = _tile_centres(tile, plan, inverse, geometry)
                 inside_pixels += int(inside.sum())
                 raw = np.full((len(options["bands"]), tile.height, tile.width), NODATA, dtype=np.float32)
                 scl = np.full((tile.height, tile.width), SCL_NODATA, dtype=np.uint8)
                 source = np.zeros((tile.height, tile.width), dtype=np.uint16)
                 primary = np.zeros_like(source)
-                for index, (scene, region, geographic_region, identity_row) in enumerate(zip(rows, regions, geographic_regions, identities, strict=True), 1):
-                    if not tile.intersects or region.is_empty or not region.intersects(box(*tile.bounds)):
-                        continue
-                    covered = inside & contains_xy(geographic_region, longitude, latitude)
-                    primary[covered & (primary == 0)] = index
-                    needed = covered & (~_valid(raw, scl, options) if options.get("fill_gaps", True) else primary == index)
-                    cropped = _crop(tile, needed, plan["resolution"])
-                    if cropped is None:
-                        continue
-                    request_tile, slices = cropped
-                    keep = needed[slices]
+                for index, scene, identity_row, request_tile, slices, keep in _source_requests(
+                        tile, rows, regions, geographic_regions, identities, longitude, latitude, inside, primary, raw, scl, options):
+                    check_cancel(cancel)
                     report(f"拼接区块 {completed_tiles + 1}/{len(tiles)} · {scene['tiles'][0]} · {scene['date']} · 优先级 {index}")
-                    request_key = [scene["key"], request_tile.row, request_tile.col, request_tile.height, request_tile.width,
-                                   hashlib.sha256(keep.tobytes()).hexdigest()]
+                    request_key = _request_key(scene, request_tile, keep)
                     saved_request = request_cache.load(request_key, (request_tile.height, request_tile.width), cancel)
                     if saved_request:
                         arrays, detail = saved_request
@@ -530,22 +653,9 @@ def download_mosaic(geometry, scenes, options, output_dir, *, auth=None, cancel=
                         restore_evidence(detail)
                     else:
                         values, quality, metadata = reader.read(scene, request_tile, keep)
-                    # Readers must return source-valid, finite raw values on the exact requested grid.
-                    blocks, _ = make_block(values, quality, np.any(np.isfinite(values) & (values != NODATA), axis=0).astype(np.uint16), keep, _raw_options(options))
-                    values, quality = blocks["unmasked"], blocks["scl"][0]
-                    old = raw[:, slices[0], slices[1]]
-                    old_scl = scl[slices]
-                    present, old_present = values != NODATA, old != NODATA
-                    good, old_good = _valid(values, quality, options), _valid(old, old_scl, options)
-                    take = keep & present.any(axis=0) & (~old_present.any(axis=0) | (good & ~old_good) |
-                                                               (present.all(axis=0) & ~old_present.all(axis=0)))
-                    old[:, take] = values[:, take]
-                    old_scl[take] = quality[take]
+                    values, quality, take = _take_request(raw, scl, values, quality, slices, keep, options)
                     source[slices][take] = index
-                    for item in metadata.get("sources", []):
-                        if item.get("catalogue_id") != identity_row["id"] or item.get("match") not in ("safe_id", "mgrs_and_utc"):
-                            raise UserError("拼接服务返回了未选择的产品来源，未发布影像。")
-                        matches[identity_row["id"]].add(item["match"])
+                    matches[identity_row["id"]].update(_source_matches(metadata, identity_row))
                     if take.any() and not matches[identity_row["id"]]:
                         raise UserError("拼接像元没有可核对的产品来源，未发布影像。")
                     if not saved_request:
@@ -594,13 +704,16 @@ def download_mosaic(geometry, scenes, options, output_dir, *, auth=None, cancel=
         record.update(inside_pixels=inside_pixels, valid_pixels=bundle.counts["analysis"],
                       source_pixels=int(used[1:].sum()), fallback_pixels=fallback_pixels,
                       uncovered_or_no_spectral_pixels=inside_pixels - int(used[1:].sum()),
-                      actual_requests=len(record["blocks"]), reused_blocks=blocks_cache.reused, reused_source_blocks=request_cache.reused)
+                      actual_requests=len(record["blocks"]), reused_blocks=blocks_cache.reused,
+                      reused_source_blocks=record.get("reused_source_blocks", request_cache.reused))
         used_dates = sorted({item["utc"][:10] for index, item in enumerate(identities, 1) if used[index]})
         record["used_dates"] = used_dates
         if not bundle.counts["analysis"] and (not is_research(options) or not bundle.counts["unmasked"]):
             record.update(status="empty", note="所选影像在研究区没有有效输出像元；没有发布空白影像。")
             manifest["status"] = "empty"
-            return {"folder": str(folder), "files": [], "manifest": str(manifest_path), "plan": plan, "empty_scenes": ["mosaic"]}
+            if phases:
+                phases[1].update(status="empty", completed_at=dt.datetime.now(dt.timezone.utc).isoformat())
+            return {"folder": str(folder), "files": [], "manifest": str(manifest_path), "plan": plan, "empty_scenes": ["mosaic"], "phases": phases}
         if not _existing_matches(bundle.partials["analysis"], plan, grid, identity):
             raise UserError("最终拼接影像的网格、像元计数或来源标识不一致，未发布。")
         provenance = {"sources": [{"index": index, "catalogue_id": item["id"], "mgrs_tile": item["tile"],
@@ -622,8 +735,10 @@ def download_mosaic(geometry, scenes, options, output_dir, *, auth=None, cancel=
             shutil.rmtree(cache_root)
         files.append({"path": str(target), "scene": "mosaic", "status": "completed", "bundle": bundle.result_paths()})
         manifest["status"] = "completed"
+        if phases:
+            phases[1].update(status="completed", completed_at=dt.datetime.now(dt.timezone.utc).isoformat())
         report(f"拼接完成 · 实际使用 {len(used_dates)} 个日期 · 1 份区域输出", 1.0, completed_scenes=1)
-        return {"folder": str(folder), "files": files, "manifest": str(manifest_path), "plan": plan, "empty_scenes": [], "used_dates": used_dates}
+        return {"folder": str(folder), "files": files, "manifest": str(manifest_path), "plan": plan, "empty_scenes": [], "used_dates": used_dates, "phases": phases}
     except Cancelled as error:
         record["status"], manifest["status"] = "cancelled", "cancelled"
         keep_download_result(error, files, folder, manifest_path, plan)
@@ -635,6 +750,11 @@ def download_mosaic(geometry, scenes, options, output_dir, *, auth=None, cancel=
         raise
     finally:
         try:
+            for phase in phases:
+                if phase["status"] == "running":
+                    phase.update(status=manifest["status"], stopped_at=dt.datetime.now(dt.timezone.utc).isoformat())
+                elif phase["status"] == "pending":
+                    phase["status"] = "not_started"
             if reader is not None:
                 reader.close()
                 if hasattr(reader, "transport"):
@@ -644,7 +764,7 @@ def download_mosaic(geometry, scenes, options, output_dir, *, auth=None, cancel=
                 if hasattr(reader, "evidence"):
                     record["native_sources"] = reader.evidence
             record["reused_blocks"] = blocks_cache.reused
-            record["reused_source_blocks"] = request_cache.reused
+            record["reused_source_blocks"] = record.get("reused_source_blocks", request_cache.reused)
             bundle.cleanup()
             _save_json(manifest_path, manifest)
         finally:

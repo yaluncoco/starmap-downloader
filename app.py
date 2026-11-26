@@ -68,6 +68,8 @@ class NativeDialogs:
 class AppServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
+    # Edge opens resource, map and bootstrap connections together at startup.
+    request_queue_size = 64
 
     def __init__(self, address, service, dialogs=None):
         self.service = service

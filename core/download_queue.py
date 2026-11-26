@@ -4,10 +4,30 @@ from __future__ import annotations
 import threading
 import time
 from collections import deque
+from contextlib import contextmanager
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
 from .errors import Cancelled
 from .http import check_cancel
+
+
+class DownloadSlots:
+    """Share a product limit across month queues without multiplying concurrency."""
+
+    def __init__(self, workers):
+        self.workers = workers
+        self._available = threading.BoundedSemaphore(workers)
+
+    @contextmanager
+    def acquire(self, cancel=None):
+        check_cancel(cancel)
+        while not self._available.acquire(timeout=.1):
+            check_cancel(cancel)
+        try:
+            check_cancel(cancel)
+            yield
+        finally:
+            self._available.release()
 
 
 class TransferSpeed:
